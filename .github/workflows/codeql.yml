@@ -96,7 +96,7 @@ jobs:
           category: /language:java-kotlin
 
   gate:
-    name: gate
+    name: security-gate
     if: always()
     needs:
       - actions
