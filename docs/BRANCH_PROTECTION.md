@@ -12,11 +12,11 @@ Target `refs/heads/main` with an active branch ruleset:
 - require review from CODEOWNERS when a matching owner exists;
 - require all conversations to be resolved;
 - require the branch to be up to date before merging;
-- require `Policy / pull-request-policy`, `CI / gate`, `Security / gate`, and `Dependency Review / dependency-review` after they have reported at least once;
+- require the unique `pull-request-policy`, `ci-gate`, `security-gate`, and `dependency-review` checks after they have reported at least once;
 - block force pushes and deletion;
 - do not allow routine bypasses, including for repository administrators.
 
-Do not require optional language jobs individually. The aggregate `CI / gate` remains stable while Rust and Android subtrees are introduced.
+Do not require optional language jobs individually. The aggregate `ci-gate` and `security-gate` checks remain stable while Rust, Android, and other language subtrees are introduced.
 
 ## Merge and repository settings
 

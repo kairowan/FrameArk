@@ -90,7 +90,7 @@ jobs:
           ./gradlew --no-daemon --stacktrace lint test
 
   gate:
-    name: gate
+    name: ci-gate
     if: always()
     needs:
       - repository

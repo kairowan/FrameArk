@@ -68,7 +68,7 @@ Protect `main` with a GitHub ruleset:
 - require the branch to be up to date before merge;
 - enable dependency graph, Dependabot alerts/updates, secret scanning, push protection, and code scanning when available.
 
-Do not make optional or environment-dependent matrix jobs individually required. Require stable aggregate gate jobs so a missing Android or Rust subtree does not permanently block bootstrap pull requests.
+Do not make optional or environment-dependent matrix jobs individually required. Require the uniquely named `ci-gate` and `security-gate` aggregate jobs so a missing Android or Rust subtree does not permanently block bootstrap pull requests.
 
 ## CI expectations
 
