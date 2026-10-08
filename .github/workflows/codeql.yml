@@ -87,8 +87,10 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: java-kotlin
-          build-mode: none
           queries: security-extended
+      - name: Autobuild Kotlin and Java
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/autobuild@v4
       - name: Analyze Kotlin and Java
         if: steps.detect.outputs.present == 'true'
         uses: github/codeql-action/analyze@v4
