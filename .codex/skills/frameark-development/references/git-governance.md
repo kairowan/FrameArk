@@ -58,7 +58,7 @@ Keep pull requests focused. Protocol changes include fixtures/specification upda
 
 ## Required repository controls
 
-Protect `main` with a GitHub ruleset:
+Protect `main` with a branch protection rule or equivalent GitHub ruleset:
 
 - require pull requests and at least one approval;
 - dismiss stale approvals and require CODEOWNERS review where applicable;
@@ -67,6 +67,8 @@ Protect `main` with a GitHub ruleset:
 - require the repository policy and CI gate checks;
 - require the branch to be up to date before merge;
 - enable dependency graph, Dependabot alerts/updates, secret scanning, push protection, and code scanning when available.
+
+For a single-maintainer bootstrap, administrator enforcement may remain disabled only to avoid an impossible self-approval requirement. Treat that as an emergency escape hatch, never as permission for routine direct pushes, and enable administrator enforcement when a second trusted reviewer is available.
 
 Do not make optional or environment-dependent matrix jobs individually required. Require the uniquely named `ci-gate` and `security-gate` aggregate jobs so a missing Android or Rust subtree does not permanently block bootstrap pull requests.
 
