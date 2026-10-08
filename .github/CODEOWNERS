@@ -1,0 +1,13 @@
+# Default review owner. Add component maintainers as the project grows.
+* @kairowan
+
+# Security, automation, protocol specifications, and public interfaces always
+# require maintainer review.
+/.github/ @kairowan
+/SECURITY.md @kairowan
+/LICENSE* @kairowan
+/specs/ @kairowan
+/crates/frameark-api/ @kairowan
+/crates/frameark-ffi/ @kairowan
+/.codex/skills/ @kairowan
+

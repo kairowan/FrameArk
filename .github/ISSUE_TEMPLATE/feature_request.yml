@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose a focused FrameArk product or developer capability
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or user outcome
+      description: Describe the problem without prescribing an implementation first.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed capability
+      description: Explain the smallest useful outcome and expected user flow.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - FANP or Rust core
+        - AirPlay or RAOP
+        - DLNA or UPnP
+        - Cast compatibility
+        - Miracast or platform integration
+        - Android Receiver or Sender
+        - Desktop Receiver or Sender
+        - Web Sender or gateway
+        - SDK, CLI, diagnostics, or tooling
+        - CI, release, or documentation
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and boundaries
+      description: Include platforms, hardware, permissions, latency, privacy, licensing, DRM, certification, or compatibility constraints.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reviewed PLAN.md and searched existing issues and pull requests.
+          required: true
+        - label: This request does not rely on bypassing DRM, HDCP, certification, or platform security.
+          required: true
+
