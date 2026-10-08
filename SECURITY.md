@@ -1,0 +1,42 @@
+# Security policy
+
+FrameArk processes untrusted network traffic and media. Please report vulnerabilities privately and do not open a public issue containing exploit details, credentials, private packet captures, or user media.
+
+## Reporting a vulnerability
+
+Use GitHub's private vulnerability reporting or a private draft Security Advisory in the `kairowan/FrameArk` repository. Include, when safe:
+
+- affected commit, component, protocol, and platform;
+- prerequisites and realistic impact;
+- minimal reproduction steps or a sanitized fixture;
+- whether secrets, identity, remote input, file access, or memory safety are involved;
+- any suggested mitigation.
+
+If private vulnerability reporting is unavailable, open a public issue containing only a request for a private contact channel—do not include vulnerability details.
+
+The project aims to acknowledge complete reports within 72 hours and provide an initial triage within 14 days. These are targets rather than a service-level guarantee for a volunteer project.
+
+## Supported versions
+
+FrameArk is currently pre-alpha and has no supported release line. Security fixes will target the active development branch until the first published release. A supported-version table will be added before 1.0.
+
+## Security scope
+
+Relevant reports include:
+
+- unauthenticated or authorization-bypassing sessions;
+- pairing, trust, replay, downgrade, or identity failures;
+- parser crashes or unbounded CPU, memory, storage, queue, or recursion use;
+- unsafe media URL fetching or management API access;
+- sensitive logs, diagnostic bundles, packet captures, keys, or tokens;
+- remote input, clipboard, file-transfer, or FFI memory-safety defects;
+- build, release, dependency, or artifact supply-chain compromise.
+
+The absence of FairPlay, Widevine, HDCP, certified Cast behavior, or universal Miracast support is not a security vulnerability. FrameArk does not accept requests to bypass DRM or device certification.
+
+## Disclosure and fixes
+
+Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
+
+Sanitized regression fixtures may be retained after disclosure. Raw secrets, personal media, and identifying packet captures must not enter the repository.
+

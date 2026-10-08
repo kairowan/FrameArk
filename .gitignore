@@ -1,0 +1,46 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+*.jks
+*.keystore
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Python and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Logs, diagnostics, captures, and secrets
+*.log
+*.pcap
+*.pcapng
+*.trace
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Local reports and generated artifacts
+/artifacts/
+/reports/
+/coverage/
+
