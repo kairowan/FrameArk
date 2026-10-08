@@ -31,4 +31,3 @@ jobs:
             GPL-3.0-or-later
           retry-on-snapshot-warnings: true
           retry-on-snapshot-warnings-timeout: 300
-

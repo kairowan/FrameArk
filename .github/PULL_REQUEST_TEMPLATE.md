@@ -32,4 +32,3 @@
 - [ ] Diagnostics are useful and do not expose keys, tokens, personal media, or persistent identifiers.
 - [ ] New dependencies and copied/adapted material have compatible licenses and documented provenance.
 - [ ] I did not introduce claims of DRM bypass, certified Cast behavior, or universal Miracast support.
-

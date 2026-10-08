@@ -35,4 +35,3 @@ Release notes identify supported protocols, platforms, configuration migrations,
 ## Conduct and enforcement
 
 Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Security reports follow [SECURITY.md](SECURITY.md). Maintainers may restrict access when conduct, security, licensing, or repository-integrity requirements are repeatedly violated.
-

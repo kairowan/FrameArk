@@ -44,4 +44,3 @@ Grant write permissions only to jobs that publish a reviewed artifact, advisory,
 ## Audit schedule
 
 Review this configuration before every stable release and at least quarterly. Confirm that required check names still match workflow job names and that no broad bypass actor or write-token permission has been added.
-

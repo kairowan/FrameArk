@@ -107,4 +107,3 @@ jobs:
           test "$REPOSITORY_RESULT" = "success"
           test "$RUST_RESULT" = "success"
           test "$ANDROID_RESULT" = "success"
-

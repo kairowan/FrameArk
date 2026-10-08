@@ -57,4 +57,3 @@ Report:
 - documentation and compatibility changes;
 - push and pull-request status;
 - remaining risks or follow-up work.
-

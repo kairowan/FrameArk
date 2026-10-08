@@ -82,4 +82,3 @@ body:
       options:
         - label: I removed credentials, private media, tokens, private URLs, and persistent identifiers.
           required: true
-

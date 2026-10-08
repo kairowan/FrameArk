@@ -14,4 +14,3 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 - Pull-request dependency review and CodeQL workflow analysis.
 - Documented private vulnerability-reporting process and protected-branch policy.
-
