@@ -1,0 +1,5 @@
+interface:
+  display_name: "FrameArk Development"
+  short_description: "Develop FrameArk safely with protocol and Git governance"
+  brand_color: "#CE6B3C"
+  default_prompt: "Use $frameark-development to implement this FrameArk change on a protected feature branch with tests, documentation, and an atomic commit."
