@@ -1,0 +1,85 @@
+name: Protocol compatibility result
+description: Report a sanitized success or failure for a specific sender/receiver combination
+title: "compat: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility evidence must be reproducible and sanitized. Do not upload copyrighted media, credentials, private keys, pairing tokens, persistent identifiers, or raw captures containing private data.
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol
+      options:
+        - FrameArk Native Protocol
+        - DLNA or UPnP
+        - RAOP audio
+        - AirPlay media or HLS
+        - AirPlay screen mirroring
+        - Cast V2 compatibility
+        - Miracast or Wi-Fi Display
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: FrameArk build
+      description: Release version or full commit SHA.
+    validations:
+      required: true
+  - type: textarea
+    id: sender
+    attributes:
+      label: Sender
+      description: Device/application name and version, operating system, and relevant configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: receiver
+    attributes:
+      label: Receiver
+      description: Device model, OS, FrameArk product, hardware decoder, display, and audio path.
+    validations:
+      required: true
+  - type: textarea
+    id: network
+    attributes:
+      label: Network
+      description: Wi-Fi/Ethernet, IPv4/IPv6, router/AP type, isolation or mesh, and any impairment settings.
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Media and session
+      description: Codec, profile, resolution, frame rate, audio format, duration, controls tested, and reconnect/reconfiguration events.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Pass
+        - Pass with limitations
+        - Fail
+        - Intermittent
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence and limitations
+      description: Describe exact behavior and include redacted diagnostics or fixture references where safe.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed credentials, private media, tokens, private URLs, and persistent identifiers.
+          required: true
+
