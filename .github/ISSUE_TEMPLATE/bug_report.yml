@@ -84,4 +84,3 @@ body:
           required: true
         - label: I can help test a fix or provide additional sanitized diagnostics.
           required: false
-

@@ -61,4 +61,3 @@ Read only the checklist matching the current work. These are completion gates, n
 - Keep product naming, protocol maturity, links, commands, and branch policy consistent.
 - Run repository policy and local-link checks.
 - Commit using `docs(<scope>): <summary>`.
-

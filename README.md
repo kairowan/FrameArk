@@ -1,6 +1,6 @@
 # FrameArk（帧舟）
 
-> Every stream finds a screen.  
+> Every stream finds a screen.
 > 让每一道媒体流，都能抵达一块屏幕。
 
 FrameArk is a Rust-powered, cross-platform screen mirroring and media receiver. It is designed as a reusable receiver core and product ecosystem rather than a single Android application.
@@ -107,4 +107,3 @@ Third-party components, optional codec backends, protocol trademarks, and distri
 ## Trademark and compatibility notice
 
 FrameArk and 帧舟 are project names. AirPlay, Chromecast, Miracast, DLNA, Android, Apple, Google, and other names belong to their respective owners. Their use in this repository describes interoperability only and does not imply endorsement or certification.
-

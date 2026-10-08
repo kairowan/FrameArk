@@ -34,4 +34,3 @@ jobs:
             --base-sha "$BASE_SHA" \
             --head-ref "$HEAD_REF" \
             --pr-title "$PR_TITLE"
-

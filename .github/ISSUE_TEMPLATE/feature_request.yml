@@ -53,4 +53,3 @@ body:
           required: true
         - label: This request does not rely on bypassing DRM, HDCP, certification, or platform security.
           required: true
-

@@ -70,4 +70,3 @@ Use Stable, Beta, Experimental, Conditional, and Unsupported consistently in cod
 ## Decision records
 
 Create an ADR when a change affects protocol wire format, crate boundaries, public API/ABI, persistence, trust, security posture, compatibility promises, or platform ownership. Link the ADR from the implementing pull request and update `PLAN.md` if the product roadmap changes.
-

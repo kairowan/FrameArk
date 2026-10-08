@@ -84,4 +84,3 @@ Actions use least-privilege permissions and pinned major versions or immutable S
 ## External actions
 
 Commits are local project artifacts. Pushing, opening a pull request, editing a ruleset, merging, publishing packages/releases, or posting review comments changes GitHub state; perform those actions only when the current task authorizes them. Report the exact branch and commit hashes even when publication is pending.
-

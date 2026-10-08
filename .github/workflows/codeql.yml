@@ -113,4 +113,3 @@ jobs:
           test "$ACTIONS_RESULT" = "success"
           test "$RUST_RESULT" = "success"
           test "$KOTLIN_RESULT" = "success"
-

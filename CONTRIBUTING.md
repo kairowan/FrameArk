@@ -79,4 +79,3 @@ Code, identifiers, wire specifications, commit messages, and primary API documen
 ## License
 
 Unless explicitly stated otherwise, contributions are accepted under the repository's `Apache-2.0 OR MIT` terms without additional conditions. By submitting a contribution, you represent that you have the right to license it accordingly.
-
