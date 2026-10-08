@@ -29,6 +29,7 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          git diff --check "$BASE_SHA...HEAD"
           python scripts/check_repository.py \
             --repo . \
             --base-sha "$BASE_SHA" \
