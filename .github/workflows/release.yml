@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed or annotated semantic-version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  source-release:
+    name: source-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Validate tag and ancestry
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag is not semantic-version style: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git fetch origin main --tags
+          git rev-parse "$RELEASE_TAG^{commit}"
+          git merge-base --is-ancestor "$RELEASE_TAG^{commit}" origin/main
+      - name: Validate repository
+        run: python scripts/check_repository.py --repo .
+      - name: Set up Java for Android release checks
+        if: ${{ hashFiles('gradlew') != '' }}
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          verify-signature: true
+      - name: Test releaseable source trees
+        shell: bash
+        run: |
+          found=false
+          if [[ -f Cargo.toml ]]; then
+            found=true
+            rustup component add rustfmt clippy
+            cargo fmt --all -- --check
+            cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+            cargo test --workspace --all-features --locked
+            cargo build --workspace --release --locked
+          fi
+          if [[ -f gradlew ]]; then
+            found=true
+            chmod +x gradlew
+            ./gradlew --no-daemon --stacktrace lint test assembleRelease
+          fi
+          if [[ "$found" != "true" ]]; then
+            echo "No Rust or Android product manifest exists; refusing to publish a release." >&2
+            exit 1
+          fi
+      - name: Package source and checksums
+        shell: bash
+        run: |
+          mkdir -p dist
+          git archive \
+            --format=zip \
+            --prefix="FrameArk-$RELEASE_TAG/" \
+            --output="dist/FrameArk-$RELEASE_TAG-source.zip" \
+            "$RELEASE_TAG"
+          (cd dist && sha256sum *.zip > SHA256SUMS)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            dist/FrameArk-$RELEASE_TAG-source.zip \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "FrameArk $RELEASE_TAG"
+

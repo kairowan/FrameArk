@@ -1,0 +1,116 @@
+name: Security
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '23 18 * * 3'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actions:
+    name: actions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize CodeQL for workflows
+        uses: github/codeql-action/init@v4
+        with:
+          languages: actions
+          build-mode: none
+          queries: security-extended
+      - name: Analyze workflows
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:actions
+
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect Rust source
+        id: detect
+        shell: bash
+        run: |
+          if git ls-files '*.rs' | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Rust source not present yet; CodeQL Rust analysis is a no-op."
+          fi
+      - name: Initialize CodeQL for Rust
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+          build-mode: none
+          queries: security-extended
+      - name: Analyze Rust
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:rust
+
+  kotlin:
+    name: kotlin
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect Kotlin or Java source
+        id: detect
+        shell: bash
+        run: |
+          if git ls-files '*.kt' '*.kts' '*.java' | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Kotlin/Java source not present yet; CodeQL analysis is a no-op."
+          fi
+      - name: Initialize CodeQL for Kotlin and Java
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          build-mode: none
+          queries: security-extended
+      - name: Analyze Kotlin and Java
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:java-kotlin
+
+  gate:
+    name: gate
+    if: always()
+    needs:
+      - actions
+      - rust
+      - kotlin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all security jobs
+        env:
+          ACTIONS_RESULT: ${{ needs.actions.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          KOTLIN_RESULT: ${{ needs.kotlin.result }}
+        run: |
+          test "$ACTIONS_RESULT" = "success"
+          test "$RUST_RESULT" = "success"
+          test "$KOTLIN_RESULT" = "success"
+

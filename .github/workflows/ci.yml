@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository:
+    name: repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate repository content
+        run: python scripts/check_repository.py --repo .
+
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect Rust workspace
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f Cargo.toml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Rust workspace not present yet; check is intentionally a no-op."
+          fi
+      - name: Install Rust components
+        if: steps.detect.outputs.present == 'true'
+        run: rustup component add rustfmt clippy
+      - name: Check formatting
+        if: steps.detect.outputs.present == 'true'
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        if: steps.detect.outputs.present == 'true'
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run Rust tests
+        if: steps.detect.outputs.present == 'true'
+        run: cargo test --workspace --all-features --locked
+      - name: Build Rust documentation
+        if: steps.detect.outputs.present == 'true'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect Android build
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f gradlew ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Android build not present yet; check is intentionally a no-op."
+          fi
+      - name: Set up Java
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          verify-signature: true
+      - name: Run Android lint and unit tests
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace lint test
+
+  gate:
+    name: gate
+    if: always()
+    needs:
+      - repository
+      - rust
+      - android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all CI jobs
+        env:
+          REPOSITORY_RESULT: ${{ needs.repository.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+        run: |
+          test "$REPOSITORY_RESULT" = "success"
+          test "$RUST_RESULT" = "success"
+          test "$ANDROID_RESULT" = "success"
+

@@ -1,0 +1,34 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          license-check: true
+          deny-licenses: >-
+            AGPL-3.0-only,
+            AGPL-3.0-or-later,
+            GPL-3.0-only,
+            GPL-3.0-or-later
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 300
+
