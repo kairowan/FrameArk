@@ -9,6 +9,8 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Product and engineering plan.
 - FrameArk development Skill and branch guard.
 - Open-source governance, collaboration templates, and automated repository checks.
+- Rust workspace with `frameark-core` session contracts and `frameark-api` platform interfaces.
+- ADR 0001 freezing the M0 package, discovery, protocol, and ownership boundaries.
 
 ### Security
 

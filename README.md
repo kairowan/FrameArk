@@ -9,9 +9,9 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 
 ## Project status / 项目状态
 
-**Pre-alpha: architecture and repository bootstrap.** The repository does not yet contain a usable receiver or sender. Protocol support listed below describes the roadmap, not current compatibility.
+**Pre-alpha: M0 foundation in development.** The repository now contains the initial Rust contracts, but it does not yet contain a usable receiver or sender. Protocol support listed below describes the roadmap, not current compatibility.
 
-**预览前阶段：正在建立架构与工程基础。** 当前仓库尚未提供可用的接收端或发送端。下方协议表表示目标和边界，不代表当前已经实现。
+**预览前阶段：M0 工程基础开发中。** 当前仓库已经包含初始 Rust 契约，但尚未提供可用的接收端或发送端。下方协议表表示目标和边界，不代表当前已经实现。
 
 See [PLAN.md](PLAN.md) for the complete product definition, architecture, milestones, quality gates, and release criteria.
 
