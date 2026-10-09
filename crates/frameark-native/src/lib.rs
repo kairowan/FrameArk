@@ -2,6 +2,7 @@
 //!
 //! This crate negotiates configuration and drives platform-owned backends. It
 //! does not decode or carry media; the lab backend is a control-plane simulation.
+pub mod media_wire;
 mod offer;
 pub mod wire;
 
