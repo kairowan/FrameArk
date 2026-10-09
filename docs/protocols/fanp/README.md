@@ -74,6 +74,13 @@ letting a platform adapter create a parallel state machine.
 
 ## Compatibility and evolution
 
+Post-handshake protocol adapters reserve message types 16..127. Each reliable
+bidirectional stream carries exactly one request and one response followed by
+FIN. Frames with trailing bytes are rejected. Each control operation has a
+total deadline; cancellation, timeout, or a dropped response handle closes the
+connection. Terminal responses wait for QUIC acknowledgement before teardown.
+Pairing codes are redacted even when formatted with Rust `Debug`.
+
 This profile is **Experimental**. Future versions must use a new ALPN or a
 backward-compatible version negotiation rule and must preserve the maximum
 frame bound. A stable release also needs persistent identity, replay handling,

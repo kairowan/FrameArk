@@ -18,7 +18,10 @@ use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::time::timeout;
 
+mod control;
 mod negotiation;
+
+pub use control::{ControlMessage, PendingControl};
 
 pub use negotiation::{
     CapabilityOffer, FANP_CAPABILITY_VERSION, MAX_CAPABILITIES, NegotiatedCapabilities,
@@ -92,8 +95,14 @@ impl fmt::Display for TransportError {
 impl std::error::Error for TransportError {}
 
 /// A six-digit, process-local pairing code.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PairingCode(String);
+
+impl fmt::Debug for PairingCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PairingCode([REDACTED])")
+    }
+}
 
 impl PairingCode {
     /// Generates a cryptographically seeded six-digit code for display by a UI.
@@ -129,6 +138,12 @@ pub struct PairingSession {
     // A client endpoint must outlive its connection. Server endpoints are held
     // by PairingServer, so this is `Some` only for client-created sessions.
     _endpoint: Option<Endpoint>,
+}
+
+impl Drop for PairingSession {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 impl PairingSession {
@@ -289,7 +304,7 @@ impl PairingServer {
             // Let the client observe the finished rejection frame before the
             // server drops its connection handle. The delay is deliberately
             // short and bounded; rejected peers never become persistent state.
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            let _ = timeout(operation_timeout, send.stopped()).await;
             return Err(TransportError::PairingRejected);
         }
         write_frame_with_timeout(&mut send, PAIR_ACCEPTED, &[], operation_timeout).await?;
@@ -307,7 +322,7 @@ impl PairingServer {
             Ok(offer) => offer,
             Err(error) => {
                 reject_negotiation(&mut hello_send).await?;
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                let _ = timeout(operation_timeout, hello_send.stopped()).await;
                 return Err(TransportError::Negotiation(error));
             }
         };
@@ -315,7 +330,7 @@ impl PairingServer {
             Ok(capabilities) => capabilities,
             Err(error) => {
                 reject_negotiation(&mut hello_send).await?;
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                let _ = timeout(operation_timeout, hello_send.stopped()).await;
                 return Err(TransportError::Negotiation(error));
             }
         };
@@ -519,6 +534,16 @@ async fn read_frame(receive: &mut quinn::RecvStream) -> Result<Frame, TransportE
         .read_exact(&mut payload)
         .await
         .map_err(|_| TransportError::ConnectionClosed)?;
+    // One frame per stream: trailing bytes, duplicate frames, and absent FIN
+    // are never silently interpreted as a successful request.
+    if receive
+        .read(&mut [0_u8; 1])
+        .await
+        .map_err(|_| TransportError::ConnectionClosed)?
+        .is_some()
+    {
+        return Err(TransportError::InvalidFrame);
+    }
     Ok(Frame { kind, payload })
 }
 

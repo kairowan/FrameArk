@@ -6,6 +6,9 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 ### Added
 
+- Bounded authenticated control request/response streams with cancellation
+  cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
+
 - Experimental `frameark-transport` crate with bounded FANP v1 control frames,
   QUIC/TLS certificate pinning, process-local temporary pairing, and bounded
   capability negotiation mapped to the shared Session state machine.

@@ -19,6 +19,10 @@ included in a compatibility matrix.
 
 ## Explicit limits
 
+Control-stream tests additionally cover response delivery before close,
+deadlines, dropped request cleanup, trailing-byte rejection, and redacted PIN
+debug formatting. These run over real QUIC loopback, not a mocked transport.
+
 - No persistent trust or device identity is established.
 - No media, audio, input, clipboard, file-transfer, or management streams are
   implemented.
