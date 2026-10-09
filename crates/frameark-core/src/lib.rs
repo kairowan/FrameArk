@@ -11,6 +11,9 @@ mod ids;
 mod model;
 mod session;
 
+/// Version of the native ABI exposed to platform bindings.
+pub const CORE_ABI_VERSION: u32 = 1;
+
 pub use config::CoreConfig;
 pub use error::{ErrorKind, FrameArkError, Result};
 pub use event::{CoreEvent, DiagnosticEvent, EventLevel};
