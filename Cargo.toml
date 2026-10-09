@@ -4,6 +4,7 @@ members = [
     "crates/frameark-core",
     "crates/frameark-discovery",
     "crates/frameark-ffi",
+    "crates/frameark-native",
     "crates/frameark-transport",
 ]
 resolver = "3"

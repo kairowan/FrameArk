@@ -17,7 +17,7 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 | Protocol or capability | Current status | Evidence |
 |---|---|---|
 | FrameArk DNS-SD discovery (`_frameark._udp.local.`) | Experimental | `frameark-discovery` validation and event-mapping tests; multicast smoke coverage is host-dependent |
-| FrameArk Native Protocol QUIC/TLS pairing and capability negotiation | Experimental | `frameark-transport` loopback pairing, intersection, rejection, and core-session mapping tests; no platform matrix yet |
+| FrameArk Native Protocol control plane | Experimental | `frameark-transport` pairing/capability tests plus `frameark-native` fake-backend Offer/Start/Status/Stop lifecycle; no platform matrix yet |
 | DLNA/UPnP MediaRenderer | Planned | No executable implementation yet |
 | AirPlay/RAOP audio | Planned | No executable implementation yet |
 | AirPlay screen mirroring | Planned | No executable implementation yet |

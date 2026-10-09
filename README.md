@@ -64,7 +64,7 @@ Rust owns protocol and cross-platform state. Kotlin, Swift, desktop, and web lay
 
 The current M0 workspace includes the `frameark-discovery` mDNS/DNS-SD
 prototype and the experimental `frameark-transport` FANP QUIC/TLS pairing
-prototype. Discovery publishes and browses the reserved `_frameark._udp.local.`
+prototype and the `frameark-native` Experimental control profile. Discovery publishes and browses the reserved `_frameark._udp.local.`
 service type with bounded metadata and automatic address tracking. Transport
 pins an ephemeral certificate, exchanges a temporary six-digit pairing code,
 and negotiates the shared core capability set. Neither component grants

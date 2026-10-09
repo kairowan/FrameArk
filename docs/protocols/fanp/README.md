@@ -86,3 +86,19 @@ backward-compatible version negotiation rule and must preserve the maximum
 frame bound. A stable release also needs persistent identity, replay handling,
 capability negotiation, media stream definitions, and named sender/receiver
 compatibility tests.
+
+## Native control profile (Experimental)
+
+The `frameark-native` crate maps control message types 16 and 17 to a bounded
+request/response profile: `Offer`, `Start`, `Stop`, and `Status`. The current
+offer supports optional H.264 video and Opus/AAC audio, a 10..=2000 ms latency
+target, at most 3840×2160 at 60 fps, and audio up to 96 kHz/8 channels. A
+receiver must advertise explicit policy limits; there is no silent codec,
+resolution, or frame-rate fallback.
+
+The flow is `Negotiating → Offer → Preparing → Start → Streaming → Stop →
+Closed`. The response echoes a request ID and resulting shared state. A
+platform backend is prepared before `Start`, and its reset hook is called on
+stop, rejected preparation, timeout, cancellation, or receiver drop. The
+profile is control-plane only: it does not carry encoded samples or claim that
+an Android/desktop decoder is already wired.

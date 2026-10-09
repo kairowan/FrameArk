@@ -147,6 +147,19 @@ impl Drop for PairingSession {
 }
 
 impl PairingSession {
+    /// Whether QUIC has recorded terminal connection closure.
+    pub fn is_closed(&self) -> bool {
+        self.connection.close_reason().is_some()
+    }
+
+    /// Waits for peer shutdown while retaining endpoint ownership.
+    pub async fn wait_closed(&self, budget: Duration) -> Result<(), TransportError> {
+        timeout(budget, self.connection.closed())
+            .await
+            .map_err(|_| TransportError::Timeout)?;
+        Ok(())
+    }
+
     /// Returns the peer address selected by QUIC after the handshake.
     pub fn remote_address(&self) -> SocketAddr {
         self.connection.remote_address()
