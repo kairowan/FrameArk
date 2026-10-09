@@ -8,13 +8,14 @@ package dev.frameark.receiver
  */
 class FrameArkNative(
     private val libraryLoader: (String) -> Unit = System::loadLibrary,
-    private val versionProvider: () -> Int = { nativeVersion() },
+    versionProvider: (() -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
         const val EXPECTED_ABI_VERSION = 1
     }
 
+    private val bridgeVersionProvider: () -> Int = versionProvider ?: { nativeVersion() }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -34,7 +35,7 @@ class FrameArkNative(
         loadedAbiVersion?.let { return LoadResult.Loaded(it) }
         return try {
             libraryLoader(LIBRARY_NAME)
-            val actual = versionProvider()
+            val actual = bridgeVersionProvider()
             if (actual != EXPECTED_ABI_VERSION) {
                 LoadResult.Incompatible(EXPECTED_ABI_VERSION, actual)
             } else {
