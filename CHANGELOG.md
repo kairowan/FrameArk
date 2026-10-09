@@ -6,6 +6,8 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 ### Added
 
+- Experimental `frameark-media` crate with bounded encoded video/audio packets
+  and explicit FIFO backpressure semantics.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/

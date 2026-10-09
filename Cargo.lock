@@ -132,6 +132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "frameark-media"
+version = "0.1.0"
+dependencies = [
+ "frameark-core",
+]
+
+[[package]]
 name = "frameark-native"
 version = "0.1.0"
 dependencies = [
