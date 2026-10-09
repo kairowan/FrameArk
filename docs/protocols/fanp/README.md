@@ -1,0 +1,58 @@
+# FANP transport v1 (M0 experimental)
+
+FrameArk Native Protocol (FANP) is the project-owned control protocol. This
+document describes the first executable transport increment; it is not a
+stable public wire-compatibility promise yet.
+
+## Connection profile
+
+- Transport: QUIC over UDP, provided by `quinn`.
+- TLS: rustls TLS 1.3 with an ephemeral server certificate.
+- ALPN: `frameark/1`.
+- Scope: local network or test loopback only.
+- Authorization: one six-digit decimal pairing code, valid only for the
+  caller-owned process/session.
+
+The client must receive the server certificate through an in-scope channel
+and pin those exact DER bytes. mDNS metadata is discovery only and is not a
+certificate authority.
+
+## Control frame
+
+Every control stream starts with this 8-byte header:
+
+| Offset | Size | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 4 | Magic | ASCII `FANP` |
+| 4 | 1 | Version | `1` |
+| 5 | 1 | Message type | `1` request, `2` accepted, `3` rejected |
+| 6 | 2 | Payload length | Unsigned big-endian |
+
+Payloads are capped at 256 bytes. A peer that sends an invalid magic value,
+unsupported version, or oversized payload is rejected without attempting to
+interpret the remaining bytes.
+
+### Pair request (`type = 1`)
+
+The payload is exactly six ASCII decimal digits. The server compares it with
+the process-local pairing code using the Rust transport state. No code is
+written to logs or persistent storage.
+
+### Pair accepted (`type = 2`)
+
+The payload is empty. Receipt means that the pinned TLS connection is
+authorized for the caller's temporary session. Media negotiation and track
+streams are not part of M0.
+
+### Pair rejected (`type = 3`)
+
+The payload is empty. The client reports a pairing rejection separately from a
+QUIC/TLS failure, then closes the connection.
+
+## Compatibility and evolution
+
+This profile is **Experimental**. Future versions must use a new ALPN or a
+backward-compatible version negotiation rule and must preserve the maximum
+frame bound. A stable release also needs persistent identity, replay handling,
+capability negotiation, media stream definitions, and named sender/receiver
+compatibility tests.

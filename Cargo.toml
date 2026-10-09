@@ -4,6 +4,7 @@ members = [
     "crates/frameark-core",
     "crates/frameark-discovery",
     "crates/frameark-ffi",
+    "crates/frameark-transport",
 ]
 resolver = "3"
 
@@ -19,6 +20,11 @@ version = "0.1.0"
 frameark-core = { path = "crates/frameark-core" }
 mdns-sd = { version = "0.21.5", default-features = false }
 jni = "0.21.1"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rand = "0.9"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

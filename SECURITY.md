@@ -34,6 +34,13 @@ Relevant reports include:
 
 The absence of FairPlay, Widevine, HDCP, certified Cast behavior, or universal Miracast support is not a security vulnerability. FrameArk does not accept requests to bypass DRM or device certification.
 
+The current FANP transport is experimental. It uses QUIC/TLS with an
+ephemeral self-signed certificate pinned for the caller's session and a
+process-local six-digit pairing code. It does not create persistent device
+trust, protect a remembered identity, or expose an internet relay. Do not log,
+persist, or reuse pairing codes; report any certificate-verification,
+downgrade, replay, or code-disclosure issue privately.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
