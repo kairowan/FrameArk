@@ -49,6 +49,29 @@ streams are not part of M0.
 The payload is empty. The client reports a pairing rejection separately from a
 QUIC/TLS failure, then closes the connection.
 
+## Capability negotiation
+
+After `PairAccepted`, the client opens a second reliable control stream and
+sends `ClientHello` (`type = 4`). The server responds with `ServerHello`
+(`type = 5`) containing the selected intersection. A peer with no common
+capability receives `NegotiationRejected` (`type = 6`) and the session is
+closed.
+
+The ClientHello/ServerHello payload is bounded to 18 bytes:
+
+| Offset | Size | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 1 | Capability schema version | `1` |
+| 1 | 1 | Entry count | `0..=16` |
+| 2 | N | Capability IDs | One byte per entry, sorted and unique |
+
+The canonical IDs are owned by `frameark-core`: `1` video, `2` audio, `3`
+subtitles, and `4` remote control. Unknown IDs, duplicate entries, truncated
+payloads, and schema versions other than `1` are rejected. The selected
+intersection is exposed to the shared Rust session layer, which advances the
+common lifecycle through `Connecting → Authenticating → Negotiating` without
+letting a platform adapter create a parallel state machine.
+
 ## Compatibility and evolution
 
 This profile is **Experimental**. Future versions must use a new ALPN or a

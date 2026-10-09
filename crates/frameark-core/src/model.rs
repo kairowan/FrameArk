@@ -30,6 +30,22 @@ pub enum Capability {
     RemoteControl,
 }
 
+impl Capability {
+    /// Returns every capability currently understood by the shared core.
+    ///
+    /// Protocol adapters may advertise a subset of this list. Keeping the
+    /// canonical inventory here prevents each transport from inventing a
+    /// parallel capability model.
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::Video,
+            Self::Audio,
+            Self::Subtitles,
+            Self::RemoteControl,
+        ]
+    }
+}
+
 /// A discovered FrameArk device and its advertised capabilities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Device {

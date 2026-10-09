@@ -66,8 +66,9 @@ The current M0 workspace includes the `frameark-discovery` mDNS/DNS-SD
 prototype and the experimental `frameark-transport` FANP QUIC/TLS pairing
 prototype. Discovery publishes and browses the reserved `_frameark._udp.local.`
 service type with bounded metadata and automatic address tracking. Transport
-pins an ephemeral certificate and exchanges a temporary six-digit pairing code;
-neither component grants persistent trust or carries media yet.
+pins an ephemeral certificate, exchanges a temporary six-digit pairing code,
+and negotiates the shared core capability set. Neither component grants
+persistent trust or carries media yet.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current

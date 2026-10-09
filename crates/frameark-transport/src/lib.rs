@@ -10,12 +10,20 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use frameark_core::{Session, SessionState, SessionTransition};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
 use rand::Rng;
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::time::timeout;
+
+mod negotiation;
+
+pub use negotiation::{
+    CapabilityOffer, FANP_CAPABILITY_VERSION, MAX_CAPABILITIES, NegotiatedCapabilities,
+    NegotiationError,
+};
 
 /// ALPN identifier for the versioned FrameArk Native Protocol transport.
 pub const FANP_ALPN: &[u8] = b"frameark/1";
@@ -30,6 +38,9 @@ const MAX_SERVER_NAME_BYTES: usize = 253;
 const PAIR_REQUEST: u8 = 1;
 const PAIR_ACCEPTED: u8 = 2;
 const PAIR_REJECTED: u8 = 3;
+const CLIENT_HELLO: u8 = 4;
+const SERVER_HELLO: u8 = 5;
+const NEGOTIATION_REJECTED: u8 = 6;
 
 /// Errors returned by the bounded FANP transport and pairing handshake.
 #[derive(Debug, Eq, PartialEq)]
@@ -42,6 +53,10 @@ pub enum TransportError {
     UnsupportedVersion(u8),
     /// The peer rejected the temporary pairing code.
     PairingRejected,
+    /// The peer rejected or could not complete capability negotiation.
+    NegotiationRejected,
+    /// Local capability validation failed before or during negotiation.
+    Negotiation(NegotiationError),
     /// A QUIC stream or connection closed before the handshake completed.
     ConnectionClosed,
     /// The endpoint could not be created or configured.
@@ -63,6 +78,8 @@ impl fmt::Display for TransportError {
                 write!(f, "unsupported FANP protocol version {version}")
             }
             Self::PairingRejected => f.write_str("temporary pairing was rejected"),
+            Self::NegotiationRejected => f.write_str("FANP capability negotiation was rejected"),
+            Self::Negotiation(error) => write!(f, "FANP capability negotiation error: {error}"),
             Self::ConnectionClosed => f.write_str("FANP connection closed during pairing"),
             Self::Endpoint => f.write_str("FANP QUIC endpoint error"),
             Self::TlsConfiguration => f.write_str("FANP TLS configuration error"),
@@ -108,6 +125,7 @@ impl PairingCode {
 /// future connections.
 pub struct PairingSession {
     connection: Connection,
+    negotiated: NegotiatedCapabilities,
     // A client endpoint must outlive its connection. Server endpoints are held
     // by PairingServer, so this is `Some` only for client-created sessions.
     _endpoint: Option<Endpoint>,
@@ -129,6 +147,44 @@ impl PairingSession {
     pub const fn is_temporary(&self) -> bool {
         true
     }
+
+    /// Returns the capability intersection selected during the handshake.
+    pub fn negotiated_capabilities(&self) -> &NegotiatedCapabilities {
+        &self.negotiated
+    }
+
+    /// Advances a shared core session through transport, authentication, and
+    /// capability negotiation states.
+    ///
+    /// Protocol adapters call this after `PairingClient::connect` or
+    /// `PairingServer::accept_pairing`. The core remains the owner of the
+    /// lifecycle rules; this helper only applies the known FANP milestones.
+    pub fn advance_core_session(
+        &self,
+        session: &mut Session,
+    ) -> frameark_core::Result<Vec<SessionTransition>> {
+        let mut transitions = Vec::new();
+        loop {
+            let next = match session.state() {
+                SessionState::Idle => SessionState::Connecting,
+                SessionState::Connecting => SessionState::Authenticating,
+                SessionState::Authenticating => SessionState::Negotiating,
+                SessionState::Recovering => SessionState::Connecting,
+                SessionState::Negotiating => break,
+                _ => {
+                    return Err(frameark_core::FrameArkError::invalid_state(
+                        "fanp.session_sync",
+                        format!(
+                            "cannot apply a completed FANP handshake to {} session",
+                            session.state()
+                        ),
+                    ));
+                }
+            };
+            transitions.push(session.transition(next)?);
+        }
+        Ok(transitions)
+    }
 }
 
 /// A QUIC/TLS listener that accepts one-shot temporary pairings.
@@ -136,6 +192,7 @@ pub struct PairingServer {
     endpoint: Endpoint,
     pairing_code: PairingCode,
     certificate_der: Vec<u8>,
+    capabilities: CapabilityOffer,
 }
 
 impl PairingServer {
@@ -147,6 +204,21 @@ impl PairingServer {
         bind_addr: SocketAddr,
         server_name: impl Into<String>,
         pairing_code: PairingCode,
+    ) -> Result<Self, TransportError> {
+        Self::bind_with_capabilities(
+            bind_addr,
+            server_name,
+            pairing_code,
+            CapabilityOffer::default_capabilities(),
+        )
+    }
+
+    /// Binds a listener with an explicit capability offer.
+    pub fn bind_with_capabilities(
+        bind_addr: SocketAddr,
+        server_name: impl Into<String>,
+        pairing_code: PairingCode,
+        capabilities: CapabilityOffer,
     ) -> Result<Self, TransportError> {
         let server_name = server_name.into();
         if !valid_server_name(&server_name) {
@@ -172,6 +244,7 @@ impl PairingServer {
             endpoint,
             pairing_code,
             certificate_der,
+            capabilities,
         })
     }
 
@@ -204,7 +277,7 @@ impl PairingServer {
             .await
             .map_err(|_| TransportError::Timeout)?
             .map_err(|_| TransportError::ConnectionClosed)?;
-        let frame = read_frame(&mut receive).await?;
+        let frame = read_frame_with_timeout(&mut receive, operation_timeout).await?;
         if frame.kind != PAIR_REQUEST {
             reject(&mut send).await?;
             return Err(TransportError::InvalidFrame);
@@ -219,9 +292,43 @@ impl PairingServer {
             tokio::time::sleep(Duration::from_millis(25)).await;
             return Err(TransportError::PairingRejected);
         }
-        write_frame(&mut send, PAIR_ACCEPTED, &[]).await?;
+        write_frame_with_timeout(&mut send, PAIR_ACCEPTED, &[], operation_timeout).await?;
+        let (mut hello_send, mut hello_receive) =
+            timeout(operation_timeout, connection.accept_bi())
+                .await
+                .map_err(|_| TransportError::Timeout)?
+                .map_err(|_| TransportError::ConnectionClosed)?;
+        let hello = read_frame_with_timeout(&mut hello_receive, operation_timeout).await?;
+        if hello.kind != CLIENT_HELLO {
+            reject_negotiation(&mut hello_send).await?;
+            return Err(TransportError::NegotiationRejected);
+        }
+        let client_capabilities = match CapabilityOffer::decode(&hello.payload) {
+            Ok(offer) => offer,
+            Err(error) => {
+                reject_negotiation(&mut hello_send).await?;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                return Err(TransportError::Negotiation(error));
+            }
+        };
+        let negotiated = match self.capabilities.intersect(&client_capabilities) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                reject_negotiation(&mut hello_send).await?;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                return Err(TransportError::Negotiation(error));
+            }
+        };
+        write_frame_with_timeout(
+            &mut hello_send,
+            SERVER_HELLO,
+            &negotiated.encode(),
+            operation_timeout,
+        )
+        .await?;
         Ok(PairingSession {
             connection,
+            negotiated,
             _endpoint: None,
         })
     }
@@ -242,6 +349,26 @@ impl PairingClient {
         server_name: &str,
         certificate_der: &[u8],
         pairing_code: PairingCode,
+        operation_timeout: Duration,
+    ) -> Result<PairingSession, TransportError> {
+        Self::connect_with_capabilities(
+            server_addr,
+            server_name,
+            certificate_der,
+            pairing_code,
+            CapabilityOffer::default_capabilities(),
+            operation_timeout,
+        )
+        .await
+    }
+
+    /// Connects with an explicit capability offer and performs FANP negotiation.
+    pub async fn connect_with_capabilities(
+        server_addr: SocketAddr,
+        server_name: &str,
+        certificate_der: &[u8],
+        pairing_code: PairingCode,
+        capabilities: CapabilityOffer,
         operation_timeout: Duration,
     ) -> Result<PairingSession, TransportError> {
         if !valid_server_name(server_name)
@@ -277,13 +404,49 @@ impl PairingClient {
             .await
             .map_err(|_| TransportError::Timeout)?
             .map_err(|_| TransportError::ConnectionClosed)?;
-        write_frame(&mut send, PAIR_REQUEST, pairing_code.as_str().as_bytes()).await?;
-        let frame = read_frame(&mut receive).await?;
+        write_frame_with_timeout(
+            &mut send,
+            PAIR_REQUEST,
+            pairing_code.as_str().as_bytes(),
+            operation_timeout,
+        )
+        .await?;
+        let frame = read_frame_with_timeout(&mut receive, operation_timeout).await?;
         match frame.kind {
-            PAIR_ACCEPTED if frame.payload.is_empty() => Ok(PairingSession {
-                connection,
-                _endpoint: Some(endpoint),
-            }),
+            PAIR_ACCEPTED if frame.payload.is_empty() => {
+                let (mut hello_send, mut hello_receive) =
+                    timeout(operation_timeout, connection.open_bi())
+                        .await
+                        .map_err(|_| TransportError::Timeout)?
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                write_frame_with_timeout(
+                    &mut hello_send,
+                    CLIENT_HELLO,
+                    &capabilities.encode(),
+                    operation_timeout,
+                )
+                .await?;
+                let hello = read_frame_with_timeout(&mut hello_receive, operation_timeout).await?;
+                let negotiated = match hello.kind {
+                    SERVER_HELLO => {
+                        let server_capabilities = CapabilityOffer::decode(&hello.payload)
+                            .map_err(TransportError::Negotiation)?;
+                        capabilities
+                            .intersect(&server_capabilities)
+                            .map_err(TransportError::Negotiation)?
+                    }
+                    NEGOTIATION_REJECTED => {
+                        connection.close(0u32.into(), b"capability negotiation rejected");
+                        return Err(TransportError::NegotiationRejected);
+                    }
+                    _ => return Err(TransportError::InvalidFrame),
+                };
+                Ok(PairingSession {
+                    connection,
+                    negotiated,
+                    _endpoint: Some(endpoint),
+                })
+            }
             PAIR_REJECTED => {
                 connection.close(0u32.into(), b"pairing rejected");
                 Err(TransportError::PairingRejected)
@@ -295,6 +458,10 @@ impl PairingClient {
 
 async fn reject(send: &mut quinn::SendStream) -> Result<(), TransportError> {
     write_frame(send, PAIR_REJECTED, &[]).await
+}
+
+async fn reject_negotiation(send: &mut quinn::SendStream) -> Result<(), TransportError> {
+    write_frame(send, NEGOTIATION_REJECTED, &[]).await
 }
 
 async fn write_frame(
@@ -318,6 +485,26 @@ async fn write_frame(
         .await
         .map_err(|_| TransportError::ConnectionClosed)?;
     send.finish().map_err(|_| TransportError::ConnectionClosed)
+}
+
+async fn read_frame_with_timeout(
+    receive: &mut quinn::RecvStream,
+    operation_timeout: Duration,
+) -> Result<Frame, TransportError> {
+    timeout(operation_timeout, read_frame(receive))
+        .await
+        .map_err(|_| TransportError::Timeout)?
+}
+
+async fn write_frame_with_timeout(
+    send: &mut quinn::SendStream,
+    kind: u8,
+    payload: &[u8],
+    operation_timeout: Duration,
+) -> Result<(), TransportError> {
+    timeout(operation_timeout, write_frame(send, kind, payload))
+        .await
+        .map_err(|_| TransportError::Timeout)?
 }
 
 async fn read_frame(receive: &mut quinn::RecvStream) -> Result<Frame, TransportError> {
@@ -364,6 +551,7 @@ fn valid_server_name(server_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frameark_core::{Capability, DeviceId, Session, SessionId, SessionState};
     use std::sync::Arc;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -469,6 +657,107 @@ mod tests {
             server_result,
             Err(TransportError::PairingRejected)
         ));
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capability_intersection_advances_the_shared_core_session() {
+        let server_offer = CapabilityOffer::new([Capability::Video, Capability::Audio]).unwrap();
+        let client_offer =
+            CapabilityOffer::new([Capability::Audio, Capability::RemoteControl]).unwrap();
+        let server = Arc::new(
+            PairingServer::bind_with_capabilities(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("004207").unwrap(),
+                server_offer,
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let accepting = Arc::clone(&server);
+        let server_task = tokio::spawn(async move { accepting.accept_pairing(TEST_TIMEOUT).await });
+
+        let client = PairingClient::connect_with_capabilities(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("004207").unwrap(),
+            client_offer,
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(client.negotiated_capabilities().supports(Capability::Audio));
+        assert!(!client.negotiated_capabilities().supports(Capability::Video));
+        assert!(
+            !client
+                .negotiated_capabilities()
+                .supports(Capability::RemoteControl)
+        );
+
+        let mut core_session = Session::new(
+            SessionId::try_from("fanp-session").unwrap(),
+            DeviceId::try_from("receiver-1").unwrap(),
+        );
+        let transitions = client.advance_core_session(&mut core_session).unwrap();
+        assert_eq!(transitions.len(), 3);
+        assert_eq!(core_session.state(), SessionState::Negotiating);
+        let server_session = server_task.await.unwrap().unwrap();
+        assert_eq!(
+            server_session.negotiated_capabilities(),
+            client.negotiated_capabilities()
+        );
+        client.close();
+        server_session.close();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_common_capability_is_rejected() {
+        let server = Arc::new(
+            PairingServer::bind_with_capabilities(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("004207").unwrap(),
+                CapabilityOffer::new([Capability::Video]).unwrap(),
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let accepting = Arc::clone(&server);
+        let server_task = tokio::spawn(async move { accepting.accept_pairing(TEST_TIMEOUT).await });
+
+        let client_error = match PairingClient::connect_with_capabilities(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("004207").unwrap(),
+            CapabilityOffer::new([Capability::Audio]).unwrap(),
+            TEST_TIMEOUT,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(session) => {
+                session.close();
+                panic!("incompatible capability offers unexpectedly succeeded")
+            }
+        };
+        assert_eq!(client_error, TransportError::NegotiationRejected);
+        let server_error = match server_task.await.unwrap() {
+            Err(error) => error,
+            Ok(session) => {
+                session.close();
+                panic!("server accepted incompatible capability offers")
+            }
+        };
+        assert_eq!(
+            server_error,
+            TransportError::Negotiation(NegotiationError::NoCommonCapability)
+        );
         server.close();
     }
 }

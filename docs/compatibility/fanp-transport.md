@@ -13,13 +13,17 @@ included in a compatibility matrix.
 |---|---|---|
 | Loopback server with pinned certificate and correct six-digit code | Pass | `pinned_quic_pairing_completes_a_temporary_session` |
 | Incorrect code | Pass; client and server report `PairingRejected` | `incorrect_code_is_rejected_without_persisting_trust` |
-| Malformed/oversized frame bounds | Parser rejects before payload interpretation | `frameark-transport` bounded frame implementation |
+| Capability offer intersection | Pass; common capabilities are selected and exposed to core session mapping | `capability_intersection_advances_the_shared_core_session` |
+| No common capability | Pass; both peers report a negotiation rejection | `no_common_capability_is_rejected` |
+| Malformed/oversized frame or capability payload | Parser rejects before payload interpretation | `frame_header_rejects_bad_magic_versions_and_lengths`, `malformed_and_duplicate_entries_are_rejected` |
 
 ## Explicit limits
 
 - No persistent trust or device identity is established.
 - No media, audio, input, clipboard, file-transfer, or management streams are
   implemented.
+- Codec profiles, dimensions, frame rates, HDR, tracks, and datagram policy are
+  intentionally deferred to a later session offer/answer increment.
 - No internet relay, NAT traversal, Cast certification, Miracast guarantee, or
   DRM/HDCP behavior is claimed.
 - The self-signed certificate is generated per server process and must be
