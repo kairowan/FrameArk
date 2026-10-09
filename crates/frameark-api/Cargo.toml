@@ -1,0 +1,14 @@
+[package]
+name = "frameark-api"
+description = "Platform media and clock interfaces for FrameArk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+frameark-core = { path = "../frameark-core" }
+
+[lints]
+workspace = true
