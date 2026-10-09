@@ -10,6 +10,7 @@ All notable FrameArk changes will be documented in this file. The project follow
 - FrameArk development Skill and branch guard.
 - Open-source governance, collaboration templates, and automated repository checks.
 - Rust workspace with `frameark-core` session contracts and `frameark-api` platform interfaces.
+- Versioned native ABI constant for platform bindings.
 - ADR 0001 freezing the M0 package, discovery, protocol, and ownership boundaries.
 
 ### Security
