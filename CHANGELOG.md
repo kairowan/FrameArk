@@ -6,8 +6,14 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 ### Added
 
+- Bounded authenticated control request/response streams with cancellation
+  cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
+- Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
+  Status messages, explicit receiver policy, and backend cleanup hooks.
+
 - Experimental `frameark-transport` crate with bounded FANP v1 control frames,
-  QUIC/TLS certificate pinning, and process-local temporary pairing.
+  QUIC/TLS certificate pinning, process-local temporary pairing, and bounded
+  capability negotiation mapped to the shared Session state machine.
 - Experimental `frameark-discovery` crate with bounded mDNS/DNS-SD publication
   and normalized browse events for `_frameark._udp.local.`.
 - Product and engineering plan.

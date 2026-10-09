@@ -41,6 +41,20 @@ trust, protect a remembered identity, or expose an internet relay. Do not log,
 persist, or reuse pairing codes; report any certificate-verification,
 downgrade, replay, or code-disclosure issue privately.
 
+Capability offers are exchanged only after the pinned TLS handshake. The
+current schema requires an exact version match and rejects unknown or duplicate
+entries before allocation; it does not silently downgrade or authorize media,
+remote input, file transfer, or internet relay.
+
+Authenticated control streams enforce one bounded frame per stream and a total
+operation deadline. Cancellation closes the connection rather than reusing
+partially read state; pairing codes have redacted debug formatting.
+
+Native media offers are validated against negotiated capabilities and explicit
+receiver limits before platform resources are prepared. Failed preparation,
+timeouts, cancellation, malformed requests, and receiver drop all attempt
+backend reset; the control profile carries no encoded media or remote input.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.

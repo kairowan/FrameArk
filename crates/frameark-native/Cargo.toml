@@ -1,6 +1,6 @@
 [package]
-name = "frameark-transport"
-description = "Experimental FANP QUIC/TLS transport and temporary pairing"
+name = "frameark-native"
+description = "Experimental FANP session negotiation and lifecycle adapter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 frameark-core.workspace = true
-quinn.workspace = true
-rand.workspace = true
-rcgen.workspace = true
-rustls.workspace = true
+frameark-transport = { path = "../frameark-transport" }
 tokio.workspace = true
 
 [lints]

@@ -39,8 +39,9 @@ and headless receivers without duplicating protocol state in platform code.
 - A later trust milestone must define identity rotation, replay policy, and
   secure platform-backed key storage before pairing can become a remembered
   device relationship.
-- Rejection responses are sent before a short bounded connection teardown so a
-  client can distinguish an incorrect code from a transport failure.
+- Rejection responses wait for bounded QUIC acknowledgement before teardown so
+  a client can distinguish an incorrect code from a transport failure. The
+  control-stream increment replaces the initial fixed-delay prototype.
 
 ## Security notes
 

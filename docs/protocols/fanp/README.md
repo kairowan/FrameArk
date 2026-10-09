@@ -49,10 +49,56 @@ streams are not part of M0.
 The payload is empty. The client reports a pairing rejection separately from a
 QUIC/TLS failure, then closes the connection.
 
+## Capability negotiation
+
+After `PairAccepted`, the client opens a second reliable control stream and
+sends `ClientHello` (`type = 4`). The server responds with `ServerHello`
+(`type = 5`) containing the selected intersection. A peer with no common
+capability receives `NegotiationRejected` (`type = 6`) and the session is
+closed.
+
+The ClientHello/ServerHello payload is bounded to 18 bytes:
+
+| Offset | Size | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 1 | Capability schema version | `1` |
+| 1 | 1 | Entry count | `0..=16` |
+| 2 | N | Capability IDs | One byte per entry, sorted and unique |
+
+The canonical IDs are owned by `frameark-core`: `1` video, `2` audio, `3`
+subtitles, and `4` remote control. Unknown IDs, duplicate entries, truncated
+payloads, and schema versions other than `1` are rejected. The selected
+intersection is exposed to the shared Rust session layer, which advances the
+common lifecycle through `Connecting → Authenticating → Negotiating` without
+letting a platform adapter create a parallel state machine.
+
 ## Compatibility and evolution
+
+Post-handshake protocol adapters reserve message types 16..127. Each reliable
+bidirectional stream carries exactly one request and one response followed by
+FIN. Frames with trailing bytes are rejected. Each control operation has a
+total deadline; cancellation, timeout, or a dropped response handle closes the
+connection. Terminal responses wait for QUIC acknowledgement before teardown.
+Pairing codes are redacted even when formatted with Rust `Debug`.
 
 This profile is **Experimental**. Future versions must use a new ALPN or a
 backward-compatible version negotiation rule and must preserve the maximum
 frame bound. A stable release also needs persistent identity, replay handling,
 capability negotiation, media stream definitions, and named sender/receiver
 compatibility tests.
+
+## Native control profile (Experimental)
+
+The `frameark-native` crate maps control message types 16 and 17 to a bounded
+request/response profile: `Offer`, `Start`, `Stop`, and `Status`. The current
+offer supports optional H.264 video and Opus/AAC audio, a 10..=2000 ms latency
+target, at most 3840×2160 at 60 fps, and audio up to 96 kHz/8 channels. A
+receiver must advertise explicit policy limits; there is no silent codec,
+resolution, or frame-rate fallback.
+
+The flow is `Negotiating → Offer → Preparing → Start → Streaming → Stop →
+Closed`. The response echoes a request ID and resulting shared state. A
+platform backend is prepared before `Start`, and its reset hook is called on
+stop, rejected preparation, timeout, cancellation, or receiver drop. The
+profile is control-plane only: it does not carry encoded samples or claim that
+an Android/desktop decoder is already wired.
