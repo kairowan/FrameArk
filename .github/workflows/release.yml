@@ -65,6 +65,7 @@ jobs:
           fi
           if [[ -f gradlew ]]; then
             found=true
+            bash scripts/build_android_native.sh
             chmod +x gradlew
             ./gradlew --no-daemon --stacktrace lint test assembleRelease
           fi

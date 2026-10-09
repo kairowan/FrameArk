@@ -39,3 +39,6 @@ until its wire specification is published.
   alias after release.
 - A future FFI crate may depend on `frameark-api`, but Android code must not
   reproduce the Rust session state machine.
+- `frameark-ffi` is the only crate allowed to use the unsafe attribute required
+  for a JNI export. Its entry points remain small, versioned, and free of raw
+  pointer dereferencing until the media bridge is designed.

@@ -17,3 +17,4 @@
 *.dll binary
 *.dylib binary
 *.a binary
+*.jar binary

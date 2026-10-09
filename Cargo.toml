@@ -2,6 +2,7 @@
 members = [
     "crates/frameark-api",
     "crates/frameark-core",
+    "crates/frameark-ffi",
 ]
 resolver = "3"
 
@@ -13,5 +14,9 @@ repository = "https://github.com/kairowan/FrameArk"
 rust-version = "1.97"
 version = "0.1.0"
 
+[workspace.dependencies]
+frameark-core = { path = "crates/frameark-core" }
+jni = "0.21.1"
+
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
