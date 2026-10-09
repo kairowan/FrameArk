@@ -10,6 +10,8 @@ All notable FrameArk changes will be documented in this file. The project follow
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary
   serialization for native video and audio access units.
+- Experimental bounded QUIC media stream with explicit per-frame deadlines and
+  sender-owned unidirectional framing.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
