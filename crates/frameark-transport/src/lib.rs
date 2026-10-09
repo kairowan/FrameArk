@@ -19,9 +19,11 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::time::timeout;
 
 mod control;
+mod media;
 mod negotiation;
 
 pub use control::{ControlMessage, PendingControl};
+pub use media::{MAX_MEDIA_FRAME_BYTES, MediaReceiver, MediaSender};
 
 pub use negotiation::{
     CapabilityOffer, FANP_CAPABILITY_VERSION, MAX_CAPABILITIES, NegotiatedCapabilities,
