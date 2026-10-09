@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 frameark-core.workspace = true
+frameark-media = { path = "../frameark-media" }
 frameark-transport = { path = "../frameark-transport" }
 tokio.workspace = true
 

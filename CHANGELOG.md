@@ -8,6 +8,8 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
+- Experimental `FAM1` media-frame envelope with bounded exact-boundary
+  serialization for native video and audio access units.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
