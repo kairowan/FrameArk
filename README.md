@@ -62,6 +62,11 @@ Identity, trust, configuration, events, and metrics
 
 Rust owns protocol and cross-platform state. Kotlin, Swift, desktop, and web layers integrate operating-system APIs, capture, hardware codecs, rendering, audio routing, lifecycle, and UI.
 
+The current M0 workspace includes the `frameark-discovery` mDNS/DNS-SD
+prototype. It publishes and browses the reserved `_frameark._udp.local.`
+service type with bounded metadata and automatic address tracking; discovery is
+experimental and does not grant trust or establish a media session.
+
 ## Development workflow / 开发流程
 
 FrameArk does not accept direct development on `main`.

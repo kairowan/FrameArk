@@ -6,6 +6,8 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 ### Added
 
+- Experimental `frameark-discovery` crate with bounded mDNS/DNS-SD publication
+  and normalized browse events for `_frameark._udp.local.`.
 - Product and engineering plan.
 - FrameArk development Skill and branch guard.
 - Open-source governance, collaboration templates, and automated repository checks.
