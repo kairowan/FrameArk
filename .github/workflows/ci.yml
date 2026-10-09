@@ -83,11 +83,14 @@ jobs:
           java-version: '21'
           cache: gradle
           verify-signature: true
+      - name: Build Rust JNI bridge
+        if: steps.detect.outputs.present == 'true'
+        run: bash scripts/build_android_native.sh
       - name: Run Android lint and unit tests
         if: steps.detect.outputs.present == 'true'
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace lint test
+          ./gradlew --no-daemon --stacktrace lint test assembleDebug
 
   gate:
     name: ci-gate
