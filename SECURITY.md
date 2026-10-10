@@ -83,6 +83,12 @@ scalar/data fields, duplicate keys, and base64 decoding. It is not a parser for
 binary plists or a FairPlay key container; callers must keep pairing secrets out
 of diagnostics and only pass authenticated metadata into future crypto code.
 
+The mirror video contract caps access units and NAL counts, rejects forbidden
+H.264 headers, malformed length prefixes, unsupported orientation values, and
+unbounded A/V offsets before platform allocation. It does not authenticate,
+decrypt, decode, or render incoming video; those network and platform layers
+must remain behind the receiver's authorization boundary.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.

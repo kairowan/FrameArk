@@ -27,6 +27,14 @@ pub const MAX_PLIST_DEPTH: usize = 8;
 pub const MAX_PLIST_ENTRIES: usize = 64;
 /// Maximum scalar text or binary data field size.
 pub const MAX_PLIST_FIELD_BYTES: usize = 16 * 1024;
+/// Maximum encoded H.264 access unit accepted by the mirror contract.
+pub const MAX_MIRROR_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum H.264 NAL units in one mirror access unit.
+pub const MAX_MIRROR_NAL_UNITS: usize = 256;
+/// Maximum mirror dimension accepted before platform allocation.
+pub const MAX_MIRROR_DIMENSION: u16 = 8192;
+/// Video clock rate used by the mirror timing contract.
+pub const MIRROR_VIDEO_CLOCK_HZ: u32 = 90_000;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -546,6 +554,232 @@ pub enum PlistValue {
     Array(Vec<Self>),
     /// Deterministically ordered key/value dictionary.
     Dictionary(BTreeMap<String, Self>),
+}
+
+/// Screen orientation signaled by a mirror session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorOrientation {
+    /// Natural orientation.
+    Deg0,
+    /// Clockwise quarter turn.
+    Deg90,
+    /// Half turn.
+    Deg180,
+    /// Counter-clockwise quarter turn.
+    Deg270,
+}
+
+impl TryFrom<u16> for MirrorOrientation {
+    type Error = AirplayError;
+
+    /// Converts a wire degree value while rejecting unsupported angles.
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Deg0),
+            90 => Ok(Self::Deg90),
+            180 => Ok(Self::Deg180),
+            270 => Ok(Self::Deg270),
+            _ => Err(AirplayError::Invalid("mirror orientation")),
+        }
+    }
+}
+
+/// One validated H.264 NAL unit in a mirror access unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H264NalUnit {
+    /// H.264 nal_unit_type (1..=31).
+    pub nal_type: u8,
+    /// NAL header and RBSP bytes without an Annex-B start code.
+    pub bytes: Vec<u8>,
+}
+
+/// A bounded H.264 video access unit with a 90 kHz presentation timestamp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirrorVideoAccessUnit {
+    /// Presentation timestamp in `MIRROR_VIDEO_CLOCK_HZ` ticks.
+    pub pts_90khz: u64,
+    /// Orientation that applies to this access unit.
+    pub orientation: MirrorOrientation,
+    /// Whether the unit contains an IDR NAL and can start decoding.
+    pub keyframe: bool,
+    /// NAL units in sender order.
+    pub nal_units: Vec<H264NalUnit>,
+}
+
+impl MirrorVideoAccessUnit {
+    /// Parses Annex-B start-code framing and validates each NAL boundary.
+    pub fn from_annex_b(
+        pts_90khz: u64,
+        orientation: MirrorOrientation,
+        bytes: &[u8],
+    ) -> Result<Self, AirplayError> {
+        if bytes.is_empty() || bytes.len() > MAX_MIRROR_ACCESS_UNIT_BYTES {
+            return Err(AirplayError::TooLarge("mirror access unit"));
+        }
+        let mut units = Vec::new();
+        let mut cursor = 0;
+        let Some((first, first_len)) = find_start_code(bytes, cursor) else {
+            return Err(AirplayError::Invalid("H264 Annex-B start code"));
+        };
+        if bytes[..first].iter().any(|byte| *byte != 0) {
+            return Err(AirplayError::Invalid("H264 Annex-B prefix"));
+        }
+        cursor = first + first_len;
+        while cursor < bytes.len() {
+            let next = find_start_code(bytes, cursor);
+            let end = next.map(|(index, _)| index).unwrap_or(bytes.len());
+            push_h264_nal(&mut units, &bytes[cursor..end])?;
+            cursor = next
+                .map(|(index, length)| index + length)
+                .unwrap_or(bytes.len());
+        }
+        if units.is_empty() {
+            return Err(AirplayError::Invalid("H264 NAL units"));
+        }
+        let keyframe = units.iter().any(|unit| unit.nal_type == 5);
+        Ok(Self {
+            pts_90khz,
+            orientation,
+            keyframe,
+            nal_units: units,
+        })
+    }
+
+    /// Parses AVCC length-prefixed NAL units used by some mirror transports.
+    pub fn from_avcc(
+        pts_90khz: u64,
+        orientation: MirrorOrientation,
+        bytes: &[u8],
+    ) -> Result<Self, AirplayError> {
+        if bytes.is_empty() || bytes.len() > MAX_MIRROR_ACCESS_UNIT_BYTES {
+            return Err(AirplayError::TooLarge("mirror access unit"));
+        }
+        let mut units = Vec::new();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            let header_end = cursor
+                .checked_add(4)
+                .ok_or(AirplayError::Invalid("H264 AVCC length"))?;
+            if header_end > bytes.len() {
+                return Err(AirplayError::Invalid("H264 AVCC length"));
+            }
+            let length = u32::from_be_bytes(bytes[cursor..header_end].try_into().unwrap()) as usize;
+            cursor = header_end;
+            let end = cursor
+                .checked_add(length)
+                .ok_or(AirplayError::Invalid("H264 AVCC length"))?;
+            if end > bytes.len() {
+                return Err(AirplayError::Invalid("H264 AVCC length"));
+            }
+            push_h264_nal(&mut units, &bytes[cursor..end])?;
+            cursor = end;
+        }
+        if units.is_empty() {
+            return Err(AirplayError::Invalid("H264 NAL units"));
+        }
+        let keyframe = units.iter().any(|unit| unit.nal_type == 5);
+        Ok(Self {
+            pts_90khz,
+            orientation,
+            keyframe,
+            nal_units: units,
+        })
+    }
+
+    /// Re-encodes the unit as four-byte Annex-B start-code NALs.
+    pub fn to_annex_b(&self) -> Result<Vec<u8>, AirplayError> {
+        if self.nal_units.is_empty() || self.nal_units.len() > MAX_MIRROR_NAL_UNITS {
+            return Err(AirplayError::Invalid("H264 NAL units"));
+        }
+        let total = self
+            .nal_units
+            .iter()
+            .try_fold(0usize, |total, unit| {
+                total.checked_add(4 + unit.bytes.len())
+            })
+            .ok_or(AirplayError::TooLarge("mirror access unit"))?;
+        if total > MAX_MIRROR_ACCESS_UNIT_BYTES {
+            return Err(AirplayError::TooLarge("mirror access unit"));
+        }
+        let mut output = Vec::with_capacity(total);
+        for unit in &self.nal_units {
+            output.extend_from_slice(&[0, 0, 0, 1]);
+            output.extend_from_slice(&unit.bytes);
+        }
+        Ok(output)
+    }
+}
+
+fn find_start_code(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut index = from;
+    while index + 3 <= bytes.len() {
+        if bytes[index..].starts_with(&[0, 0, 1]) {
+            return Some((index, 3));
+        }
+        if index + 4 <= bytes.len() && bytes[index..].starts_with(&[0, 0, 0, 1]) {
+            return Some((index, 4));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn push_h264_nal(units: &mut Vec<H264NalUnit>, bytes: &[u8]) -> Result<(), AirplayError> {
+    if units.len() >= MAX_MIRROR_NAL_UNITS {
+        return Err(AirplayError::TooLarge("H264 NAL units"));
+    }
+    if bytes.is_empty() || bytes[0] & 0x80 != 0 {
+        return Err(AirplayError::Invalid("H264 NAL header"));
+    }
+    let nal_type = bytes[0] & 0x1f;
+    if nal_type == 0 {
+        return Err(AirplayError::Invalid("H264 NAL type"));
+    }
+    units.push(H264NalUnit {
+        nal_type,
+        bytes: bytes.to_vec(),
+    });
+    Ok(())
+}
+
+/// Bounded video/audio clock conversion policy for mirror synchronization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorClock {
+    /// Sender audio sample rate in Hz.
+    pub audio_sample_rate: u32,
+    /// Maximum tolerated signed A/V offset in 90 kHz ticks.
+    pub max_offset_90khz: i64,
+}
+
+impl MirrorClock {
+    /// Creates a clock policy for a supported audio sample rate.
+    pub fn new(audio_sample_rate: u32) -> Result<Self, AirplayError> {
+        if !(8_000..=192_000).contains(&audio_sample_rate) {
+            return Err(AirplayError::Invalid("mirror audio sample rate"));
+        }
+        Ok(Self {
+            audio_sample_rate,
+            max_offset_90khz: i64::from(MIRROR_VIDEO_CLOCK_HZ),
+        })
+    }
+
+    /// Converts an audio sample timestamp to the mirror video clock.
+    pub fn audio_samples_to_video_ticks(&self, samples: u64) -> Result<u64, AirplayError> {
+        samples
+            .checked_mul(u64::from(MIRROR_VIDEO_CLOCK_HZ))
+            .and_then(|value| value.checked_div(u64::from(self.audio_sample_rate)))
+            .ok_or(AirplayError::TooLarge("mirror timestamp"))
+    }
+
+    /// Returns the signed video-minus-audio clock offset when within policy.
+    pub fn offset_90khz(&self, video_pts: u64, audio_samples: u64) -> Result<i64, AirplayError> {
+        let audio_pts = self.audio_samples_to_video_ticks(audio_samples)?;
+        let offset = i128::from(video_pts) - i128::from(audio_pts);
+        if offset.unsigned_abs() > self.max_offset_90khz.unsigned_abs() as u128 {
+            return Err(AirplayError::Invalid("mirror A/V offset"));
+        }
+        i64::try_from(offset).map_err(|_| AirplayError::Invalid("mirror A/V offset"))
+    }
 }
 
 /// Parses the bounded XML Property List subset into a Rust value.
@@ -1110,5 +1344,45 @@ mod tests {
             parse_xml_plist(nested.as_bytes()),
             Err(AirplayError::TooLarge("plist nesting"))
         );
+    }
+
+    #[test]
+    fn mirror_video_contract_parses_annex_b_and_avcc_keyframes() {
+        let annex_b = [0, 0, 0, 1, 0x67, 1, 2, 3, 0, 0, 1, 0x65, 4, 5];
+        let unit = MirrorVideoAccessUnit::from_annex_b(90_000, MirrorOrientation::Deg90, &annex_b)
+            .unwrap();
+        assert!(unit.keyframe);
+        assert_eq!(unit.nal_units.len(), 2);
+        assert_eq!(
+            unit.to_annex_b().unwrap(),
+            [0, 0, 0, 1, 0x67, 1, 2, 3, 0, 0, 0, 1, 0x65, 4, 5]
+        );
+
+        let avcc = [0, 0, 0, 2, 0x67, 1, 0, 0, 0, 2, 0x65, 2];
+        let decoded =
+            MirrorVideoAccessUnit::from_avcc(90_001, MirrorOrientation::Deg0, &avcc).unwrap();
+        assert!(decoded.keyframe);
+        assert_eq!(decoded.nal_units[1].nal_type, 5);
+        assert_eq!(
+            MirrorOrientation::try_from(180).unwrap(),
+            MirrorOrientation::Deg180
+        );
+        assert!(MirrorOrientation::try_from(45).is_err());
+    }
+
+    #[test]
+    fn mirror_contract_rejects_bad_nals_and_bounds_av_sync() {
+        assert!(
+            MirrorVideoAccessUnit::from_annex_b(0, MirrorOrientation::Deg0, &[0, 0, 1, 0x80])
+                .is_err()
+        );
+        assert!(
+            MirrorVideoAccessUnit::from_avcc(0, MirrorOrientation::Deg0, &[0, 0, 0, 5, 1]).is_err()
+        );
+        let clock = MirrorClock::new(48_000).unwrap();
+        assert_eq!(clock.audio_samples_to_video_ticks(48_000).unwrap(), 90_000);
+        assert_eq!(clock.offset_90khz(90_000, 48_000).unwrap(), 0);
+        assert!(clock.offset_90khz(90_000 + 90_001, 48_000).is_err());
+        assert!(MirrorClock::new(1_000).is_err());
     }
 }
