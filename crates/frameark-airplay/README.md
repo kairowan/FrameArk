@@ -10,6 +10,8 @@ AirPlay/RAOP interoperability.
 - bounded ANNOUNCE SDP parsing for PCM, Apple Lossless, and AAC labels;
 - bounded XML Property List parsing/encoding for strings, integers, booleans,
   data, arrays, and dictionaries;
+- bounded H.264 Annex-B/AVCC mirror access-unit parsing with keyframe and
+  orientation metadata plus a 90 kHz A/V clock policy;
 - an explicit OPTIONS → ANNOUNCE → SETUP → RECORD → FLUSH/TEARDOWN RTSP
   session state machine with caller-owned UDP ports.
 
@@ -18,7 +20,8 @@ pairing. It is a deterministic protocol contract that a future daemon can
 connect to platform audio and timing adapters.
 
 FairPlay, AES-CTR decryption, binary plist negotiation, pairing, AirPlay 2,
-and Apple device compatibility are not implemented or implied. The
+H.265, mirror audio transport, and Apple device compatibility are not
+implemented or implied. The
 compatibility label is **Experimental**.
 
 ```powershell

@@ -58,6 +58,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental bounded XML Property List parser/encoder for scalar, data,
   array, and dictionary metadata with duplicate-key, entity, depth, and size
   limits; binary plist, pairing, and FairPlay remain unsupported.
+- Experimental bounded AirPlay mirror H.264 Annex-B/AVCC access-unit contract
+  with keyframe detection, orientation validation, and 90 kHz A/V clock bounds;
+  transport, decoder, mirror audio, loss recovery, and device compatibility
+  remain pending.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/

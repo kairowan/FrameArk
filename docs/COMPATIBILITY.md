@@ -26,7 +26,7 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 | Android Rust/JNI receiver lifecycle | Experimental | `frameark-ffi` protected core-session start/stop bridge plus Kotlin ABI/result tests; no physical-device JNI load or network/media callback yet |
 | DLNA/UPnP MediaRenderer | Experimental | `frameark-dlna` bounded SSDP/UDP, HTTP device/SCPD, SOAP AVTransport/RenderingControl/ConnectionManager, single-range fixture, DIDL-Lite generation, and GENA policy tests; no callback I/O, streaming media server, or named-client matrix |
 | AirPlay/RAOP audio | Experimental | `frameark-airplay` bounded RTSP/RTP, ANNOUNCE SDP, XML plist, and RAOP session lifecycle tests; no pairing, binary plist/FairPlay, encryption, decoder, timing, or Apple-device matrix |
-| AirPlay screen mirroring | Planned | No executable implementation yet |
+| AirPlay screen mirroring | Experimental | Bounded H.264 Annex-B/AVCC access-unit, keyframe, orientation, and 90 kHz clock contract tests only; no AirPlay transport, decoder, audio sync, or device matrix |
 | Cast V2 compatibility | Planned/Experimental | No executable implementation yet |
 | Miracast/Wi-Fi Display | Planned/Conditional | No executable implementation yet |
 | FairPlay, Widevine, HDCP bypass | Unsupported | Intentionally outside project scope |
