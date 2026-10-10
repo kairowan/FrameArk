@@ -55,6 +55,13 @@ receiver limits before platform resources are prepared. Failed preparation,
 timeouts, cancellation, malformed requests, and receiver drop all attempt
 backend reset; the control profile carries no encoded media or remote input.
 
+The experimental DLNA handler bounds HTTP headers, bodies, SOAP argument text,
+and XML fields, requires exact `Content-Length`, rejects chunked transfer and
+unsupported URL schemes, and never fetches a caller-supplied media URL. GENA,
+media serving, and persistent authorization are not enabled; a future network
+server must add connection deadlines, authorization policy, and event-queue
+limits at its socket boundary.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.

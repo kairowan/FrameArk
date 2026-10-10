@@ -34,6 +34,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental bounded DLNA SSDP UDP publisher with alive/byebye and matching
   M-SEARCH response loopback coverage; multicast scheduling remains outside
   the crate.
+- Experimental bounded DLNA HTTP/SOAP MediaRenderer handler serving device and
+  SCPD descriptions and applying AVTransport, RenderingControl, and
+  ConnectionManager actions to explicit Rust state; GENA, DIDL-Lite, HTTP
+  Range, media serving, and named-client interoperability remain pending.
 - Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
   foundation; pairing, decryption, decoding, and Apple interoperability remain
   unimplemented.
