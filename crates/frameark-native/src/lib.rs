@@ -3,6 +3,7 @@
 //! This crate negotiates configuration and drives platform-owned backends. It
 //! carries bounded FAM1 media to those backends but does not decode codecs or
 //! own platform surfaces.
+pub mod media_control;
 pub mod media_receiver;
 pub mod media_session;
 pub mod media_wire;
@@ -17,6 +18,9 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use wire::{Command, Request, Response, Status};
 
+pub use media_control::{
+    MediaRendererFactory, NativeMediaControlReceiver, NativeMediaSessionReport,
+};
 pub use media_receiver::{MediaStreamReport, NativeMediaReceiver};
 pub use offer::{ReceiverPolicy, SessionOffer};
 
@@ -174,6 +178,18 @@ impl NativeSender {
         self.lifecycle.transition(SessionState::Streaming)?;
         self.lifecycle.diagnostic("fanp.started");
         Ok(())
+    }
+
+    /// Opens the sender-owned media stream only after the control plane entered
+    /// Streaming. The returned stream carries bounded FAM1 records.
+    pub async fn open_media_stream(&self) -> Result<frameark_transport::MediaSender> {
+        if self.state() != SessionState::Streaming {
+            return Err(state_error());
+        }
+        self.transport
+            .open_media_stream()
+            .await
+            .map_err(transport_error)
     }
 
     /// Queries receiver state and validates it against the local shared lifecycle.

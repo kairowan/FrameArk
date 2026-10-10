@@ -13,9 +13,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
-use frameark_core::{TimeBase, TrackId};
+use frameark_core::{
+    AudioConfig, DeviceId, MediaCodec, Session, SessionId, TimeBase, TrackId, VideoConfig,
+};
 use frameark_media::{AudioPacket, MediaPacket, MediaTimestamp, VideoFrame};
-use frameark_native::media_wire;
+use frameark_native::{NativeSender, SessionOffer, media_wire};
 use frameark_transport::{PairingClient, PairingCode};
 
 const MAX_FRAMES: usize = 10_000;
@@ -41,6 +43,7 @@ struct SendOptions {
     pairing_code: PairingCode,
     video: Option<Vec<u8>>,
     audio: Option<Vec<u8>>,
+    audio_codec: MediaCodec,
     frames: usize,
     interval: Duration,
 }
@@ -110,6 +113,11 @@ fn parse_options(args: &[String]) -> Result<SendOptions, CliError> {
     let audio = option_value(args, "--audio-fixture")?
         .map(|path| read_fixture(&path, 256 * 1024))
         .transpose()?;
+    let audio_codec = match option_value(args, "--audio-codec")?.as_deref() {
+        None | Some("opus") => MediaCodec::Opus,
+        Some("aac") => MediaCodec::Aac,
+        Some(_) => return Err(CliError("--audio-codec must be opus or aac".to_string())),
+    };
     if video.is_none() && audio.is_none() {
         return Err(CliError(
             "at least one encoded fixture is required (--video-fixture or --audio-fixture)"
@@ -131,6 +139,7 @@ fn parse_options(args: &[String]) -> Result<SendOptions, CliError> {
         pairing_code,
         video,
         audio,
+        audio_codec,
         frames,
         interval: Duration::from_millis(interval_ms as u64),
     })
@@ -146,7 +155,42 @@ async fn send(options: SendOptions) -> Result<(), Box<dyn Error>> {
     )
     .await
     .map_err(|_| CliError("FANP pairing or capability negotiation failed".to_string()))?;
-    let mut stream = transport
+    let mut sender = NativeSender::new(
+        transport,
+        Session::new(
+            SessionId::try_from("cli-session")
+                .map_err(|_| CliError("invalid CLI session".into()))?,
+            DeviceId::try_from("frameark-cli")
+                .map_err(|_| CliError("invalid CLI device".into()))?,
+        ),
+    )
+    .map_err(|_| CliError("FANP session could not be created".to_string()))?;
+    sender
+        .offer(
+            SessionOffer {
+                video: options.video.as_ref().map(|_| VideoConfig {
+                    codec: MediaCodec::H264,
+                    width: 1280,
+                    height: 720,
+                    frame_rate_numerator: 30,
+                    frame_rate_denominator: 1,
+                }),
+                audio: options.audio.as_ref().map(|_| AudioConfig {
+                    codec: options.audio_codec,
+                    sample_rate: 48_000,
+                    channels: 2,
+                }),
+                latency_ms: 120,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .map_err(|_| CliError("FANP media offer was rejected".to_string()))?;
+    sender
+        .start(Duration::from_secs(5))
+        .await
+        .map_err(|_| CliError("FANP media start was rejected".to_string()))?;
+    let mut stream = sender
         .open_media_stream()
         .await
         .map_err(|_| CliError("FANP media stream could not be opened".to_string()))?;
@@ -181,7 +225,10 @@ async fn send(options: SendOptions) -> Result<(), Box<dyn Error>> {
         }
     }
     stream.finish()?;
-    transport.close();
+    sender
+        .stop(Duration::from_secs(5))
+        .await
+        .map_err(|_| CliError("FANP media stop was rejected".to_string()))?;
     Ok(())
 }
 

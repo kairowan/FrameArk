@@ -71,8 +71,10 @@ bounded media stream, the `frameark-native` control/media adapters, and the
 `_frameark._udp.local.` service type with bounded metadata and automatic
 address tracking. Transport pins an ephemeral certificate, exchanges a
 temporary six-digit pairing code, negotiates the shared core capability set,
-and carries bounded FAM1 access units. Neither component grants persistent
-trust, ships a real codec, or claims Android hardware playback yet.
+and carries bounded FAM1 access units. Rust can now exercise one complete
+Offer → Start → media → Stop loopback with fake renderers. Neither component
+grants persistent trust, ships a real codec, or claims Android hardware
+playback yet.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current
