@@ -7,6 +7,8 @@ AirPlay/RAOP interoperability.
 
 - bounded RTSP/1.0 request/response parsing with CSeq checks;
 - strict RTP v2 audio packet contracts without padding/extensions;
+- bounded RTP jitter buffering with sequence reordering, wrap handling,
+  duplicate/late rejection, and explicit loss-gap recovery;
 - bounded ANNOUNCE SDP parsing for PCM, Apple Lossless, and AAC labels;
 - bounded XML Property List parsing/encoding for strings, integers, booleans,
   data, arrays, and dictionaries;

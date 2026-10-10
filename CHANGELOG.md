@@ -63,6 +63,10 @@ All notable FrameArk changes will be documented in this file. The project follow
   covering OPTIONS, ANNOUNCE, SETUP, RECORD, FLUSH, GET_PARAMETER, and
   TEARDOWN; pairing, plist/FairPlay, encryption, timing, decoding, and Apple
   interoperability remain pending.
+- Experimental bounded RAOP RTP jitter buffer with sequence reordering,
+  wrap-aware late/duplicate handling, explicit gap recovery, and packet-count
+  limits; encrypted audio, concealment, decoding, and long-run timing remain
+  pending.
 - Experimental bounded XML and binary Property List parser/encoder for scalar,
   data, array, and dictionary metadata with duplicate-key, entity, object
   reference, cycle, depth, and size limits; pairing and FairPlay remain
