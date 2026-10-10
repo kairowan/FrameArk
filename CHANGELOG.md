@@ -41,6 +41,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental bounded DLNA single-range media response policy and DIDL-Lite
   item generator with XML escaping and explicit resource limits; streaming
   file backends, full metadata parsing, and GENA remain pending.
+- Experimental bounded DLNA GENA subscription/renew/unsubscribe policy with
+  deterministic SIDs, timeout bounds, sequenced property events, and capped
+  caller-drained queues; lease expiry and callback HTTP remain outside the
+  crate.
 - Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
   foundation; pairing, decryption, decoding, and Apple interoperability remain
   unimplemented.

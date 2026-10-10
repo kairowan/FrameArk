@@ -13,6 +13,8 @@ DLNA/UPnP MediaRenderer work.
 - single-range HTTP media responses with bounded in-memory resources and
   DLNA response headers;
 - deterministic DIDL-Lite item generation for URI metadata;
+- bounded GENA subscription/renew/unsubscribe policy with sequenced event
+  bodies for caller-owned callback HTTP;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 
@@ -29,7 +31,8 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 `GetVolume`, and the basic ConnectionManager queries. Media URLs are limited to
 `http://` and `https://`; FrameArk does not fetch URLs or bypass DRM.
 
-HTTP chunked transfer, GENA event subscriptions, full DIDL-Lite parsing,
+HTTP chunked transfer, GENA lease expiry scheduling, callback connection I/O,
+full DIDL-Lite parsing,
 multicast lease scheduling, streaming file backends, real decoder integration,
 and named client interoperability are not implemented yet. The compatibility
 label is **Experimental**, not Stable.
