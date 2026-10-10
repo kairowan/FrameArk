@@ -22,6 +22,7 @@ third-party sender has yet been included in a compatibility matrix.
 | FAM1 video/audio media-frame round trip | Pass with bounded exact-boundary parser tests | `frameark-native::media_wire::video_round_trip_preserves_timestamps_and_keyframe`, `audio_round_trip_and_malformed_inputs_are_bounded` |
 | Multiple frames on one QUIC media stream | Pass on loopback with explicit FIN and frame-size limits | `frameark-transport::media::sends_multiple_bounded_frames_until_fin` |
 | Native packet-to-renderer lifecycle | Pass with fake video/audio renderers, track checks, and partial-prepare cleanup | `frameark-native::media_session` tests |
+| Rust QUIC media receiver orchestration | Pass on a real pinned-QUIC loopback: FAM1 frames are decoded, routed to both renderers, counted, and reset on FIN | `quic_media_stream_reaches_renderers_and_cleans_up` |
 | Android renderer configuration | Pass for JVM config validation and Android lint/build; hardware behavior unverified | `MediaTrackConfigTest`, Android `lint test assembleDebug` |
 
 ## Explicit limits
@@ -32,8 +33,8 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
 
 - No persistent trust or device identity is established.
 - No end-to-end network receiver connects the Rust stream to Android
-  MediaCodec/AudioTrack yet; the Android adapters are platform lifecycle
-  components only.
+  MediaCodec/AudioTrack; the Rust bridge is covered only with fake renderers,
+  and the Android adapters remain platform lifecycle components.
 - No input, clipboard, file-transfer, management stream, congestion-control
   policy, or datagram media path is implemented.
 - No real H.264/Opus/AAC test sender, decoder matrix, audio decoder backend,
