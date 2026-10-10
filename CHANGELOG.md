@@ -34,6 +34,9 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental bounded DLNA SSDP UDP publisher with alive/byebye and matching
   M-SEARCH response loopback coverage; multicast scheduling remains outside
   the crate.
+- Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
+  foundation; pairing, decryption, decoding, and Apple interoperability remain
+  unimplemented.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
