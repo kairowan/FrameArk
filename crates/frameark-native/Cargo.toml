@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+frameark-api = { path = "../frameark-api" }
 frameark-core.workspace = true
 frameark-media = { path = "../frameark-media" }
 frameark-transport = { path = "../frameark-transport" }

@@ -142,6 +142,7 @@ dependencies = [
 name = "frameark-native"
 version = "0.1.0"
 dependencies = [
+ "frameark-api",
  "frameark-core",
  "frameark-media",
  "frameark-transport",
