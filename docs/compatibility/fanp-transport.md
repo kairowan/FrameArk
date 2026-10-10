@@ -57,6 +57,8 @@ network interruption/retry coverage, and a named receiver/sender matrix.
 
 ## DLNA foundation
 
-The experimental `frameark-dlna` crate now provides bounded SSDP parsing and
-escaped UPnP device-description generation. It does not yet publish SSDP,
-serve HTTP/SOAP, implement AVTransport/GENA, or claim DLNA interoperability.
+The experimental `frameark-dlna` crate now provides bounded SSDP parsing,
+escaped UPnP device-description generation, and a unicast-testable UDP
+publisher for alive/byebye notifications and matching M-SEARCH responses. It
+does not yet join multicast groups, serve HTTP/SOAP, implement
+AVTransport/GENA, or claim DLNA interoperability.
