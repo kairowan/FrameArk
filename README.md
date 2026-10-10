@@ -72,9 +72,10 @@ bounded media stream, the `frameark-native` control/media adapters, and the
 address tracking. Transport pins an ephemeral certificate, exchanges a
 temporary six-digit pairing code, negotiates the shared core capability set,
 and carries bounded FAM1 access units. Rust can now exercise one complete
-Offer → Start → media → Stop loopback with fake renderers. Neither component
-grants persistent trust, ships a real codec, or claims Android hardware
-playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
+Offer → Start → media → Stop loopback with fake renderers, and the Android
+shell forwards its foreground lifecycle to a protected Rust session through
+JNI. Neither component grants persistent trust, ships a real codec, or claims
+Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
 caller-owned HTTP/SOAP renderer contracts; GENA, HTTP Range, media serving,
 and named-client interoperability remain future work.
 

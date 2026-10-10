@@ -46,4 +46,39 @@ class FrameArkNativeTest {
         )
         assertFalse(bridge.isLoaded())
     }
+
+    @Test
+    fun forwards_receiver_lifecycle_after_abi_load() {
+        var starts = 0
+        var stops = 0
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            startProvider = { starts += 1; 0 },
+            stopProvider = { stops += 1; 0 },
+            runningProvider = { 1 },
+        )
+
+        assertEquals(FrameArkNative.ReceiverResult.Started, bridge.startReceiver())
+        assertEquals(FrameArkNative.ReceiverResult.Stopped, bridge.stopReceiver())
+        assertEquals(1, starts)
+        assertEquals(1, stops)
+        assertTrue(bridge.isReceiverRunning())
+    }
+
+    @Test
+    fun does_not_forward_lifecycle_when_abi_is_incompatible() {
+        var starts = 0
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { 99 },
+            startProvider = { starts += 1; 0 },
+        )
+
+        assertEquals(
+            FrameArkNative.ReceiverResult.Unavailable("native ABI mismatch"),
+            bridge.startReceiver(),
+        )
+        assertEquals(0, starts)
+    }
 }

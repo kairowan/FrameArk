@@ -17,18 +17,23 @@ import android.os.IBinder
  * start/stop actions for the future native session bridge.
  */
 class FrameArkReceiverService : Service() {
+    private lateinit var native: FrameArkNative
+
     override fun onCreate() {
         super.onCreate()
+        native = FrameArkNative()
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = ReceiverServicePolicy.normalize(intent?.action)
         if (ReceiverServicePolicy.isStop(action)) {
+            native.stopReceiver()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
+        native.startReceiver()
         startAsForeground()
         return START_STICKY
     }
