@@ -14,6 +14,8 @@ All notable FrameArk changes will be documented in this file. The project follow
   sender-owned unidirectional framing.
 - Experimental Native media-session adapter connecting validated packets to
   platform-owned video/audio renderer interfaces with cleanup guarantees.
+- Experimental Android `MediaCodec` H.264 and PCM `AudioTrack` renderer
+  lifecycles with explicit setup, backpressure, and release paths.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
