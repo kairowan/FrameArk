@@ -1,12 +1,14 @@
 //! Bounded DLNA/UPnP protocol contracts.
 //!
 //! This crate starts M3 with deterministic SSDP parsing and XML description
-//! generation. It deliberately does not open UDP sockets, expose an HTTP
-//! server, or claim AVTransport/GENA interoperability until those layers have
-//! their own bounded parsers and compatibility fixtures.
+//! generation. It provides a synchronous unicast-testable UDP publisher, but
+//! deliberately does not join multicast groups, expose an HTTP server, or
+//! claim AVTransport/GENA interoperability until those layers have their own
+//! bounded parsers and compatibility fixtures.
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::net::{SocketAddr, UdpSocket};
 
 /// Maximum complete SSDP message accepted by the parser.
 pub const MAX_SSDP_BYTES: usize = 64 * 1024;
@@ -26,6 +28,8 @@ pub enum DlnaError {
     Invalid(&'static str),
     /// A required description field is not valid.
     InvalidField(&'static str),
+    /// The operating system rejected a bounded UDP operation.
+    Io(std::io::ErrorKind),
 }
 
 impl Display for DlnaError {
@@ -36,11 +40,175 @@ impl Display for DlnaError {
             Self::InvalidField(field) => {
                 write!(formatter, "invalid DLNA description field {field}")
             }
+            Self::Io(kind) => write!(formatter, "DLNA UDP operation failed: {kind}"),
         }
     }
 }
 
 impl std::error::Error for DlnaError {}
+
+/// Default IPv4 SSDP multicast destination.
+pub const SSDP_MULTICAST_ADDR: &str = "239.255.255.250:1900";
+
+/// Bounded advertisement metadata used by NOTIFY and M-SEARCH responses.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SsdpAdvertisement {
+    /// Device or service type advertised in `NT`/`ST`.
+    pub service_type: String,
+    /// Stable unique service name.
+    pub usn: String,
+    /// HTTP URL of the device description.
+    pub location: String,
+    /// Cache lifetime in seconds.
+    pub max_age_seconds: u32,
+    /// Product/server token sent in the response.
+    pub server: String,
+}
+
+impl SsdpAdvertisement {
+    /// Validates advertisement fields before any UDP packet is emitted.
+    pub fn new(
+        service_type: impl Into<String>,
+        usn: impl Into<String>,
+        location: impl Into<String>,
+        max_age_seconds: u32,
+        server: impl Into<String>,
+    ) -> Result<Self, DlnaError> {
+        let advertisement = Self {
+            service_type: service_type.into(),
+            usn: usn.into(),
+            location: location.into(),
+            max_age_seconds,
+            server: server.into(),
+        };
+        for (value, field) in [
+            (&advertisement.service_type, "service type"),
+            (&advertisement.usn, "USN"),
+            (&advertisement.location, "LOCATION"),
+            (&advertisement.server, "SERVER"),
+        ] {
+            validate_field(value, field)?;
+        }
+        if max_age_seconds == 0 {
+            return Err(DlnaError::InvalidField("max-age"));
+        }
+        Ok(advertisement)
+    }
+
+    fn matches(&self, search_target: &str) -> bool {
+        search_target == "ssdp:all"
+            || search_target == self.service_type
+            || search_target == self.usn
+    }
+
+    fn notify(&self, alive: bool) -> SsdpMessage {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "cache-control".to_string(),
+            format!("max-age={}", self.max_age_seconds),
+        );
+        headers.insert("location".to_string(), self.location.clone());
+        headers.insert("nt".to_string(), self.service_type.clone());
+        headers.insert(
+            "nts".to_string(),
+            if alive { "ssdp:alive" } else { "ssdp:byebye" }.to_string(),
+        );
+        headers.insert("server".to_string(), self.server.clone());
+        headers.insert("usn".to_string(), self.usn.clone());
+        SsdpMessage {
+            start_line: SsdpStartLine::Request {
+                method: "NOTIFY".to_string(),
+                target: "*".to_string(),
+            },
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    fn response(&self) -> SsdpMessage {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "cache-control".to_string(),
+            format!("max-age={}", self.max_age_seconds),
+        );
+        headers.insert("location".to_string(), self.location.clone());
+        headers.insert("server".to_string(), self.server.clone());
+        headers.insert("st".to_string(), self.service_type.clone());
+        headers.insert("usn".to_string(), self.usn.clone());
+        SsdpMessage {
+            start_line: SsdpStartLine::Response {
+                status: 200,
+                reason: "OK".to_string(),
+            },
+            headers,
+            body: Vec::new(),
+        }
+    }
+}
+
+/// Synchronous, bounded SSDP UDP publisher for one service type.
+pub struct SsdpPublisher {
+    socket: UdpSocket,
+    advertisement: SsdpAdvertisement,
+}
+
+impl SsdpPublisher {
+    /// Binds a caller-selected interface/port. Multicast join is left to the
+    /// platform service layer so tests and restricted networks can use unicast.
+    pub fn bind(
+        bind_address: SocketAddr,
+        advertisement: SsdpAdvertisement,
+    ) -> Result<Self, DlnaError> {
+        let socket = UdpSocket::bind(bind_address).map_err(|error| DlnaError::Io(error.kind()))?;
+        Ok(Self {
+            socket,
+            advertisement,
+        })
+    }
+
+    /// Returns the local UDP endpoint selected by the operating system.
+    pub fn local_addr(&self) -> Result<SocketAddr, DlnaError> {
+        self.socket
+            .local_addr()
+            .map_err(|error| DlnaError::Io(error.kind()))
+    }
+
+    /// Sends one bounded `ssdp:alive` or `ssdp:byebye` packet.
+    pub fn notify(&self, target: SocketAddr, alive: bool) -> Result<usize, DlnaError> {
+        let bytes = self.advertisement.notify(alive).encode()?;
+        self.socket
+            .send_to(&bytes, target)
+            .map_err(|error| DlnaError::Io(error.kind()))
+    }
+
+    /// Responds to a valid M-SEARCH request when its ST matches this service.
+    /// Returns `Ok(None)` for a valid but unrelated search target.
+    pub fn respond_to_search(
+        &self,
+        request: &SsdpMessage,
+        target: SocketAddr,
+    ) -> Result<Option<usize>, DlnaError> {
+        let SsdpStartLine::Request { method, .. } = &request.start_line else {
+            return Ok(None);
+        };
+        if method != "M-SEARCH"
+            || request.headers.get("man").map(String::as_str) != Some("\"ssdp:discover\"")
+        {
+            return Ok(None);
+        }
+        let Some(search_target) = request.headers.get("st") else {
+            return Ok(None);
+        };
+        if !self.advertisement.matches(search_target) {
+            return Ok(None);
+        }
+        let bytes = self.advertisement.response().encode()?;
+        self.socket
+            .send_to(&bytes, target)
+            .map(Some)
+            .map_err(|error| DlnaError::Io(error.kind()))
+    }
+}
 
 /// SSDP request or response start line.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,6 +502,80 @@ mod tests {
         assert!(xml.contains("Frame &amp; Ark"));
         assert!(
             xml.contains("<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>")
+        );
+    }
+
+    fn advertisement() -> SsdpAdvertisement {
+        SsdpAdvertisement::new(
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+            "uuid:frameark-renderer::urn:schemas-upnp-org:device:MediaRenderer:1",
+            "http://127.0.0.1:8080/device.xml",
+            1800,
+            "FrameArk/0.1 UPnP/1.1",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn udp_notify_round_trip_is_bounded_and_parseable() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let publisher =
+            SsdpPublisher::bind("127.0.0.1:0".parse().unwrap(), advertisement()).unwrap();
+        let sent = publisher
+            .notify(receiver.local_addr().unwrap(), true)
+            .unwrap();
+        let mut buffer = [0_u8; MAX_SSDP_BYTES];
+        let (received, _) = receiver.recv_from(&mut buffer).unwrap();
+        assert_eq!(sent, received);
+        let message = SsdpMessage::parse(&buffer[..received]).unwrap();
+        assert_eq!(message.headers.get("nts"), Some(&"ssdp:alive".to_string()));
+    }
+
+    #[test]
+    fn search_response_only_matches_requested_service() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let publisher =
+            SsdpPublisher::bind("127.0.0.1:0".parse().unwrap(), advertisement()).unwrap();
+        let mut headers = BTreeMap::new();
+        headers.insert("man".to_string(), "\"ssdp:discover\"".to_string());
+        headers.insert("st".to_string(), "ssdp:all".to_string());
+        let request = SsdpMessage {
+            start_line: SsdpStartLine::Request {
+                method: "M-SEARCH".to_string(),
+                target: "*".to_string(),
+            },
+            headers,
+            body: Vec::new(),
+        };
+        assert!(
+            publisher
+                .respond_to_search(&request, receiver.local_addr().unwrap())
+                .unwrap()
+                .is_some()
+        );
+        let mut buffer = [0_u8; MAX_SSDP_BYTES];
+        let (received, _) = receiver.recv_from(&mut buffer).unwrap();
+        let response = SsdpMessage::parse(&buffer[..received]).unwrap();
+        assert_eq!(
+            response.headers.get("st"),
+            Some(&advertisement().service_type)
+        );
+
+        let mut unrelated = request;
+        unrelated
+            .headers
+            .insert("st".to_string(), "upnp:rootdevice".to_string());
+        assert_eq!(
+            publisher
+                .respond_to_search(&unrelated, receiver.local_addr().unwrap())
+                .unwrap(),
+            None
         );
     }
 }

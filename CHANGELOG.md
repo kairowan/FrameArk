@@ -31,6 +31,9 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental `frameark-dlna` foundation with bounded SSDP parsing and
   escaped UPnP device-description generation; network/SOAP interoperability
   remains unimplemented.
+- Experimental bounded DLNA SSDP UDP publisher with alive/byebye and matching
+  M-SEARCH response loopback coverage; multicast scheduling remains outside
+  the crate.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
