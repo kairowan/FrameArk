@@ -19,6 +19,14 @@ pub const MAX_SDP_BYTES: usize = 16 * 1024;
 pub const MAX_SDP_LINES: usize = 64;
 /// Maximum RAOP session identifier length.
 pub const MAX_SESSION_ID_BYTES: usize = 128;
+/// Maximum XML Property List document size.
+pub const MAX_PLIST_BYTES: usize = 64 * 1024;
+/// Maximum nested Property List container depth.
+pub const MAX_PLIST_DEPTH: usize = 8;
+/// Maximum dictionary/array entries in one Property List document.
+pub const MAX_PLIST_ENTRIES: usize = 64;
+/// Maximum scalar text or binary data field size.
+pub const MAX_PLIST_FIELD_BYTES: usize = 16 * 1024;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -523,6 +531,374 @@ fn validate_raop_transport(value: &str) -> Result<(), AirplayError> {
     Ok(())
 }
 
+/// XML Property List value subset used by AirPlay control metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlistValue {
+    /// UTF-8 string value.
+    String(String),
+    /// Signed integer value.
+    Integer(i64),
+    /// Boolean value.
+    Boolean(bool),
+    /// Opaque binary data represented as XML base64.
+    Data(Vec<u8>),
+    /// Ordered values from an XML array.
+    Array(Vec<Self>),
+    /// Deterministically ordered key/value dictionary.
+    Dictionary(BTreeMap<String, Self>),
+}
+
+/// Parses the bounded XML Property List subset into a Rust value.
+pub fn parse_xml_plist(bytes: &[u8]) -> Result<PlistValue, AirplayError> {
+    if bytes.is_empty() || bytes.len() > MAX_PLIST_BYTES {
+        return Err(AirplayError::TooLarge("plist document"));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| AirplayError::Invalid("plist UTF-8"))?;
+    let start = text
+        .find("<plist")
+        .ok_or(AirplayError::Invalid("plist root"))?;
+    let mut cursor = PlistCursor {
+        input: text,
+        position: start,
+        entries: 0,
+    };
+    cursor.consume_open("plist")?;
+    let value = cursor.parse_value(0)?;
+    cursor.consume_close("plist")?;
+    if !cursor.input[cursor.position..].trim().is_empty() {
+        return Err(AirplayError::Invalid("plist trailing data"));
+    }
+    validate_plist_value(&value, 0, &mut 0)?;
+    Ok(value)
+}
+
+/// Encodes one Property List value as deterministic XML bytes.
+pub fn encode_xml_plist(value: &PlistValue) -> Result<Vec<u8>, AirplayError> {
+    let mut entries = 0;
+    validate_plist_value(value, 0, &mut entries)?;
+    let mut output =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\">".to_string();
+    encode_plist_value(value, &mut output);
+    output.push_str("</plist>");
+    if output.len() > MAX_PLIST_BYTES {
+        return Err(AirplayError::TooLarge("plist document"));
+    }
+    Ok(output.into_bytes())
+}
+
+struct PlistCursor<'a> {
+    input: &'a str,
+    position: usize,
+    entries: usize,
+}
+
+impl<'a> PlistCursor<'a> {
+    fn skip_whitespace(&mut self) {
+        while let Some(character) = self.input[self.position..].chars().next() {
+            if !character.is_whitespace() {
+                break;
+            }
+            self.position += character.len_utf8();
+        }
+    }
+
+    fn consume_open(&mut self, name: &str) -> Result<(), AirplayError> {
+        self.skip_whitespace();
+        let rest = &self.input[self.position..];
+        let prefix = format!("<{name}");
+        if !rest.starts_with(&prefix) {
+            return Err(AirplayError::Invalid("plist opening tag"));
+        }
+        let after_name = rest.as_bytes().get(prefix.len()).copied();
+        if !matches!(after_name, Some(b'>') | Some(b' ')) {
+            return Err(AirplayError::Invalid("plist opening tag"));
+        }
+        let end = rest.find('>').ok_or(AirplayError::Invalid("plist tag"))?;
+        if rest[..end].ends_with('/') {
+            return Err(AirplayError::Invalid("plist self-closing tag"));
+        }
+        self.position += end + 1;
+        Ok(())
+    }
+
+    fn consume_close(&mut self, name: &str) -> Result<(), AirplayError> {
+        self.skip_whitespace();
+        let close = format!("</{name}>");
+        if !self.input[self.position..].starts_with(&close) {
+            return Err(AirplayError::Invalid("plist closing tag"));
+        }
+        self.position += close.len();
+        Ok(())
+    }
+
+    fn parse_value(&mut self, depth: usize) -> Result<PlistValue, AirplayError> {
+        if depth > MAX_PLIST_DEPTH {
+            return Err(AirplayError::TooLarge("plist nesting"));
+        }
+        self.skip_whitespace();
+        let rest = &self.input[self.position..];
+        if rest.starts_with("<dict") {
+            self.consume_open("dict")?;
+            let mut dictionary = BTreeMap::new();
+            loop {
+                self.skip_whitespace();
+                if self.input[self.position..].starts_with("</dict>") {
+                    self.consume_close("dict")?;
+                    break;
+                }
+                let key = self.parse_text_tag("key")?;
+                if dictionary.contains_key(&key) {
+                    return Err(AirplayError::Invalid("plist duplicate key"));
+                }
+                let value = self.parse_value(depth + 1)?;
+                dictionary.insert(key, value);
+                self.entries = self.entries.saturating_add(1);
+                if self.entries > MAX_PLIST_ENTRIES {
+                    return Err(AirplayError::TooLarge("plist entries"));
+                }
+            }
+            Ok(PlistValue::Dictionary(dictionary))
+        } else if rest.starts_with("<array>") {
+            self.consume_open("array")?;
+            let mut values = Vec::new();
+            loop {
+                self.skip_whitespace();
+                if self.input[self.position..].starts_with("</array>") {
+                    self.consume_close("array")?;
+                    break;
+                }
+                values.push(self.parse_value(depth + 1)?);
+                self.entries = self.entries.saturating_add(1);
+                if self.entries > MAX_PLIST_ENTRIES {
+                    return Err(AirplayError::TooLarge("plist entries"));
+                }
+            }
+            Ok(PlistValue::Array(values))
+        } else if rest.starts_with("<string>") {
+            Ok(PlistValue::String(self.parse_text_tag("string")?))
+        } else if rest.starts_with("<integer>") {
+            let value = self.parse_text_tag("integer")?;
+            Ok(PlistValue::Integer(
+                value
+                    .parse::<i64>()
+                    .map_err(|_| AirplayError::Invalid("plist integer"))?,
+            ))
+        } else if rest.starts_with("<data>") {
+            let value = self.parse_text_tag("data")?;
+            Ok(PlistValue::Data(decode_base64(&value)?))
+        } else if rest.starts_with("<true/>") {
+            self.position += "<true/>".len();
+            Ok(PlistValue::Boolean(true))
+        } else if rest.starts_with("<false/>") {
+            self.position += "<false/>".len();
+            Ok(PlistValue::Boolean(false))
+        } else {
+            Err(AirplayError::Invalid("plist value"))
+        }
+    }
+
+    fn parse_text_tag(&mut self, name: &str) -> Result<String, AirplayError> {
+        self.consume_open(name)?;
+        let close = format!("</{name}>");
+        let relative_end = self.input[self.position..]
+            .find(&close)
+            .ok_or(AirplayError::Invalid("plist text tag"))?;
+        let raw = &self.input[self.position..self.position + relative_end];
+        if raw.len() > MAX_PLIST_FIELD_BYTES {
+            return Err(AirplayError::TooLarge("plist field"));
+        }
+        self.position += relative_end + close.len();
+        let value = unescape_xml(raw)?;
+        if value.len() > MAX_PLIST_FIELD_BYTES {
+            return Err(AirplayError::TooLarge("plist field"));
+        }
+        Ok(value)
+    }
+}
+
+fn validate_plist_value(
+    value: &PlistValue,
+    depth: usize,
+    entries: &mut usize,
+) -> Result<(), AirplayError> {
+    if depth > MAX_PLIST_DEPTH {
+        return Err(AirplayError::TooLarge("plist nesting"));
+    }
+    match value {
+        PlistValue::String(value) => {
+            if value.len() > MAX_PLIST_FIELD_BYTES {
+                return Err(AirplayError::TooLarge("plist field"));
+            }
+        }
+        PlistValue::Data(value) => {
+            if value.len() > MAX_PLIST_FIELD_BYTES {
+                return Err(AirplayError::TooLarge("plist data"));
+            }
+        }
+        PlistValue::Array(values) => {
+            if values.len() > MAX_PLIST_ENTRIES {
+                return Err(AirplayError::TooLarge("plist entries"));
+            }
+            for value in values {
+                *entries = entries.saturating_add(1);
+                if *entries > MAX_PLIST_ENTRIES {
+                    return Err(AirplayError::TooLarge("plist entries"));
+                }
+                validate_plist_value(value, depth + 1, entries)?;
+            }
+        }
+        PlistValue::Dictionary(dictionary) => {
+            if dictionary.len() > MAX_PLIST_ENTRIES {
+                return Err(AirplayError::TooLarge("plist entries"));
+            }
+            for (key, value) in dictionary {
+                if key.is_empty() || key.len() > MAX_PLIST_FIELD_BYTES {
+                    return Err(AirplayError::InvalidField("plist key"));
+                }
+                *entries = entries.saturating_add(1);
+                if *entries > MAX_PLIST_ENTRIES {
+                    return Err(AirplayError::TooLarge("plist entries"));
+                }
+                validate_plist_value(value, depth + 1, entries)?;
+            }
+        }
+        PlistValue::Integer(_) | PlistValue::Boolean(_) => {}
+    }
+    Ok(())
+}
+
+fn encode_plist_value(value: &PlistValue, output: &mut String) {
+    match value {
+        PlistValue::String(value) => {
+            output.push_str("<string>");
+            output.push_str(&escape_xml(value));
+            output.push_str("</string>");
+        }
+        PlistValue::Integer(value) => output.push_str(&format!("<integer>{value}</integer>")),
+        PlistValue::Boolean(value) => output.push_str(if *value { "<true/>" } else { "<false/>" }),
+        PlistValue::Data(value) => {
+            output.push_str("<data>");
+            output.push_str(&encode_base64(value));
+            output.push_str("</data>");
+        }
+        PlistValue::Array(values) => {
+            output.push_str("<array>");
+            for value in values {
+                encode_plist_value(value, output);
+            }
+            output.push_str("</array>");
+        }
+        PlistValue::Dictionary(dictionary) => {
+            output.push_str("<dict>");
+            for (key, value) in dictionary {
+                output.push_str("<key>");
+                output.push_str(&escape_xml(key));
+                output.push_str("</key>");
+                encode_plist_value(value, output);
+            }
+            output.push_str("</dict>");
+        }
+    }
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn unescape_xml(value: &str) -> Result<String, AirplayError> {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(index) = rest.find('&') {
+        output.push_str(&rest[..index]);
+        let end = rest[index..]
+            .find(';')
+            .ok_or(AirplayError::Invalid("plist XML entity"))?;
+        let entity = &rest[index..=index + end];
+        output.push_str(match entity {
+            "&amp;" => "&",
+            "&lt;" => "<",
+            "&gt;" => ">",
+            "&quot;" => "\"",
+            "&apos;" => "'",
+            _ => return Err(AirplayError::Invalid("plist XML entity")),
+        });
+        rest = &rest[index + end + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn encode_base64(bytes: &[u8]) -> String {
+    let mut output = String::new();
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(BASE64[(first >> 2) as usize] as char);
+        output.push(BASE64[((first & 0x03) << 4 | second >> 4) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            BASE64[((second & 0x0f) << 2 | third >> 6) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            BASE64[(third & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>, AirplayError> {
+    let compact = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if compact.len() % 4 != 0 || compact.len() / 4 * 3 > MAX_PLIST_FIELD_BYTES + 2 {
+        return Err(AirplayError::Invalid("plist base64"));
+    }
+    let mut output = Vec::new();
+    for chunk in compact.as_bytes().chunks(4) {
+        let values = chunk
+            .iter()
+            .map(|byte| match byte {
+                b'=' => Ok(64u8),
+                _ => BASE64
+                    .iter()
+                    .position(|candidate| candidate == byte)
+                    .map(|value| value as u8)
+                    .ok_or(AirplayError::Invalid("plist base64")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if values.len() != 4 || values[0] >= 64 || values[1] >= 64 {
+            return Err(AirplayError::Invalid("plist base64"));
+        }
+        output.push((values[0] << 2) | (values[1] >> 4));
+        if values[2] < 64 {
+            output.push((values[1] << 4) | (values[2] >> 2));
+            if values[3] < 64 {
+                output.push((values[2] << 6) | values[3]);
+            } else if values[3] != 64 {
+                return Err(AirplayError::Invalid("plist base64"));
+            }
+        } else if values[3] != 64 {
+            return Err(AirplayError::Invalid("plist base64"));
+        }
+    }
+    if output.len() > MAX_PLIST_FIELD_BYTES {
+        return Err(AirplayError::TooLarge("plist data"));
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +1056,59 @@ mod tests {
             Err(AirplayError::Invalid("RAOP transport"))
         );
         assert_eq!(session.state(), RaopSessionState::Announced);
+    }
+
+    #[test]
+    fn xml_plist_round_trip_preserves_bounded_values_and_escaping() {
+        let mut dictionary = BTreeMap::new();
+        dictionary.insert(
+            "name".to_string(),
+            PlistValue::String("Frame & Ark".to_string()),
+        );
+        dictionary.insert("count".to_string(), PlistValue::Integer(42));
+        dictionary.insert("enabled".to_string(), PlistValue::Boolean(true));
+        dictionary.insert("token".to_string(), PlistValue::Data(vec![0, 1, 2, 255]));
+        dictionary.insert(
+            "items".to_string(),
+            PlistValue::Array(vec![
+                PlistValue::String("one".to_string()),
+                PlistValue::Boolean(false),
+            ]),
+        );
+        let value = PlistValue::Dictionary(dictionary);
+        let encoded = encode_xml_plist(&value).unwrap();
+        assert!(
+            std::str::from_utf8(&encoded)
+                .unwrap()
+                .contains("Frame &amp; Ark")
+        );
+        assert_eq!(parse_xml_plist(&encoded).unwrap(), value);
+    }
+
+    #[test]
+    fn xml_plist_rejects_duplicate_keys_bad_entities_and_deep_nesting() {
+        let duplicate = b"<plist><dict><key>a</key><string>1</string><key>a</key><string>2</string></dict></plist>";
+        assert_eq!(
+            parse_xml_plist(duplicate),
+            Err(AirplayError::Invalid("plist duplicate key"))
+        );
+        let bad_entity = b"<plist><string>&unknown;</string></plist>";
+        assert_eq!(
+            parse_xml_plist(bad_entity),
+            Err(AirplayError::Invalid("plist XML entity"))
+        );
+        let mut nested = "<plist>".to_string();
+        for _ in 0..=MAX_PLIST_DEPTH {
+            nested.push_str("<array>");
+        }
+        nested.push_str("<string>x</string>");
+        for _ in 0..=MAX_PLIST_DEPTH {
+            nested.push_str("</array>");
+        }
+        nested.push_str("</plist>");
+        assert_eq!(
+            parse_xml_plist(nested.as_bytes()),
+            Err(AirplayError::TooLarge("plist nesting"))
+        );
     }
 }

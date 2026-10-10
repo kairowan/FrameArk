@@ -55,6 +55,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   covering OPTIONS, ANNOUNCE, SETUP, RECORD, FLUSH, GET_PARAMETER, and
   TEARDOWN; pairing, plist/FairPlay, encryption, timing, decoding, and Apple
   interoperability remain pending.
+- Experimental bounded XML Property List parser/encoder for scalar, data,
+  array, and dictionary metadata with duplicate-key, entity, depth, and size
+  limits; binary plist, pairing, and FairPlay remain unsupported.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
