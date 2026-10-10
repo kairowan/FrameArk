@@ -9,7 +9,7 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 
 ## Project status / 项目状态
 
-**Pre-alpha: M1 Native foundation in development.** The repository now contains the initial Rust contracts, bounded FANP control/media transport, a Rust media-to-renderer bridge, an experimental fixture sender CLI, and the Android Receiver shell. It is not yet a user-facing receiver or sender; protocol support listed below describes the roadmap and the verified compatibility document.
+**Pre-alpha: M3 protocol foundations in development.** The repository now contains the initial Rust contracts, bounded FANP control/media transport, a Rust media-to-renderer bridge, an experimental fixture sender CLI, the Android Receiver shell, and an experimental bounded DLNA SSDP/HTTP/SOAP MediaRenderer slice. It is not yet a user-facing receiver or sender; protocol support listed below describes the roadmap and the verified compatibility document.
 
 **预览前阶段：M1 Native 基础开发中。** 当前仓库已经包含初始 Rust 契约、受限 FANP 控制/媒体传输、Rust 媒体渲染桥、实验性的 fixture 发送 CLI 和 Android Receiver 壳；还不是面向普通用户的完整接收端或发送端。下方协议表和兼容性文档共同说明已验证范围与路线边界。
 
@@ -64,7 +64,7 @@ Identity, trust, configuration, events, and metrics
 
 Rust owns protocol and cross-platform state. Kotlin, Swift, desktop, and web layers integrate operating-system APIs, capture, hardware codecs, rendering, audio routing, lifecycle, and UI.
 
-The current M1 workspace includes the `frameark-discovery` mDNS/DNS-SD
+The current M1/M3 workspace includes the `frameark-discovery` mDNS/DNS-SD
 prototype, the experimental `frameark-transport` FANP QUIC/TLS pairing and
 bounded media stream, the `frameark-native` control/media adapters, and the
 `frameark-cli` fixture sender. Discovery publishes and browses the reserved
@@ -74,7 +74,9 @@ temporary six-digit pairing code, negotiates the shared core capability set,
 and carries bounded FAM1 access units. Rust can now exercise one complete
 Offer → Start → media → Stop loopback with fake renderers. Neither component
 grants persistent trust, ships a real codec, or claims Android hardware
-playback yet.
+playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
+caller-owned HTTP/SOAP renderer contracts; GENA, HTTP Range, media serving,
+and named-client interoperability remain future work.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current

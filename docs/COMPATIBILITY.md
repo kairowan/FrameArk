@@ -23,7 +23,7 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 | FrameArk Native QUIC media stream | Experimental | `frameark-transport` bounded multi-frame stream tests; no platform decoder or congestion policy yet |
 | FrameArk Native renderer adapter | Experimental | `frameark-native::media_session` fake video/audio renderer lifecycle and cleanup tests; no Android or desktop decoder yet |
 | Android H.264/PCM renderer adapters | Experimental | `VideoDecoderRenderer`, `AudioOutputRenderer`, and JVM config validation tests; no real-device playback matrix yet |
-| DLNA/UPnP MediaRenderer | Planned | No executable implementation yet |
+| DLNA/UPnP MediaRenderer | Experimental | `frameark-dlna` bounded SSDP/UDP plus HTTP device/SCPD and SOAP AVTransport/RenderingControl/ConnectionManager handler tests; no GENA, Range, media server, or named-client matrix |
 | AirPlay/RAOP audio | Planned | No executable implementation yet |
 | AirPlay screen mirroring | Planned | No executable implementation yet |
 | Cast V2 compatibility | Planned/Experimental | No executable implementation yet |

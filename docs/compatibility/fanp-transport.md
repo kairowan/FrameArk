@@ -57,11 +57,16 @@ network interruption/retry coverage, and a named receiver/sender matrix.
 
 ## DLNA foundation
 
-The experimental `frameark-dlna` crate now provides bounded SSDP parsing,
-escaped UPnP device-description generation, and a unicast-testable UDP
-publisher for alive/byebye notifications and matching M-SEARCH responses. It
-does not yet join multicast groups, serve HTTP/SOAP, implement
-AVTransport/GENA, or claim DLNA interoperability.
+The experimental `frameark-dlna` crate provides bounded SSDP parsing,
+escaped UPnP device-description generation, a unicast-testable UDP publisher,
+and a caller-owned HTTP/SOAP MediaRenderer handler. The handler serves device
+and SCPD XML and exercises a bounded AVTransport, RenderingControl, and
+ConnectionManager subset on explicit Rust state.
+
+It does not yet join multicast groups, schedule leases, implement GENA events,
+validate full DIDL-Lite metadata, serve media or HTTP Range, fetch URLs, or
+claim named-client DLNA interoperability. Chunked HTTP and unsupported URL
+schemes are rejected before state mutation.
 
 The experimental `frameark-airplay` crate now provides bounded RTSP/1.0 and
 strict RTP audio packet contracts. It does not implement Apple pairing,
