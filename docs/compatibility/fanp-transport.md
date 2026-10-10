@@ -73,8 +73,8 @@ multiple or unsatisfiable ranges, and unsupported URL schemes are rejected
 before state mutation.
 
 The experimental `frameark-airplay` crate provides bounded RTSP/1.0 and strict
-RTP audio packet contracts plus an explicit ANNOUNCE SDP and
+RTP audio packet contracts, XML Property List metadata, plus an explicit ANNOUNCE SDP and
 OPTIONS/ANNOUNCE/SETUP/RECORD/FLUSH/TEARDOWN RAOP session state machine. It
-does not implement Apple pairing, FairPlay/AES-CTR decryption, plist
-negotiation, audio decoding, timing/retransmission, or Apple-device
+does not implement Apple pairing, binary plist/FairPlay/AES-CTR decryption,
+audio decoding, timing/retransmission, or Apple-device
 compatibility.

@@ -78,6 +78,11 @@ failures without logging JNI arguments. It is not an authorization boundary;
 real network pairing and persistent identity must remain in the Rust transport
 and platform keystore layers.
 
+The AirPlay XML Property List boundary caps document size, nesting, entries,
+scalar/data fields, duplicate keys, and base64 decoding. It is not a parser for
+binary plists or a FairPlay key container; callers must keep pairing secrets out
+of diagnostics and only pass authenticated metadata into future crypto code.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
