@@ -77,6 +77,12 @@ parsers enforce document, object-table, reference, depth, and scalar-size
 bounds; binary plist cycles and unsupported object types are rejected before
 allocation of nested values.
 
+The RAOP RTP jitter buffer caps retained packets, rejects duplicate and late
+sequence numbers, handles 16-bit sequence wrap, and requires the caller to
+declare a missing-packet recovery point. It does not conceal loss, authenticate
+packets, decrypt payloads, or provide a timing guarantee without a future
+clock/retransmission policy.
+
 The Android JNI bridge keeps its Rust session and bounded encoded-media queue in
 process-local protected state, carries no key material, caps each submitted
 frame at 4 MiB and the queue at 16 frames, and maps ABI/start/stop/media

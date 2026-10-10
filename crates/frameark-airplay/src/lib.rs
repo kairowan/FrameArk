@@ -13,6 +13,8 @@ pub const MAX_RTSP_BYTES: usize = 64 * 1024;
 pub const MAX_RTSP_BODY_BYTES: usize = 32 * 1024;
 /// Maximum RTP payload size accepted by the bounded audio contract.
 pub const MAX_RTP_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Maximum packets retained by one RAOP RTP jitter buffer.
+pub const MAX_RTP_JITTER_PACKETS: usize = 128;
 /// Maximum SDP body accepted by ANNOUNCE.
 pub const MAX_SDP_BYTES: usize = 16 * 1024;
 /// Maximum SDP attribute lines accepted by one announcement.
@@ -241,6 +243,105 @@ pub struct RtpAudioPacket {
     pub ssrc: u32,
     /// Encoded or PCM audio payload.
     pub payload: Vec<u8>,
+}
+
+/// Result of inserting one packet into the bounded RTP jitter buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RtpPushResult {
+    /// The packet is retained until its sequence becomes the next packet.
+    Buffered,
+    /// The packet arrived behind the already-consumed sequence window.
+    DroppedLate,
+}
+
+/// A sequence-aware, bounded jitter buffer for unencrypted RAOP RTP packets.
+///
+/// The buffer does not conceal loss or decode audio. Callers can use
+/// [`Self::skip_missing_to`] after a protocol-specific deadline to advance over
+/// a gap, then continue draining packets in sequence order.
+#[derive(Debug)]
+pub struct RtpJitterBuffer {
+    capacity: usize,
+    next_sequence: Option<u16>,
+    packets: BTreeMap<u16, RtpAudioPacket>,
+    dropped_late: u64,
+}
+
+impl RtpJitterBuffer {
+    /// Creates a buffer with a bounded packet capacity.
+    pub fn new(capacity: usize) -> Result<Self, AirplayError> {
+        if capacity == 0 || capacity > MAX_RTP_JITTER_PACKETS {
+            return Err(AirplayError::InvalidField("RTP jitter capacity"));
+        }
+        Ok(Self {
+            capacity,
+            next_sequence: None,
+            packets: BTreeMap::new(),
+            dropped_late: 0,
+        })
+    }
+
+    /// Inserts one packet while preserving sequence-wrap ordering.
+    pub fn push(&mut self, packet: RtpAudioPacket) -> Result<RtpPushResult, AirplayError> {
+        if let Some(next) = self.next_sequence {
+            if sequence_before(packet.sequence, next) {
+                self.dropped_late = self.dropped_late.saturating_add(1);
+                return Ok(RtpPushResult::DroppedLate);
+            }
+        } else {
+            self.next_sequence = Some(packet.sequence);
+        }
+        if self.packets.contains_key(&packet.sequence) {
+            return Err(AirplayError::Invalid("RTP duplicate sequence"));
+        }
+        if self.packets.len() >= self.capacity {
+            return Err(AirplayError::TooLarge("RTP jitter buffer"));
+        }
+        self.packets.insert(packet.sequence, packet);
+        Ok(RtpPushResult::Buffered)
+    }
+
+    /// Removes the packet whose sequence is currently due, if available.
+    pub fn pop_ready(&mut self) -> Option<RtpAudioPacket> {
+        let sequence = self.next_sequence?;
+        let packet = self.packets.remove(&sequence)?;
+        self.next_sequence = Some(sequence.wrapping_add(1));
+        Some(packet)
+    }
+
+    /// Advances across a missing sequence gap and returns the number skipped.
+    pub fn skip_missing_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
+        let Some(next) = self.next_sequence else {
+            self.next_sequence = Some(sequence);
+            return Ok(0);
+        };
+        if sequence_before(sequence, next) {
+            return Err(AirplayError::Invalid("RTP sequence recovery"));
+        }
+        let missing = sequence.wrapping_sub(next);
+        self.next_sequence = Some(sequence);
+        Ok(missing)
+    }
+
+    /// Returns the number of packets waiting in the buffer.
+    pub fn buffered_len(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Returns the next sequence expected by the consumer.
+    pub fn next_sequence(&self) -> Option<u16> {
+        self.next_sequence
+    }
+
+    /// Returns the number of packets dropped after arriving late.
+    pub fn dropped_late(&self) -> u64 {
+        self.dropped_late
+    }
+}
+
+fn sequence_before(sequence: u16, reference: u16) -> bool {
+    let distance = sequence.wrapping_sub(reference);
+    distance > 0x8000
 }
 
 impl RtpAudioPacket {
@@ -1552,6 +1653,67 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    fn rtp_packet(sequence: u16) -> RtpAudioPacket {
+        RtpAudioPacket {
+            marker: false,
+            payload_type: 96,
+            sequence,
+            timestamp: u32::from(sequence) * 960,
+            ssrc: 7,
+            payload: vec![sequence as u8],
+        }
+    }
+
+    #[test]
+    fn rtp_jitter_buffer_reorders_and_recovers_gaps() {
+        let mut buffer = RtpJitterBuffer::new(4).unwrap();
+        assert_eq!(
+            buffer.push(rtp_packet(10)).unwrap(),
+            RtpPushResult::Buffered
+        );
+        assert_eq!(
+            buffer.push(rtp_packet(12)).unwrap(),
+            RtpPushResult::Buffered
+        );
+        assert_eq!(
+            buffer.push(rtp_packet(11)).unwrap(),
+            RtpPushResult::Buffered
+        );
+        assert_eq!(buffer.pop_ready().unwrap().sequence, 10);
+        assert_eq!(buffer.pop_ready().unwrap().sequence, 11);
+        assert_eq!(buffer.pop_ready().unwrap().sequence, 12);
+        assert_eq!(buffer.buffered_len(), 0);
+
+        let mut recovery = RtpJitterBuffer::new(2).unwrap();
+        recovery.push(rtp_packet(10)).unwrap();
+        recovery.push(rtp_packet(12)).unwrap();
+        assert_eq!(recovery.pop_ready().unwrap().sequence, 10);
+        assert!(recovery.pop_ready().is_none());
+        assert_eq!(recovery.skip_missing_to(12).unwrap(), 1);
+        assert_eq!(recovery.pop_ready().unwrap().sequence, 12);
+    }
+
+    #[test]
+    fn rtp_jitter_buffer_bounds_duplicates_late_packets_and_wrap() {
+        let mut buffer = RtpJitterBuffer::new(1).unwrap();
+        assert!(RtpJitterBuffer::new(0).is_err());
+        assert!(RtpJitterBuffer::new(MAX_RTP_JITTER_PACKETS + 1).is_err());
+        buffer.push(rtp_packet(u16::MAX)).unwrap();
+        assert_eq!(buffer.pop_ready().unwrap().sequence, u16::MAX);
+        assert_eq!(
+            buffer.push(rtp_packet(u16::MAX)).unwrap(),
+            RtpPushResult::DroppedLate
+        );
+        assert_eq!(buffer.dropped_late(), 1);
+        assert_eq!(buffer.push(rtp_packet(0)).unwrap(), RtpPushResult::Buffered);
+        assert_eq!(
+            buffer.push(rtp_packet(0)),
+            Err(AirplayError::Invalid("RTP duplicate sequence"))
+        );
+        assert_eq!(buffer.pop_ready().unwrap().sequence, 0);
+        assert!(buffer.skip_missing_to(u16::MAX).is_err());
     }
 
     fn request(method: &str, cseq: u32, headers: &[(&str, &str)], body: &[u8]) -> RtspMessage {
