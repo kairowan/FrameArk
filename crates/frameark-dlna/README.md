@@ -17,6 +17,7 @@ DLNA/UPnP MediaRenderer work.
 - deterministic DIDL-Lite item generation for URI metadata;
 - bounded GENA subscription/renew/unsubscribe policy with sequenced event
   bodies for caller-owned callback HTTP;
+- deterministic bounded HTTP `NOTIFY` request encoding for queued GENA events;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 
@@ -39,6 +40,8 @@ full DIDL-Lite parsing,
 multicast lease scheduling, streaming file backends, real decoder integration,
 and named client interoperability are not implemented yet. The TCP adapter is
 single-request and synchronous, so it is not a production multi-client daemon.
+`GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
+client but does not open callback sockets or retry failures.
 The compatibility label is **Experimental**, not Stable.
 
 Run the focused tests with:
