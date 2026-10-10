@@ -13,8 +13,11 @@ rejects duplicate keys, unknown values, malformed entities/base64, excessive
 depth, and oversized fields. Encoding emits a fixed UTF-8 XML declaration and
 stable dictionary order.
 
-The implementation is a metadata contract only. It does not implement binary
-Property Lists, FairPlay keys, pairing cryptography, or trust persistence.
+The implementation is a metadata contract only. Binary Property Lists are
+handled by a separate bounded parser that maps the same value subset and
+rejects unsupported object types, references outside the object table, cycles,
+and excessive object counts. Neither parser implements FairPlay keys, pairing
+cryptography, or trust persistence.
 
 ## Evidence and limits
 
