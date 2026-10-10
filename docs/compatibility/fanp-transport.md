@@ -23,6 +23,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Multiple frames on one QUIC media stream | Pass on loopback with explicit FIN and frame-size limits | `frameark-transport::media::sends_multiple_bounded_frames_until_fin` |
 | Native packet-to-renderer lifecycle | Pass with fake video/audio renderers, track checks, and partial-prepare cleanup | `frameark-native::media_session` tests |
 | Rust QUIC media receiver orchestration | Pass on a real pinned-QUIC loopback: FAM1 frames are decoded, routed to both renderers, counted, and reset on FIN | `quic_media_stream_reaches_renderers_and_cleans_up` |
+| Native Offer → Start → media → Stop vertical sequence | Pass on a real pinned-QUIC loopback with backend, renderer-factory, control-state, media counters, and cleanup assertions | `control_and_media_complete_one_native_session` |
 | Android renderer configuration | Pass for JVM config validation and Android lint/build; hardware behavior unverified | `MediaTrackConfigTest`, Android `lint test assembleDebug` |
 | Fixture sender CLI validation | Pass; bounded fixture file, frame-count, interval, pairing-code, and required-input checks | `frameark-cli` unit tests |
 
@@ -38,6 +39,9 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
   and the Android adapters remain platform lifecycle components.
 - No input, clipboard, file-transfer, management stream, congestion-control
   policy, or datagram media path is implemented.
+- The current sender/orchestrator supports one Offer, one media stream, and one
+  Stop sequence; it does not yet implement dynamic reconfiguration, retry, or
+  reconnect.
 - The fixture CLI accepts real H.264/Opus/AAC access-unit files but the
   repository does not ship a licensed codec sample or decoder matrix yet; no
   1080p playback evidence exists.
