@@ -13,6 +13,12 @@ pub const MAX_RTSP_BYTES: usize = 64 * 1024;
 pub const MAX_RTSP_BODY_BYTES: usize = 32 * 1024;
 /// Maximum RTP payload size accepted by the bounded audio contract.
 pub const MAX_RTP_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Maximum SDP body accepted by ANNOUNCE.
+pub const MAX_SDP_BYTES: usize = 16 * 1024;
+/// Maximum SDP attribute lines accepted by one announcement.
+pub const MAX_SDP_LINES: usize = 64;
+/// Maximum RAOP session identifier length.
+pub const MAX_SESSION_ID_BYTES: usize = 128;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -282,6 +288,241 @@ pub enum RaopCodec {
     Aac,
 }
 
+/// Negotiated RAOP audio parameters from one ANNOUNCE SDP body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RaopAudioFormat {
+    /// Codec selected by the sender's RTP map.
+    pub codec: RaopCodec,
+    /// RTP sample rate in Hz.
+    pub sample_rate: u32,
+    /// Number of interleaved audio channels.
+    pub channels: u8,
+    /// Bits per PCM sample when the codec exposes it.
+    pub bits_per_sample: u8,
+    /// Sender RTP payload type.
+    pub payload_type: u8,
+}
+
+impl RaopAudioFormat {
+    /// Parses the bounded SDP subset used by RAOP ANNOUNCE.
+    pub fn from_sdp(body: &[u8]) -> Result<Self, AirplayError> {
+        if body.is_empty() || body.len() > MAX_SDP_BYTES {
+            return Err(AirplayError::TooLarge("SDP body"));
+        }
+        let text = std::str::from_utf8(body).map_err(|_| AirplayError::Invalid("SDP UTF-8"))?;
+        let mut lines = 0usize;
+        let mut media_audio = false;
+        let mut payload_type = None;
+        let mut format = None;
+        for line in text.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+            lines = lines.saturating_add(1);
+            if lines > MAX_SDP_LINES {
+                return Err(AirplayError::TooLarge("SDP lines"));
+            }
+            if line.len() > 2048 || !line.contains('=') {
+                return Err(AirplayError::Invalid("SDP line"));
+            }
+            if line == "m=audio 0 RTP/AVP 96" || line.starts_with("m=audio ") {
+                let parts = line.split_whitespace().collect::<Vec<_>>();
+                if parts.len() < 4 || parts[2] != "RTP/AVP" {
+                    return Err(AirplayError::Invalid("SDP media description"));
+                }
+                payload_type = Some(
+                    parts[3]
+                        .parse::<u8>()
+                        .map_err(|_| AirplayError::Invalid("SDP payload type"))?,
+                );
+                media_audio = true;
+            } else if let Some(value) = line.strip_prefix("a=rtpmap:") {
+                let (payload, codec_details) = value
+                    .split_once(' ')
+                    .ok_or(AirplayError::Invalid("SDP rtpmap"))?;
+                let payload = payload
+                    .parse::<u8>()
+                    .map_err(|_| AirplayError::Invalid("SDP payload type"))?;
+                let parts = codec_details.split('/').collect::<Vec<_>>();
+                if parts.len() < 2 || parts.len() > 3 {
+                    return Err(AirplayError::Invalid("SDP rtpmap"));
+                }
+                let codec = match parts[0].to_ascii_lowercase().as_str() {
+                    "applelossless" => RaopCodec::Alac,
+                    "mpeg4-generic" => RaopCodec::Aac,
+                    "l16" | "pcm" => RaopCodec::Pcm,
+                    _ => return Err(AirplayError::Invalid("SDP codec")),
+                };
+                let sample_rate = parts[1]
+                    .parse::<u32>()
+                    .map_err(|_| AirplayError::Invalid("SDP sample rate"))?;
+                let channels = parts
+                    .get(2)
+                    .map(|value| {
+                        value
+                            .parse::<u8>()
+                            .map_err(|_| AirplayError::Invalid("SDP channels"))
+                    })
+                    .transpose()?
+                    .unwrap_or(2);
+                if sample_rate == 0 || channels == 0 || channels > 8 {
+                    return Err(AirplayError::Invalid("SDP audio format"));
+                }
+                format = Some((payload, codec, sample_rate, channels));
+            }
+        }
+        if !media_audio {
+            return Err(AirplayError::Invalid("SDP audio media"));
+        }
+        let Some((mapped_payload, codec, sample_rate, channels)) = format else {
+            return Err(AirplayError::Invalid("SDP rtpmap"));
+        };
+        if payload_type != Some(mapped_payload) {
+            return Err(AirplayError::Invalid("SDP payload mismatch"));
+        }
+        Ok(Self {
+            codec,
+            sample_rate,
+            channels,
+            bits_per_sample: if codec == RaopCodec::Pcm { 16 } else { 0 },
+            payload_type: mapped_payload,
+        })
+    }
+}
+
+/// RAOP negotiation state owned by one RTSP connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RaopSessionState {
+    /// No ANNOUNCE has been accepted.
+    Idle,
+    /// Audio format has been negotiated.
+    Announced,
+    /// UDP transport has been selected.
+    Setup,
+    /// Sender has started RTP delivery.
+    Recording,
+    /// Session has been torn down and cannot be reused.
+    Closed,
+}
+
+/// Bounded RAOP RTSP state machine. It does not own a TCP or UDP socket.
+pub struct RaopSession {
+    state: RaopSessionState,
+    audio_format: Option<RaopAudioFormat>,
+    server_port: u16,
+    session_id: String,
+}
+
+impl RaopSession {
+    /// Creates a session with an explicit caller-bound UDP server port.
+    pub fn new(server_port: u16) -> Result<Self, AirplayError> {
+        if server_port == 0 {
+            return Err(AirplayError::InvalidField("RAOP server port"));
+        }
+        Ok(Self {
+            state: RaopSessionState::Idle,
+            audio_format: None,
+            server_port,
+            session_id: "frameark-raop-1".to_string(),
+        })
+    }
+
+    /// Returns the current negotiation state.
+    pub fn state(&self) -> RaopSessionState {
+        self.state
+    }
+
+    /// Returns the negotiated audio format after ANNOUNCE.
+    pub fn audio_format(&self) -> Option<&RaopAudioFormat> {
+        self.audio_format.as_ref()
+    }
+
+    /// Applies one RTSP request and returns a bounded response.
+    pub fn handle(&mut self, request: &RtspMessage) -> Result<RtspMessage, AirplayError> {
+        let cseq = request.cseq()?;
+        let RtspStartLine::Request { method, .. } = &request.start_line else {
+            return Err(AirplayError::Invalid("RTSP request"));
+        };
+        let method = method.as_str();
+        let mut headers = BTreeMap::new();
+        headers.insert("cseq".to_string(), cseq.to_string());
+        headers.insert("server".to_string(), "FrameArk/0.1 RAOP".to_string());
+        if method != "OPTIONS" {
+            headers.insert("session".to_string(), self.session_id.clone());
+        }
+        let body = match method {
+            "OPTIONS" => {
+                headers.insert(
+                    "public".to_string(),
+                    "OPTIONS, ANNOUNCE, SETUP, RECORD, FLUSH, TEARDOWN, GET_PARAMETER".to_string(),
+                );
+                Vec::new()
+            }
+            "ANNOUNCE" if self.state == RaopSessionState::Idle => {
+                let format = RaopAudioFormat::from_sdp(&request.body)?;
+                self.audio_format = Some(format);
+                self.state = RaopSessionState::Announced;
+                Vec::new()
+            }
+            "SETUP" if self.state == RaopSessionState::Announced => {
+                let transport = request
+                    .headers
+                    .get("transport")
+                    .ok_or(AirplayError::Invalid("RAOP transport"))?;
+                validate_raop_transport(transport)?;
+                headers.insert(
+                    "transport".to_string(),
+                    format!(
+                        "RTP/AVP/UDP;unicast;mode=record;server_port={}",
+                        self.server_port
+                    ),
+                );
+                self.state = RaopSessionState::Setup;
+                Vec::new()
+            }
+            "RECORD" if self.state == RaopSessionState::Setup => {
+                self.state = RaopSessionState::Recording;
+                Vec::new()
+            }
+            "FLUSH"
+                if matches!(
+                    self.state,
+                    RaopSessionState::Setup | RaopSessionState::Recording
+                ) =>
+            {
+                Vec::new()
+            }
+            "GET_PARAMETER" if self.state != RaopSessionState::Closed => request.body.clone(),
+            "TEARDOWN" if self.state != RaopSessionState::Closed => {
+                self.state = RaopSessionState::Closed;
+                self.audio_format = None;
+                Vec::new()
+            }
+            _ => return Err(AirplayError::Invalid("RAOP session transition")),
+        };
+        if !body.is_empty() {
+            headers.insert("content-length".to_string(), body.len().to_string());
+        }
+        Ok(RtspMessage {
+            start_line: RtspStartLine::Response {
+                status: 200,
+                reason: "OK".to_string(),
+            },
+            headers,
+            body,
+        })
+    }
+}
+
+fn validate_raop_transport(value: &str) -> Result<(), AirplayError> {
+    validate_text(value, "RAOP transport")?;
+    if !value.contains("RTP/AVP/UDP")
+        || !value.contains("unicast")
+        || !value.contains("mode=record")
+        || value.contains("interleaved=")
+    {
+        return Err(AirplayError::Invalid("RAOP transport"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +586,99 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    fn request(method: &str, cseq: u32, headers: &[(&str, &str)], body: &[u8]) -> RtspMessage {
+        let mut all = BTreeMap::new();
+        all.insert("cseq".to_string(), cseq.to_string());
+        for (name, value) in headers {
+            all.insert((*name).to_string(), (*value).to_string());
+        }
+        RtspMessage {
+            start_line: RtspStartLine::Request {
+                method: method.to_string(),
+                uri: "rtsp://receiver/stream".to_string(),
+            },
+            headers: all,
+            body: body.to_vec(),
+        }
+    }
+
+    fn announce() -> RtspMessage {
+        request(
+            "ANNOUNCE",
+            2,
+            &[],
+            b"v=0\r\nm=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless/44100/2\r\n",
+        )
+    }
+
+    #[test]
+    fn sdp_and_raop_session_complete_bounded_negotiation() {
+        let format = RaopAudioFormat::from_sdp(&announce().body).unwrap();
+        assert_eq!(format.codec, RaopCodec::Alac);
+        assert_eq!(format.sample_rate, 44_100);
+        assert_eq!(format.channels, 2);
+        assert_eq!(format.payload_type, 96);
+
+        let mut session = RaopSession::new(6000).unwrap();
+        assert_eq!(session.state(), RaopSessionState::Idle);
+        assert_eq!(
+            session
+                .handle(&request("OPTIONS", 1, &[], &[]))
+                .unwrap()
+                .cseq()
+                .unwrap(),
+            1
+        );
+        session.handle(&announce()).unwrap();
+        assert_eq!(session.state(), RaopSessionState::Announced);
+        let setup = request(
+            "SETUP",
+            3,
+            &[(
+                "transport",
+                "RTP/AVP/UDP;unicast;mode=record;control_port=6001",
+            )],
+            &[],
+        );
+        let response = session.handle(&setup).unwrap();
+        assert_eq!(session.state(), RaopSessionState::Setup);
+        assert_eq!(
+            response.headers.get("transport"),
+            Some(&"RTP/AVP/UDP;unicast;mode=record;server_port=6000".to_string())
+        );
+        session.handle(&request("RECORD", 4, &[], &[])).unwrap();
+        assert_eq!(session.state(), RaopSessionState::Recording);
+        session.handle(&request("FLUSH", 5, &[], &[])).unwrap();
+        session.handle(&request("TEARDOWN", 6, &[], &[])).unwrap();
+        assert_eq!(session.state(), RaopSessionState::Closed);
+        assert!(session.audio_format().is_none());
+    }
+
+    #[test]
+    fn raop_rejects_wrong_codec_sdp_transport_and_state_order() {
+        let unsupported = b"v=0\r\nm=audio 0 RTP/AVP 96\r\na=rtpmap:96 OPUS/48000/2\r\n";
+        assert_eq!(
+            RaopAudioFormat::from_sdp(unsupported),
+            Err(AirplayError::Invalid("SDP codec"))
+        );
+        let mut session = RaopSession::new(6000).unwrap();
+        assert_eq!(
+            session.handle(&request("RECORD", 1, &[], &[])),
+            Err(AirplayError::Invalid("RAOP session transition"))
+        );
+        session.handle(&announce()).unwrap();
+        let bad_setup = request(
+            "SETUP",
+            3,
+            &[("transport", "RTP/AVP/TCP;interleaved=0-1")],
+            &[],
+        );
+        assert_eq!(
+            session.handle(&bad_setup),
+            Err(AirplayError::Invalid("RAOP transport"))
+        );
+        assert_eq!(session.state(), RaopSessionState::Announced);
     }
 }
