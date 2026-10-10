@@ -8,6 +8,8 @@ DLNA/UPnP MediaRenderer work.
 - bounded SSDP parsing/encoding and a caller-owned UDP publisher;
 - escaped UPnP root-device and service descriptions;
 - bounded HTTP/1.1 request parsing and deterministic responses;
+- a bounded synchronous TCP adapter with read timeouts and one-request
+  connection cleanup;
 - an in-process MediaRenderer handler for `AVTransport`,
   `RenderingControl`, and `ConnectionManager` SOAP actions;
 - single-range HTTP media responses with bounded in-memory resources and
@@ -18,10 +20,11 @@ DLNA/UPnP MediaRenderer work.
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 
-The handler is intentionally not a TCP server. A daemon or platform service
-owns sockets, request timeouts, multicast membership, and media rendering, then
-passes one complete request to `MediaRendererHttpService`. This keeps protocol
-state in Rust and makes malformed-request tests deterministic.
+`MediaRendererTcpServer` is a deliberately small socket boundary: it serves
+one complete request per call, closes the connection after the response, and
+leaves accept-loop scheduling, multicast membership, and media rendering to a
+daemon or platform service. The handler remains reusable for asynchronous
+servers and malformed-request tests.
 
 ## Supported subset
 
@@ -34,8 +37,9 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 HTTP chunked transfer, GENA lease expiry scheduling, callback connection I/O,
 full DIDL-Lite parsing,
 multicast lease scheduling, streaming file backends, real decoder integration,
-and named client interoperability are not implemented yet. The compatibility
-label is **Experimental**, not Stable.
+and named client interoperability are not implemented yet. The TCP adapter is
+single-request and synchronous, so it is not a production multi-client daemon.
+The compatibility label is **Experimental**, not Stable.
 
 Run the focused tests with:
 

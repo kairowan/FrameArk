@@ -41,6 +41,10 @@ All notable FrameArk changes will be documented in this file. The project follow
   SCPD descriptions and applying AVTransport, RenderingControl, and
   ConnectionManager actions to explicit Rust state; GENA, DIDL-Lite, HTTP
   Range, media serving, and named-client interoperability remain pending.
+- Experimental bounded DLNA synchronous TCP MediaRenderer adapter with
+  read-timeout, complete-request, response-size, and one-request connection
+  cleanup coverage; asynchronous multi-client serving remains outside the
+  protocol crate.
 - Experimental bounded DLNA single-range media response policy and DIDL-Lite
   item generator with XML escaping and explicit resource limits; streaming
   file backends, full metadata parsing, and GENA remain pending.
