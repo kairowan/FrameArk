@@ -54,3 +54,9 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
 
 Before this entry can become Beta, add Android and desktop loopback tests,
 network interruption/retry coverage, and a named receiver/sender matrix.
+
+## DLNA foundation
+
+The experimental `frameark-dlna` crate now provides bounded SSDP parsing and
+escaped UPnP device-description generation. It does not yet publish SSDP,
+serve HTTP/SOAP, implement AVTransport/GENA, or claim DLNA interoperability.
