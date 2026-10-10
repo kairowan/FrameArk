@@ -72,6 +72,12 @@ allocating media state. It does not authenticate Apple senders or decrypt
 protected audio; callers must not expose the unauthenticated state machine to
 untrusted networks or treat it as a FairPlay boundary.
 
+The Android JNI lifecycle bridge keeps its Rust session in process-local
+protected state, carries no media or key material, and maps ABI/start/stop
+failures without logging JNI arguments. It is not an authorization boundary;
+real network pairing and persistent identity must remain in the Rust transport
+and platform keystore layers.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
