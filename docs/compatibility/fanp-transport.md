@@ -27,7 +27,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Android renderer configuration | Pass for JVM config validation and Android lint/build; hardware behavior unverified | `MediaTrackConfigTest`, Android `lint test assembleDebug` |
 | Android Receiver foreground-service lifecycle | Pass for manifest, notification-service wiring, and action-policy JVM tests; device reclaim behavior unverified | `ReceiverServicePolicyTest`, Android `lint test assembleDebug` |
 | Android Keystore identity policy | Pass for alias bounds and deterministic public-key fingerprint formatting; Keystore provisioning unverified on JVM | `DeviceIdentityPolicyTest`, Android `lint test assembleDebug` |
-| Android Rust/JNI receiver lifecycle | Pass for protected Rust core-session start/stop mapping and Kotlin result handling; physical-device loading and network callbacks unverified | `frameark-ffi` lifecycle test, `FrameArkNativeTest`, Android `lint test assembleDebug` |
+| Android Rust/JNI receiver lifecycle and media envelope | Pass for protected Rust core-session start/stop mapping, bounded JNI video/audio queue, backpressure, and Kotlin `FAMF` decoding; physical-device loading, network attachment, and hardware renderer callbacks unverified | `frameark-ffi` lifecycle/media-queue tests, `FrameArkNativeTest`, Android `lint test assembleDebug` |
 | Fixture sender CLI validation | Pass; bounded fixture file, frame-count, interval, pairing-code, and required-input checks | `frameark-cli` unit tests |
 
 ## Explicit limits
