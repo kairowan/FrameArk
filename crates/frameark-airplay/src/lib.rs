@@ -27,6 +27,8 @@ pub const MAX_PLIST_DEPTH: usize = 8;
 pub const MAX_PLIST_ENTRIES: usize = 64;
 /// Maximum scalar text or binary data field size.
 pub const MAX_PLIST_FIELD_BYTES: usize = 16 * 1024;
+/// Maximum objects in one binary Property List object table.
+pub const MAX_BINARY_PLIST_OBJECTS: usize = MAX_PLIST_ENTRIES * 2 + 1;
 /// Maximum encoded H.264 access unit accepted by the mirror contract.
 pub const MAX_MIRROR_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum H.264 NAL units in one mirror access unit.
@@ -806,6 +808,360 @@ pub fn parse_xml_plist(bytes: &[u8]) -> Result<PlistValue, AirplayError> {
     Ok(value)
 }
 
+/// Parses the bounded binary Property List subset used by newer AirPlay
+/// control messages. Strings, integers, booleans, data, arrays, and
+/// dictionaries map to [`PlistValue`]. UID, date, real, and null objects are
+/// rejected because they have no lossless representation in the shared model.
+pub fn parse_binary_plist(bytes: &[u8]) -> Result<PlistValue, AirplayError> {
+    if bytes.len() < 8 + 32 || bytes.len() > MAX_PLIST_BYTES {
+        return Err(AirplayError::TooLarge("binary plist document"));
+    }
+    if &bytes[..8] != b"bplist00" {
+        return Err(AirplayError::Invalid("binary plist header"));
+    }
+    let trailer = bytes.len() - 32;
+    let offset_int_size = usize::from(bytes[trailer + 6]);
+    let object_ref_size = usize::from(bytes[trailer + 7]);
+    if !matches!(offset_int_size, 1 | 2 | 4 | 8) || !matches!(object_ref_size, 1 | 2 | 4 | 8) {
+        return Err(AirplayError::Invalid("binary plist integer size"));
+    }
+    let object_count = read_u64(&bytes[trailer + 8..trailer + 16])?;
+    let top_object = read_u64(&bytes[trailer + 16..trailer + 24])?;
+    let offset_table = read_u64(&bytes[trailer + 24..trailer + 32])?;
+    let object_count = usize::try_from(object_count)
+        .map_err(|_| AirplayError::TooLarge("binary plist objects"))?;
+    let top_object = usize::try_from(top_object)
+        .map_err(|_| AirplayError::Invalid("binary plist top object"))?;
+    let offset_table = usize::try_from(offset_table)
+        .map_err(|_| AirplayError::Invalid("binary plist offset table"))?;
+    if object_count == 0
+        || object_count > MAX_BINARY_PLIST_OBJECTS
+        || top_object >= object_count
+        || offset_table < 8
+        || offset_table > trailer
+    {
+        return Err(AirplayError::Invalid("binary plist trailer"));
+    }
+    let table_bytes = object_count
+        .checked_mul(offset_int_size)
+        .ok_or(AirplayError::TooLarge("binary plist offset table"))?;
+    let table_end = offset_table
+        .checked_add(table_bytes)
+        .ok_or(AirplayError::TooLarge("binary plist offset table"))?;
+    if table_end > trailer {
+        return Err(AirplayError::Invalid("binary plist offset table"));
+    }
+    let mut offsets = Vec::with_capacity(object_count);
+    for chunk in bytes[offset_table..table_end].chunks_exact(offset_int_size) {
+        let offset = read_uint(chunk)?;
+        if offset < 8 || offset >= offset_table {
+            return Err(AirplayError::Invalid("binary plist object offset"));
+        }
+        offsets.push(offset);
+    }
+    let mut cache = vec![None; object_count];
+    let mut visiting = vec![false; object_count];
+    parse_binary_object(
+        top_object,
+        0,
+        bytes,
+        offset_table,
+        object_ref_size,
+        &offsets,
+        &mut cache,
+        &mut visiting,
+    )
+}
+
+// The parser keeps its bounded state explicit so recursive calls cannot hide
+// limits in a global or unbounded heap context.
+#[allow(clippy::too_many_arguments)]
+fn parse_binary_object(
+    index: usize,
+    depth: usize,
+    bytes: &[u8],
+    object_end: usize,
+    object_ref_size: usize,
+    offsets: &[usize],
+    cache: &mut [Option<PlistValue>],
+    visiting: &mut [bool],
+) -> Result<PlistValue, AirplayError> {
+    if depth > MAX_PLIST_DEPTH {
+        return Err(AirplayError::TooLarge("binary plist nesting"));
+    }
+    if let Some(value) = &cache[index] {
+        return Ok(value.clone());
+    }
+    if visiting[index] {
+        return Err(AirplayError::Invalid("binary plist cycle"));
+    }
+    visiting[index] = true;
+    let result = parse_binary_object_inner(
+        index,
+        depth,
+        bytes,
+        object_end,
+        object_ref_size,
+        offsets,
+        cache,
+        visiting,
+    );
+    visiting[index] = false;
+    if let Ok(value) = &result {
+        cache[index] = Some(value.clone());
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_binary_object_inner(
+    index: usize,
+    depth: usize,
+    bytes: &[u8],
+    object_end: usize,
+    object_ref_size: usize,
+    offsets: &[usize],
+    cache: &mut [Option<PlistValue>],
+    visiting: &mut [bool],
+) -> Result<PlistValue, AirplayError> {
+    let offset = offsets[index];
+    let marker = *bytes
+        .get(offset)
+        .ok_or(AirplayError::Invalid("binary plist object"))?;
+    let kind = marker >> 4;
+    let info = marker & 0x0f;
+    let mut cursor = offset + 1;
+    match kind {
+        0x0 => match info {
+            0x8 => Ok(PlistValue::Boolean(false)),
+            0x9 => Ok(PlistValue::Boolean(true)),
+            _ => Err(AirplayError::Invalid("binary plist null")),
+        },
+        0x1 => Ok(PlistValue::Integer(read_binary_integer(
+            bytes,
+            &mut cursor,
+            info,
+            object_end,
+        )?)),
+        0x4 => {
+            let length = read_binary_count(bytes, &mut cursor, info, object_end)?;
+            if length > MAX_PLIST_FIELD_BYTES
+                || cursor
+                    .checked_add(length)
+                    .is_none_or(|end| end > object_end)
+            {
+                return Err(AirplayError::TooLarge("binary plist data"));
+            }
+            Ok(PlistValue::Data(bytes[cursor..cursor + length].to_vec()))
+        }
+        0x5 => {
+            let length = read_binary_count(bytes, &mut cursor, info, object_end)?;
+            if length > MAX_PLIST_FIELD_BYTES
+                || cursor
+                    .checked_add(length)
+                    .is_none_or(|end| end > object_end)
+            {
+                return Err(AirplayError::TooLarge("binary plist string"));
+            }
+            let value = std::str::from_utf8(&bytes[cursor..cursor + length])
+                .map_err(|_| AirplayError::Invalid("binary plist string"))?;
+            Ok(PlistValue::String(value.to_string()))
+        }
+        0x6 => {
+            let length = read_binary_count(bytes, &mut cursor, info, object_end)?;
+            let byte_length = length
+                .checked_mul(2)
+                .ok_or(AirplayError::TooLarge("binary plist string"))?;
+            if length > MAX_PLIST_FIELD_BYTES
+                || cursor
+                    .checked_add(byte_length)
+                    .is_none_or(|end| end > object_end)
+            {
+                return Err(AirplayError::TooLarge("binary plist string"));
+            }
+            let units = bytes[cursor..cursor + byte_length]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            let value = String::from_utf16(&units)
+                .map_err(|_| AirplayError::Invalid("binary plist UTF-16"))?;
+            Ok(PlistValue::String(value))
+        }
+        0xa => {
+            let count = read_binary_count(bytes, &mut cursor, info, object_end)?;
+            if count > MAX_PLIST_ENTRIES {
+                return Err(AirplayError::TooLarge("binary plist entries"));
+            }
+            let refs_end = cursor
+                .checked_add(
+                    count
+                        .checked_mul(object_ref_size)
+                        .ok_or(AirplayError::TooLarge("binary plist references"))?,
+                )
+                .ok_or(AirplayError::TooLarge("binary plist references"))?;
+            if refs_end > object_end {
+                return Err(AirplayError::Invalid("binary plist references"));
+            }
+            let mut values = Vec::with_capacity(count);
+            for chunk in bytes[cursor..refs_end].chunks_exact(object_ref_size) {
+                let reference = read_uint(chunk)?;
+                if reference >= offsets.len() {
+                    return Err(AirplayError::Invalid("binary plist reference"));
+                }
+                values.push(parse_binary_object(
+                    reference,
+                    depth + 1,
+                    bytes,
+                    object_end,
+                    object_ref_size,
+                    offsets,
+                    cache,
+                    visiting,
+                )?);
+            }
+            Ok(PlistValue::Array(values))
+        }
+        0xd => {
+            let count = read_binary_count(bytes, &mut cursor, info, object_end)?;
+            if count > MAX_PLIST_ENTRIES {
+                return Err(AirplayError::TooLarge("binary plist entries"));
+            }
+            let refs_len = count
+                .checked_mul(object_ref_size)
+                .ok_or(AirplayError::TooLarge("binary plist references"))?;
+            let keys_end = cursor
+                .checked_add(refs_len)
+                .ok_or(AirplayError::TooLarge("binary plist references"))?;
+            let values_end = keys_end
+                .checked_add(refs_len)
+                .ok_or(AirplayError::TooLarge("binary plist references"))?;
+            if values_end > object_end {
+                return Err(AirplayError::Invalid("binary plist references"));
+            }
+            let key_refs = bytes[cursor..keys_end]
+                .chunks_exact(object_ref_size)
+                .map(read_uint)
+                .collect::<Result<Vec<_>, _>>()?;
+            let value_refs = bytes[keys_end..values_end]
+                .chunks_exact(object_ref_size)
+                .map(read_uint)
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut dictionary = BTreeMap::new();
+            for (key_ref, value_ref) in key_refs.into_iter().zip(value_refs) {
+                if key_ref >= offsets.len() || value_ref >= offsets.len() {
+                    return Err(AirplayError::Invalid("binary plist reference"));
+                }
+                let key = parse_binary_object(
+                    key_ref,
+                    depth + 1,
+                    bytes,
+                    object_end,
+                    object_ref_size,
+                    offsets,
+                    cache,
+                    visiting,
+                )?;
+                let PlistValue::String(key) = key else {
+                    return Err(AirplayError::Invalid("binary plist dictionary key"));
+                };
+                let value = parse_binary_object(
+                    value_ref,
+                    depth + 1,
+                    bytes,
+                    object_end,
+                    object_ref_size,
+                    offsets,
+                    cache,
+                    visiting,
+                )?;
+                if dictionary.insert(key, value).is_some() {
+                    return Err(AirplayError::Invalid("binary plist duplicate key"));
+                }
+            }
+            Ok(PlistValue::Dictionary(dictionary))
+        }
+        _ => Err(AirplayError::Invalid("binary plist object type")),
+    }
+}
+
+fn read_binary_count(
+    bytes: &[u8],
+    cursor: &mut usize,
+    info: u8,
+    object_end: usize,
+) -> Result<usize, AirplayError> {
+    if info != 0x0f {
+        return Ok(usize::from(info));
+    }
+    let marker = *bytes
+        .get(*cursor)
+        .ok_or(AirplayError::Invalid("binary plist length"))?;
+    if marker >> 4 != 0x1 {
+        return Err(AirplayError::Invalid("binary plist length"));
+    }
+    let integer_info = marker & 0x0f;
+    let value = read_binary_integer(bytes, cursor, integer_info, object_end)?;
+    usize::try_from(value).map_err(|_| AirplayError::Invalid("binary plist length"))
+}
+
+fn read_binary_integer(
+    bytes: &[u8],
+    cursor: &mut usize,
+    info: u8,
+    object_end: usize,
+) -> Result<i64, AirplayError> {
+    if info > 3 {
+        return Err(AirplayError::Invalid("binary plist integer"));
+    }
+    let width = 1usize << info;
+    let end = cursor
+        .checked_add(width)
+        .ok_or(AirplayError::TooLarge("binary plist integer"))?;
+    if end > object_end || end > bytes.len() {
+        return Err(AirplayError::Invalid("binary plist integer"));
+    }
+    let raw = read_variable_u64(&bytes[*cursor..end])?;
+    *cursor = end;
+    let bits = width * 8;
+    if bits == 64 {
+        return Ok(raw as i64);
+    }
+    let sign = 1u64 << (bits - 1);
+    if raw & sign == 0 {
+        Ok(raw as i64)
+    } else {
+        Ok((raw | (!0u64 << bits)) as i64)
+    }
+}
+
+fn read_uint(bytes: &[u8]) -> Result<usize, AirplayError> {
+    usize::try_from(read_variable_u64(bytes)?)
+        .map_err(|_| AirplayError::TooLarge("binary plist integer"))
+}
+
+fn read_variable_u64(bytes: &[u8]) -> Result<u64, AirplayError> {
+    if bytes.is_empty() || bytes.len() > 8 {
+        return Err(AirplayError::Invalid("binary plist integer"));
+    }
+    let mut value = 0u64;
+    for byte in bytes {
+        value = value
+            .checked_shl(8)
+            .and_then(|value| value.checked_add(u64::from(*byte)))
+            .ok_or(AirplayError::TooLarge("binary plist integer"))?;
+    }
+    Ok(value)
+}
+
+fn read_u64(bytes: &[u8]) -> Result<u64, AirplayError> {
+    if bytes.len() != 8 {
+        return Err(AirplayError::Invalid("binary plist integer"));
+    }
+    Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| {
+        AirplayError::Invalid("binary plist integer")
+    })?))
+}
+
 /// Encodes one Property List value as deterministic XML bytes.
 pub fn encode_xml_plist(value: &PlistValue) -> Result<Vec<u8>, AirplayError> {
     let mut entries = 0;
@@ -1343,6 +1699,88 @@ mod tests {
         assert_eq!(
             parse_xml_plist(nested.as_bytes()),
             Err(AirplayError::TooLarge("plist nesting"))
+        );
+    }
+
+    #[test]
+    fn binary_plist_round_trip_parses_dictionary_and_utf16() {
+        let mut bytes = b"bplist00".to_vec();
+        // Object 0: {"name": "FrameArk", "count": 42}.
+        bytes.extend_from_slice(&[0xd2, 1, 2, 3, 4]);
+        bytes.extend_from_slice(&[0x54, b'n', b'a', b'm', b'e']);
+        bytes.extend_from_slice(&[0x55, b'c', b'o', b'u', b'n', b't']);
+        bytes.extend_from_slice(&[0x58, b'F', b'r', b'a', b'm', b'e', b'A', b'r', b'k']);
+        bytes.extend_from_slice(&[0x10, 42]);
+        let offset_table = bytes.len();
+        bytes.extend_from_slice(&[8, 13, 18, 24, 33]);
+        bytes.extend_from_slice(&[0; 6]);
+        bytes.extend_from_slice(&[1, 1]); // offset-int and object-ref sizes
+        bytes.extend_from_slice(&5u64.to_be_bytes());
+        bytes.extend_from_slice(&0u64.to_be_bytes());
+        bytes.extend_from_slice(&(offset_table as u64).to_be_bytes());
+
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            "name".to_string(),
+            PlistValue::String("FrameArk".to_string()),
+        );
+        expected.insert("count".to_string(), PlistValue::Integer(42));
+        assert_eq!(
+            parse_binary_plist(&bytes).unwrap(),
+            PlistValue::Dictionary(expected)
+        );
+
+        let mut utf16 = b"bplist00".to_vec();
+        utf16.extend_from_slice(&[0x62, 0x00, 0x46, 0x00, 0x41]);
+        let utf16_offset_table = utf16.len();
+        utf16.extend_from_slice(&[8]);
+        utf16.extend_from_slice(&[0; 6]);
+        utf16.extend_from_slice(&[1, 1]);
+        utf16.extend_from_slice(&1u64.to_be_bytes());
+        utf16.extend_from_slice(&0u64.to_be_bytes());
+        utf16.extend_from_slice(&(utf16_offset_table as u64).to_be_bytes());
+        assert_eq!(
+            parse_binary_plist(&utf16).unwrap(),
+            PlistValue::String("FA".to_string())
+        );
+    }
+
+    #[test]
+    fn binary_plist_rejects_cycles_unsupported_objects_and_bad_bounds() {
+        let mut cycle = b"bplist00".to_vec();
+        cycle.extend_from_slice(&[0xa1, 0]);
+        let offset_table = cycle.len();
+        cycle.extend_from_slice(&[8]);
+        cycle.extend_from_slice(&[0; 6]);
+        cycle.extend_from_slice(&[1, 1]);
+        cycle.extend_from_slice(&1u64.to_be_bytes());
+        cycle.extend_from_slice(&0u64.to_be_bytes());
+        cycle.extend_from_slice(&(offset_table as u64).to_be_bytes());
+        assert_eq!(
+            parse_binary_plist(&cycle),
+            Err(AirplayError::Invalid("binary plist cycle"))
+        );
+
+        let mut real = b"bplist00".to_vec();
+        real.extend_from_slice(&[0x23, 0, 0, 0]);
+        let real_offset_table = real.len();
+        real.extend_from_slice(&[8]);
+        real.extend_from_slice(&[0; 6]);
+        real.extend_from_slice(&[1, 1]);
+        real.extend_from_slice(&1u64.to_be_bytes());
+        real.extend_from_slice(&0u64.to_be_bytes());
+        real.extend_from_slice(&(real_offset_table as u64).to_be_bytes());
+        assert_eq!(
+            parse_binary_plist(&real),
+            Err(AirplayError::Invalid("binary plist object type"))
+        );
+
+        let mut malformed = real.clone();
+        let trailer = malformed.len() - 32;
+        malformed[trailer + 24..trailer + 32].copy_from_slice(&13u64.to_be_bytes());
+        assert_eq!(
+            parse_binary_plist(&malformed),
+            Err(AirplayError::Invalid("binary plist offset table"))
         );
     }
 

@@ -70,7 +70,10 @@ The experimental RAOP session rejects unknown codecs, payload mismatches,
 interleaved TCP transport, invalid state transitions, and oversized SDP before
 allocating media state. It does not authenticate Apple senders or decrypt
 protected audio; callers must not expose the unauthenticated state machine to
-untrusted networks or treat it as a FairPlay boundary.
+untrusted networks or treat it as a FairPlay boundary. XML and binary plist
+parsers enforce document, object-table, reference, depth, and scalar-size
+bounds; binary plist cycles and unsupported object types are rejected before
+allocation of nested values.
 
 The Android JNI lifecycle bridge keeps its Rust session in process-local
 protected state, carries no media or key material, and maps ABI/start/stop
