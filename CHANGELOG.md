@@ -38,6 +38,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   SCPD descriptions and applying AVTransport, RenderingControl, and
   ConnectionManager actions to explicit Rust state; GENA, DIDL-Lite, HTTP
   Range, media serving, and named-client interoperability remain pending.
+- Experimental bounded DLNA single-range media response policy and DIDL-Lite
+  item generator with XML escaping and explicit resource limits; streaming
+  file backends, full metadata parsing, and GENA remain pending.
 - Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
   foundation; pairing, decryption, decoding, and Apple interoperability remain
   unimplemented.
