@@ -1,7 +1,9 @@
 //! Experimental FANP session control, using the shared core lifecycle.
 //!
 //! This crate negotiates configuration and drives platform-owned backends. It
-//! does not decode or carry media; the lab backend is a control-plane simulation.
+//! carries bounded FAM1 media to those backends but does not decode codecs or
+//! own platform surfaces.
+pub mod media_receiver;
 pub mod media_session;
 pub mod media_wire;
 mod offer;
@@ -15,6 +17,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use wire::{Command, Request, Response, Status};
 
+pub use media_receiver::{MediaStreamReport, NativeMediaReceiver};
 pub use offer::{ReceiverPolicy, SessionOffer};
 
 /// Maximum retained lifecycle/diagnostic events per connection.
