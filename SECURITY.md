@@ -67,6 +67,9 @@ multi-client scheduling. The GENA registry caps subscriptions, leases,
 callback schemes, XML property names/values, and pending events but does not
 own lease expiry or callback sockets; a daemon must add authorization policy,
 expiry, and event-queue limits at its socket boundary.
+`GenaEvent::encode_http_notify` validates the callback authority and target and
+caps the generated request, but it does not perform DNS, TLS, callback
+authentication, retries, or response handling.
 
 The experimental RAOP session rejects unknown codecs, payload mismatches,
 interleaved TCP transport, invalid state transitions, and oversized SDP before

@@ -54,8 +54,12 @@ All notable FrameArk changes will be documented in this file. The project follow
   file backends, full metadata parsing, and GENA remain pending.
 - Experimental bounded DLNA GENA subscription/renew/unsubscribe policy with
   deterministic SIDs, timeout bounds, sequenced property events, and capped
-  caller-drained queues; lease expiry and callback HTTP remain outside the
-  crate.
+  caller-drained queues; lease expiry and callback socket I/O remain outside
+  the crate.
+- Experimental bounded DLNA GENA `NOTIFY` request encoder with callback
+  authority/target validation, SID/SEQ/NT/NTS headers, exact content length,
+  and loopback parser coverage; callback sockets, TLS, retries, and lease
+  expiry remain caller-owned.
 - Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
   foundation; pairing, decryption, decoding, and Apple interoperability remain
   unimplemented.

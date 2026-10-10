@@ -902,6 +902,53 @@ pub struct GenaEvent {
     pub body: String,
 }
 
+impl GenaEvent {
+    /// Encodes this event as one bounded HTTP `NOTIFY` request.
+    ///
+    /// The returned bytes are ready for a caller-owned TCP client to send to
+    /// the validated callback authority. TLS connection setup, DNS, retries,
+    /// and response parsing remain outside the protocol crate.
+    pub fn encode_http_notify(&self) -> Result<Vec<u8>, DlnaError> {
+        validate_callback_url(&self.callback_url)?;
+        validate_service_type(&self.service_type)?;
+        validate_field(&self.sid, "GENA SID")?;
+        if self.sequence > i32::MAX as u32 {
+            return Err(DlnaError::Invalid("GENA sequence"));
+        }
+        if self.body.is_empty() || self.body.len() > MAX_SOAP_ARGUMENT_BYTES {
+            return Err(DlnaError::TooLarge("GENA event"));
+        }
+        let (host, target) = callback_authority_and_target(&self.callback_url)?;
+        let mut headers = BTreeMap::new();
+        headers.insert("content-length".to_string(), self.body.len().to_string());
+        headers.insert(
+            "content-type".to_string(),
+            "text/xml; charset=\"utf-8\"".to_string(),
+        );
+        headers.insert("host".to_string(), host);
+        headers.insert("nt".to_string(), "upnp:event".to_string());
+        headers.insert("nts".to_string(), "upnp:propchange".to_string());
+        headers.insert("seq".to_string(), self.sequence.to_string());
+        headers.insert("sid".to_string(), self.sid.clone());
+
+        let mut output = format!("NOTIFY {target} HTTP/1.1\r\n").into_bytes();
+        for (name, value) in headers {
+            validate_field(&name, "GENA header name")?;
+            validate_field(&value, "GENA header value")?;
+            output.extend_from_slice(name.as_bytes());
+            output.extend_from_slice(b": ");
+            output.extend_from_slice(value.as_bytes());
+            output.extend_from_slice(b"\r\n");
+        }
+        output.extend_from_slice(b"\r\n");
+        output.extend_from_slice(self.body.as_bytes());
+        if output.len() > MAX_HTTP_BYTES {
+            return Err(DlnaError::TooLarge("GENA request"));
+        }
+        Ok(output)
+    }
+}
+
 /// Bounded GENA subscription registry with deterministic IDs and event bodies.
 #[derive(Clone, Debug, Default)]
 pub struct GenaRegistry {
@@ -1861,6 +1908,30 @@ fn validate_callback_url(callback_url: &str) -> Result<(), DlnaError> {
     Ok(())
 }
 
+fn callback_authority_and_target(callback_url: &str) -> Result<(String, String), DlnaError> {
+    let (_, rest) = callback_url
+        .split_once("://")
+        .ok_or(DlnaError::Invalid("GENA callback URL"))?;
+    let slash = rest.find('/');
+    let (authority, target) = match slash {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, "/"),
+    };
+    if authority.is_empty()
+        || authority.len() > MAX_FIELD_BYTES
+        || !authority
+            .bytes()
+            .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
+        || target.is_empty()
+        || target.len() > MAX_FIELD_BYTES
+        || !target.starts_with('/')
+        || target.contains(['\r', '\n', ' '])
+    {
+        return Err(DlnaError::Invalid("GENA callback URL"));
+    }
+    Ok((authority.to_string(), target.to_string()))
+}
+
 fn parse_callback_header(value: &str) -> Option<&str> {
     let value = value.trim();
     let value = value.strip_prefix('<')?.strip_suffix('>')?;
@@ -2327,6 +2398,14 @@ mod tests {
         assert_eq!(mutation.len(), 1);
         assert_eq!(mutation[0].sequence, 2);
         assert!(mutation[0].body.contains("CurrentTrackURI"));
+        let notify = mutation[0].encode_http_notify().unwrap();
+        let parsed_notify = HttpRequest::parse(&notify).unwrap();
+        assert_eq!(parsed_notify.method, "NOTIFY");
+        assert_eq!(parsed_notify.target, "/events");
+        assert_eq!(parsed_notify.header("SID"), Some(sid.as_str()));
+        assert_eq!(parsed_notify.header("SEQ"), Some("2"));
+        assert_eq!(parsed_notify.header("NTS"), Some("upnp:propchange"));
+        assert_eq!(parsed_notify.body, mutation[0].body.as_bytes());
 
         let renew = HttpRequest::parse(
             format!(
