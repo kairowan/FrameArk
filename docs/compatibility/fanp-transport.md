@@ -62,13 +62,14 @@ escaped UPnP device-description generation, a unicast-testable UDP publisher,
 and a caller-owned HTTP/SOAP MediaRenderer handler. The handler serves device
 and SCPD XML and exercises a bounded AVTransport, RenderingControl, and
 ConnectionManager subset on explicit Rust state; it also has a bounded
-single-range media fixture response and DIDL-Lite metadata generator.
+single-range media fixture response, DIDL-Lite metadata generator, and GENA
+subscription/event policy.
 
-It does not yet join multicast groups, schedule leases, implement GENA events,
-validate full DIDL-Lite metadata, provide a streaming file backend, fetch URLs,
-or claim named-client DLNA interoperability. Chunked HTTP, multiple or
-unsatisfiable ranges, and unsupported URL schemes are rejected before state
-mutation.
+It does not yet join multicast groups, expire leases on a clock, perform
+callback HTTP, validate full DIDL-Lite metadata, provide a streaming file
+backend, fetch URLs, or claim named-client DLNA interoperability. Chunked HTTP,
+multiple or unsatisfiable ranges, and unsupported URL schemes are rejected
+before state mutation.
 
 The experimental `frameark-airplay` crate now provides bounded RTSP/1.0 and
 strict RTP audio packet contracts. It does not implement Apple pairing,

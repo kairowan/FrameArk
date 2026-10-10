@@ -30,6 +30,14 @@ pub const MAX_MEDIA_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_MEDIA_RESOURCES: usize = 16;
 /// Maximum DIDL-Lite items emitted by one metadata document.
 pub const MAX_DIDL_ITEMS: usize = 8;
+/// Maximum active GENA subscriptions on one renderer.
+pub const MAX_GENA_SUBSCRIPTIONS: usize = 16;
+/// Maximum queued GENA callback events awaiting the caller's HTTP client.
+pub const MAX_GENA_PENDING_EVENTS: usize = 32;
+/// Default GENA lease when a subscriber omits or gives an invalid timeout.
+pub const DEFAULT_GENA_TIMEOUT_SECONDS: u32 = 1800;
+/// Maximum GENA lease accepted from an untrusted subscriber.
+pub const MAX_GENA_TIMEOUT_SECONDS: u32 = 86_400;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -861,6 +869,129 @@ impl DidlLiteItem {
     }
 }
 
+/// One validated GENA subscription returned to the caller-owned HTTP layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenaSubscription {
+    /// Deterministic local subscription identifier.
+    pub sid: String,
+    /// Callback URL supplied by the subscriber.
+    pub callback_url: String,
+    /// UPnP service type being observed.
+    pub service_type: String,
+    /// Lease duration in seconds.
+    pub timeout_seconds: u32,
+    /// Next event sequence number.
+    pub next_sequence: u32,
+}
+
+/// One event notification that a caller-owned HTTP client can POST to a
+/// subscriber callback URL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenaEvent {
+    /// Subscription receiving the event.
+    pub sid: String,
+    /// Callback URL to which the event should be sent.
+    pub callback_url: String,
+    /// UPnP service type of the event body.
+    pub service_type: String,
+    /// Monotonic event sequence for this subscription.
+    pub sequence: u32,
+    /// XML property-set body.
+    pub body: String,
+}
+
+/// Bounded GENA subscription registry with deterministic IDs and event bodies.
+#[derive(Clone, Debug, Default)]
+pub struct GenaRegistry {
+    subscriptions: BTreeMap<String, GenaSubscription>,
+    next_id: u64,
+}
+
+impl GenaRegistry {
+    /// Registers a new subscription and returns a 1..86400 second lease.
+    pub fn subscribe(
+        &mut self,
+        service_type: &str,
+        callback_url: &str,
+        timeout: Option<&str>,
+    ) -> Result<GenaSubscription, DlnaError> {
+        validate_service_type(service_type)?;
+        validate_callback_url(callback_url)?;
+        if self.subscriptions.len() >= MAX_GENA_SUBSCRIPTIONS {
+            return Err(DlnaError::TooLarge("GENA subscriptions"));
+        }
+        let timeout_seconds = parse_gena_timeout(timeout)?;
+        self.next_id = self.next_id.saturating_add(1);
+        let subscription = GenaSubscription {
+            sid: format!("uuid:frameark-sub-{}", self.next_id),
+            callback_url: callback_url.to_string(),
+            service_type: service_type.to_string(),
+            timeout_seconds,
+            next_sequence: 0,
+        };
+        self.subscriptions
+            .insert(subscription.sid.clone(), subscription.clone());
+        Ok(subscription)
+    }
+
+    /// Renews an existing subscription without changing its callback.
+    pub fn renew(
+        &mut self,
+        sid: &str,
+        timeout: Option<&str>,
+    ) -> Result<GenaSubscription, DlnaError> {
+        let subscription = self
+            .subscriptions
+            .get_mut(sid)
+            .ok_or(DlnaError::Invalid("GENA SID"))?;
+        subscription.timeout_seconds = parse_gena_timeout(timeout)?;
+        Ok(subscription.clone())
+    }
+
+    /// Removes a subscription. Unknown SIDs are rejected rather than ignored.
+    pub fn unsubscribe(&mut self, sid: &str) -> Result<(), DlnaError> {
+        if self.subscriptions.remove(sid).is_none() {
+            return Err(DlnaError::Invalid("GENA SID"));
+        }
+        Ok(())
+    }
+
+    /// Generates one event per matching subscription and advances each sequence.
+    pub fn publish(
+        &mut self,
+        service_type: &str,
+        properties: &BTreeMap<String, String>,
+    ) -> Result<Vec<GenaEvent>, DlnaError> {
+        validate_service_type(service_type)?;
+        let body = gena_property_set(properties)?;
+        let mut events = Vec::new();
+        for subscription in self.subscriptions.values_mut() {
+            if subscription.service_type != service_type {
+                continue;
+            }
+            subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
+            events.push(GenaEvent {
+                sid: subscription.sid.clone(),
+                callback_url: subscription.callback_url.clone(),
+                service_type: service_type.to_string(),
+                sequence: subscription.next_sequence,
+                body: body.clone(),
+            });
+        }
+        Ok(events)
+    }
+
+    /// Returns the current number of active subscriptions.
+    pub fn len(&self) -> usize {
+        self.subscriptions.len()
+    }
+
+    /// Returns whether no active subscriptions are registered.
+    pub fn is_empty(&self) -> bool {
+        self.subscriptions.is_empty()
+    }
+}
+
 /// Bounded SOAP/HTTP MediaRenderer handler.
 ///
 /// The caller owns the TCP listener and connection lifecycle. This type only
@@ -873,6 +1004,8 @@ pub struct MediaRendererHttpService {
     device_description_path: String,
     state: MediaRendererState,
     resources: BTreeMap<String, MediaResource>,
+    gena: GenaRegistry,
+    pending_events: Vec<GenaEvent>,
 }
 
 impl MediaRendererHttpService {
@@ -884,6 +1017,8 @@ impl MediaRendererHttpService {
             device_description_path: "/device.xml".to_string(),
             state: MediaRendererState::default(),
             resources: BTreeMap::new(),
+            gena: GenaRegistry::default(),
+            pending_events: Vec::new(),
         })
     }
 
@@ -908,12 +1043,24 @@ impl MediaRendererHttpService {
         Ok(())
     }
 
+    /// Returns the number of active GENA subscriptions.
+    pub fn subscription_count(&self) -> usize {
+        self.gena.len()
+    }
+
+    /// Drains events generated by state changes for caller-owned callback I/O.
+    pub fn drain_events(&mut self) -> Vec<GenaEvent> {
+        std::mem::take(&mut self.pending_events)
+    }
+
     /// Applies one parsed request and returns an HTTP response.
     pub fn handle(&mut self, request: &HttpRequest) -> HttpResponse {
         let path = request.target.split('?').next().unwrap_or(&request.target);
         match request.method.as_str() {
             "GET" => self.handle_get(path, request),
             "POST" => self.handle_post(path, request),
+            "SUBSCRIBE" => self.handle_subscribe(path, request),
+            "UNSUBSCRIBE" => self.handle_unsubscribe(path, request),
             _ => {
                 let mut response = HttpResponse::empty(405, "Method Not Allowed");
                 response
@@ -921,6 +1068,59 @@ impl MediaRendererHttpService {
                     .insert("allow".to_string(), "GET, POST".to_string());
                 response
             }
+        }
+    }
+
+    fn handle_subscribe(&mut self, path: &str, request: &HttpRequest) -> HttpResponse {
+        let Some(service_type) = self.control_service_for_path(path) else {
+            return HttpResponse::empty(404, "Not Found");
+        };
+        let timeout = request.header("timeout");
+        let subscription = if let Some(sid) = request.header("sid") {
+            if request.header("callback").is_some() || request.header("nt").is_some() {
+                return HttpResponse::empty(412, "Precondition Failed");
+            }
+            match self.gena.renew(sid, timeout) {
+                Ok(subscription) => subscription,
+                Err(_) => return HttpResponse::empty(412, "Precondition Failed"),
+            }
+        } else {
+            let Some(callback_header) = request.header("callback") else {
+                return HttpResponse::empty(412, "Precondition Failed");
+            };
+            if request.header("nt") != Some("upnp:event") {
+                return HttpResponse::empty(412, "Precondition Failed");
+            }
+            let Some(callback_url) = parse_callback_header(callback_header) else {
+                return HttpResponse::empty(412, "Precondition Failed");
+            };
+            match self.gena.subscribe(&service_type, callback_url, timeout) {
+                Ok(subscription) => subscription,
+                Err(_) => return HttpResponse::empty(412, "Precondition Failed"),
+            }
+        };
+        if request.header("sid").is_none() {
+            self.queue_state_event(&service_type);
+        }
+        let mut response = HttpResponse::empty(200, "OK");
+        response.headers.insert("sid".to_string(), subscription.sid);
+        response.headers.insert(
+            "timeout".to_string(),
+            format!("Second-{}", subscription.timeout_seconds),
+        );
+        response
+    }
+
+    fn handle_unsubscribe(&mut self, path: &str, request: &HttpRequest) -> HttpResponse {
+        if self.control_service_for_path(path).is_none() {
+            return HttpResponse::empty(404, "Not Found");
+        }
+        let Some(sid) = request.header("sid") else {
+            return HttpResponse::empty(412, "Precondition Failed");
+        };
+        match self.gena.unsubscribe(sid) {
+            Ok(()) => HttpResponse::empty(200, "OK"),
+            Err(_) => HttpResponse::empty(412, "Precondition Failed"),
         }
     }
 
@@ -1011,9 +1211,42 @@ impl MediaRendererHttpService {
         if action.service != service {
             return soap_fault_response(401, "Invalid Action");
         }
-        match self.invoke(action) {
-            Ok(body) => HttpResponse::xml(200, "OK", body),
+        match self.invoke(action.clone()) {
+            Ok(body) => {
+                if matches!(
+                    action.name.as_str(),
+                    "SetAVTransportURI" | "Play" | "Pause" | "Stop" | "Seek" | "SetVolume"
+                ) {
+                    self.queue_state_event(&action.service);
+                }
+                HttpResponse::xml(200, "OK", body)
+            }
             Err(fault) => soap_fault_response(fault.code, fault.description),
+        }
+    }
+
+    fn queue_state_event(&mut self, service_type: &str) {
+        let mut properties = BTreeMap::new();
+        match service_type {
+            AVTRANSPORT_SERVICE => {
+                properties.insert(
+                    "TransportState".to_string(),
+                    self.state.transport_state.as_upnp().to_string(),
+                );
+                properties.insert(
+                    "CurrentTrackURI".to_string(),
+                    self.state.current_uri.clone(),
+                );
+            }
+            RENDERING_CONTROL_SERVICE => {
+                properties.insert("Volume".to_string(), self.state.volume.to_string());
+            }
+            _ => return,
+        }
+        if let Ok(events) = self.gena.publish(service_type, &properties) {
+            let available = MAX_GENA_PENDING_EVENTS.saturating_sub(self.pending_events.len());
+            self.pending_events
+                .extend(events.into_iter().take(available));
         }
     }
 
@@ -1486,6 +1719,87 @@ fn xml_escape(value: &str) -> String {
     output
 }
 
+fn validate_service_type(service_type: &str) -> Result<(), DlnaError> {
+    if !matches!(
+        service_type,
+        AVTRANSPORT_SERVICE | RENDERING_CONTROL_SERVICE | CONNECTION_MANAGER_SERVICE
+    ) {
+        return Err(DlnaError::Invalid("GENA service type"));
+    }
+    validate_field(service_type, "GENA service type")
+}
+
+fn validate_callback_url(callback_url: &str) -> Result<(), DlnaError> {
+    validate_field(callback_url, "GENA callback URL")?;
+    let Some((scheme, _)) = callback_url.split_once("://") else {
+        return Err(DlnaError::Invalid("GENA callback URL"));
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return Err(DlnaError::Invalid("GENA callback URL"));
+    }
+    Ok(())
+}
+
+fn parse_callback_header(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let value = value.strip_prefix('<')?.strip_suffix('>')?;
+    if value.contains('<') || value.contains('>') {
+        return None;
+    }
+    Some(value)
+}
+
+fn parse_gena_timeout(timeout: Option<&str>) -> Result<u32, DlnaError> {
+    let Some(timeout) = timeout else {
+        return Ok(DEFAULT_GENA_TIMEOUT_SECONDS);
+    };
+    let timeout = timeout.trim();
+    if timeout.eq_ignore_ascii_case("second-infinite") {
+        return Ok(MAX_GENA_TIMEOUT_SECONDS);
+    }
+    let Some(value) = timeout.strip_prefix("Second-") else {
+        return Err(DlnaError::Invalid("GENA timeout"));
+    };
+    let seconds = value
+        .parse::<u32>()
+        .map_err(|_| DlnaError::Invalid("GENA timeout"))?;
+    if seconds == 0 || seconds > MAX_GENA_TIMEOUT_SECONDS {
+        return Err(DlnaError::Invalid("GENA timeout"));
+    }
+    Ok(seconds)
+}
+
+fn gena_property_set(properties: &BTreeMap<String, String>) -> Result<String, DlnaError> {
+    if properties.len() > MAX_SERVICES {
+        return Err(DlnaError::TooLarge("GENA properties"));
+    }
+    let mut body = "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">".to_string();
+    for (name, value) in properties {
+        validate_field(name, "GENA property name")?;
+        if !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(DlnaError::Invalid("GENA property name"));
+        }
+        if value.len() > MAX_FIELD_BYTES || value.contains(['\r', '\n']) {
+            return Err(DlnaError::InvalidField("GENA property value"));
+        }
+        body.push_str("<e:property><");
+        body.push_str(name);
+        body.push('>');
+        body.push_str(&xml_escape(value));
+        body.push_str("</");
+        body.push_str(name);
+        body.push_str("></e:property>");
+    }
+    body.push_str("</e:propertyset>");
+    if body.len() > MAX_SOAP_ARGUMENT_BYTES {
+        return Err(DlnaError::TooLarge("GENA event"));
+    }
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1782,6 +2096,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!(service.handle(&invalid).status, 416);
+    }
+
+    #[test]
+    fn gena_registry_bounds_leases_sequences_and_service_scope() {
+        let mut registry = GenaRegistry::default();
+        let subscription = registry
+            .subscribe(
+                AVTRANSPORT_SERVICE,
+                "http://127.0.0.1:9000/events",
+                Some("Second-60"),
+            )
+            .unwrap();
+        assert_eq!(subscription.next_sequence, 0);
+        assert_eq!(subscription.timeout_seconds, 60);
+        let mut properties = BTreeMap::new();
+        properties.insert("TransportState".to_string(), "PLAYING".to_string());
+        let events = registry.publish(AVTRANSPORT_SERVICE, &properties).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 1);
+        assert!(events[0].body.contains("PLAYING"));
+        assert!(
+            registry
+                .publish(RENDERING_CONTROL_SERVICE, &properties)
+                .unwrap()
+                .is_empty()
+        );
+        let renewed = registry
+            .renew(&subscription.sid, Some("Second-infinite"))
+            .unwrap();
+        assert_eq!(renewed.timeout_seconds, MAX_GENA_TIMEOUT_SECONDS);
+        registry.unsubscribe(&subscription.sid).unwrap();
+        assert!(registry.is_empty());
+        assert!(
+            registry
+                .subscribe(AVTRANSPORT_SERVICE, "file:///tmp/events", None)
+                .is_err()
+        );
+        assert!(
+            registry
+                .subscribe(
+                    AVTRANSPORT_SERVICE,
+                    "http://127.0.0.1:9000/events",
+                    Some("Second-0")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn renderer_subscribe_emits_initial_and_mutation_events() {
+        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let subscribe = HttpRequest::parse(
+            b"SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n",
+        )
+        .unwrap();
+        let response = service.handle(&subscribe);
+        assert_eq!(response.status, 200);
+        let sid = response.headers.get("sid").cloned().unwrap();
+        assert_eq!(
+            response.headers.get("timeout"),
+            Some(&"Second-120".to_string())
+        );
+        assert_eq!(service.subscription_count(), 1);
+        let initial = service.drain_events();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].sid, sid);
+        assert_eq!(initial[0].sequence, 1);
+
+        let set_uri = soap_request(
+            "/upnp/control/avtransport",
+            AVTRANSPORT_SERVICE,
+            "SetAVTransportURI",
+            "<InstanceID>0</InstanceID><CurrentURI>https://media.example/video.mp4</CurrentURI>",
+        );
+        assert_eq!(service.handle(&set_uri).status, 200);
+        let mutation = service.drain_events();
+        assert_eq!(mutation.len(), 1);
+        assert_eq!(mutation[0].sequence, 2);
+        assert!(mutation[0].body.contains("CurrentTrackURI"));
+
+        let renew = HttpRequest::parse(
+            format!(
+                "SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\nTIMEOUT: Second-300\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let response = service.handle(&renew);
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("timeout"),
+            Some(&"Second-300".to_string())
+        );
+        assert!(service.drain_events().is_empty());
+
+        let unsubscribe = HttpRequest::parse(
+            format!(
+                "UNSUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(service.handle(&unsubscribe).status, 200);
+        assert_eq!(service.subscription_count(), 0);
     }
 
     #[test]
