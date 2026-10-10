@@ -4,6 +4,7 @@ members = [
     "crates/frameark-core",
     "crates/frameark-discovery",
     "crates/frameark-dlna",
+    "crates/frameark-airplay",
     "crates/frameark-ffi",
     "crates/frameark-media",
     "crates/frameark-native",

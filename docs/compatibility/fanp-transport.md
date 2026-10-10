@@ -62,3 +62,8 @@ escaped UPnP device-description generation, and a unicast-testable UDP
 publisher for alive/byebye notifications and matching M-SEARCH responses. It
 does not yet join multicast groups, serve HTTP/SOAP, implement
 AVTransport/GENA, or claim DLNA interoperability.
+
+The experimental `frameark-airplay` crate now provides bounded RTSP/1.0 and
+strict RTP audio packet contracts. It does not implement Apple pairing,
+FairPlay/AES-CTR decryption, plist negotiation, audio decoding, or Apple-device
+compatibility.
