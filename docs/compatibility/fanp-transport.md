@@ -24,6 +24,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Native packet-to-renderer lifecycle | Pass with fake video/audio renderers, track checks, and partial-prepare cleanup | `frameark-native::media_session` tests |
 | Rust QUIC media receiver orchestration | Pass on a real pinned-QUIC loopback: FAM1 frames are decoded, routed to both renderers, counted, and reset on FIN | `quic_media_stream_reaches_renderers_and_cleans_up` |
 | Android renderer configuration | Pass for JVM config validation and Android lint/build; hardware behavior unverified | `MediaTrackConfigTest`, Android `lint test assembleDebug` |
+| Fixture sender CLI validation | Pass; bounded fixture file, frame-count, interval, pairing-code, and required-input checks | `frameark-cli` unit tests |
 
 ## Explicit limits
 
@@ -37,8 +38,9 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
   and the Android adapters remain platform lifecycle components.
 - No input, clipboard, file-transfer, management stream, congestion-control
   policy, or datagram media path is implemented.
-- No real H.264/Opus/AAC test sender, decoder matrix, audio decoder backend,
-  or 1080p playback evidence exists yet.
+- The fixture CLI accepts real H.264/Opus/AAC access-unit files but the
+  repository does not ship a licensed codec sample or decoder matrix yet; no
+  1080p playback evidence exists.
 - No internet relay, NAT traversal, Cast certification, Miracast guarantee, or
   DRM/HDCP behavior is claimed.
 - The self-signed certificate is generated per server process and must be

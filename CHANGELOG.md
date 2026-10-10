@@ -17,6 +17,8 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental Native media receiver orchestration decoding bounded FAM1
   records from QUIC, routing them to renderers, reporting counters, and
   cleaning up on stream termination or failure.
+- Experimental `frameark-cli send` fixture sender for pinned FANP pairing and
+  bounded FAM1 media access units supplied by the caller.
 - Experimental Android `MediaCodec` H.264 and PCM `AudioTrack` renderer
   lifecycles with explicit setup, backpressure, and release paths.
 - Bounded authenticated control request/response streams with cancellation
