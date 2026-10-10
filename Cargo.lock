@@ -113,6 +113,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "frameark-cli"
+version = "0.1.0"
+dependencies = [
+ "frameark-core",
+ "frameark-media",
+ "frameark-native",
+ "frameark-transport",
+ "tokio",
+]
+
+[[package]]
 name = "frameark-core"
 version = "0.1.0"
 

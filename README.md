@@ -9,9 +9,9 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 
 ## Project status / 项目状态
 
-**Pre-alpha: M0 foundation in development.** The repository now contains the initial Rust contracts and Android Receiver shell, but it does not yet contain a usable receiver or sender. Protocol support listed below describes the roadmap, not current compatibility.
+**Pre-alpha: M1 Native foundation in development.** The repository now contains the initial Rust contracts, bounded FANP control/media transport, a Rust media-to-renderer bridge, an experimental fixture sender CLI, and the Android Receiver shell. It is not yet a user-facing receiver or sender; protocol support listed below describes the roadmap and the verified compatibility document.
 
-**预览前阶段：M0 工程基础开发中。** 当前仓库已经包含初始 Rust 契约和 Android Receiver 壳，但尚未提供可用的接收端或发送端。下方协议表表示目标和边界，不代表当前已经实现。
+**预览前阶段：M1 Native 基础开发中。** 当前仓库已经包含初始 Rust 契约、受限 FANP 控制/媒体传输、Rust 媒体渲染桥、实验性的 fixture 发送 CLI 和 Android Receiver 壳；还不是面向普通用户的完整接收端或发送端。下方协议表和兼容性文档共同说明已验证范围与路线边界。
 
 See [PLAN.md](PLAN.md) for the complete product definition, architecture, milestones, quality gates, and release criteria.
 
@@ -29,7 +29,9 @@ Planned products include:
 - `framearkd`: headless receiver daemon;
 - FrameArk Receiver for Android and desktop;
 - FrameArk Sender for Android, Windows, Linux, macOS, and browsers;
-- `frameark-sdk`, `frameark-cli`, `frameark-lab`, and Web Admin.
+- `frameark-sdk`, `frameark-cli`, `frameark-lab`, and Web Admin. The current
+  CLI is an experimental fixture sender documented in
+  [`tools/frameark-cli/README.md`](tools/frameark-cli/README.md).
 
 ## Protocol roadmap / 协议路线
 
@@ -62,13 +64,15 @@ Identity, trust, configuration, events, and metrics
 
 Rust owns protocol and cross-platform state. Kotlin, Swift, desktop, and web layers integrate operating-system APIs, capture, hardware codecs, rendering, audio routing, lifecycle, and UI.
 
-The current M0 workspace includes the `frameark-discovery` mDNS/DNS-SD
-prototype and the experimental `frameark-transport` FANP QUIC/TLS pairing
-prototype and the `frameark-native` Experimental control profile. Discovery publishes and browses the reserved `_frameark._udp.local.`
-service type with bounded metadata and automatic address tracking. Transport
-pins an ephemeral certificate, exchanges a temporary six-digit pairing code,
-and negotiates the shared core capability set. Neither component grants
-persistent trust or carries media yet.
+The current M1 workspace includes the `frameark-discovery` mDNS/DNS-SD
+prototype, the experimental `frameark-transport` FANP QUIC/TLS pairing and
+bounded media stream, the `frameark-native` control/media adapters, and the
+`frameark-cli` fixture sender. Discovery publishes and browses the reserved
+`_frameark._udp.local.` service type with bounded metadata and automatic
+address tracking. Transport pins an ephemeral certificate, exchanges a
+temporary six-digit pairing code, negotiates the shared core capability set,
+and carries bounded FAM1 access units. Neither component grants persistent
+trust, ships a real codec, or claims Android hardware playback yet.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current
