@@ -3,6 +3,7 @@ members = [
     "crates/frameark-api",
     "crates/frameark-core",
     "crates/frameark-discovery",
+    "crates/frameark-dlna",
     "crates/frameark-ffi",
     "crates/frameark-media",
     "crates/frameark-native",

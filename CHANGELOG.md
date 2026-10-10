@@ -28,6 +28,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   start/stop actions, playback notification channel, and M2 manifest baseline.
 - Experimental Android Keystore-backed P-256 device identity boundary with
   redaction-safe public-key fingerprints; real-device provisioning pending.
+- Experimental `frameark-dlna` foundation with bounded SSDP parsing and
+  escaped UPnP device-description generation; network/SOAP interoperability
+  remains unimplemented.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
