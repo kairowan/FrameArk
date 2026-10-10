@@ -1,5 +1,9 @@
 package dev.frameark.receiver
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import org.junit.Assert.assertArrayEquals
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -80,5 +84,50 @@ class FrameArkNativeTest {
             bridge.startReceiver(),
         )
         assertEquals(0, starts)
+    }
+
+    @Test
+    fun maps_media_backpressure_and_decodes_bounded_envelope() {
+        val envelope = ByteBuffer.allocate(22)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put("FAMF".toByteArray())
+            .put(1)
+            .put(1)
+            .put(1)
+            .putLong(90_000L)
+            .putInt(3)
+            .put(byteArrayOf(1, 2, 3))
+            .array()
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            submitVideoProvider = { _, _, _ -> 1 },
+            pollMediaProvider = { envelope },
+        )
+
+        assertEquals(
+            FrameArkNative.MediaSubmitResult.QueueFull,
+            bridge.submitVideoFrame(byteArrayOf(9), 90_000, keyframe = true),
+        )
+        val frame = bridge.pollMediaFrame()
+        assertEquals(FrameArkNative.MediaKind.VIDEO, frame?.kind)
+        assertEquals(90_000L, frame?.pts)
+        assertTrue(frame?.keyframe == true)
+        assertArrayEquals(byteArrayOf(1, 2, 3), frame?.payload)
+    }
+
+    @Test
+    fun rejects_empty_media_before_loading_native_library() {
+        var loaded = false
+        val bridge = FrameArkNative(
+            libraryLoader = { loaded = true },
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+        )
+
+        assertEquals(
+            FrameArkNative.MediaSubmitResult.Failed(-3),
+            bridge.submitAudioFrame(byteArrayOf(), 0),
+        )
+        assertFalse(loaded)
     }
 }

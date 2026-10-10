@@ -77,11 +77,13 @@ parsers enforce document, object-table, reference, depth, and scalar-size
 bounds; binary plist cycles and unsupported object types are rejected before
 allocation of nested values.
 
-The Android JNI lifecycle bridge keeps its Rust session in process-local
-protected state, carries no media or key material, and maps ABI/start/stop
-failures without logging JNI arguments. It is not an authorization boundary;
-real network pairing and persistent identity must remain in the Rust transport
-and platform keystore layers.
+The Android JNI bridge keeps its Rust session and bounded encoded-media queue in
+process-local protected state, carries no key material, caps each submitted
+frame at 4 MiB and the queue at 16 frames, and maps ABI/start/stop/media
+failures without logging JNI arguments. The `FAMF` poll envelope is not an
+authorization boundary or decoder; real network pairing, persistent identity,
+and renderer ownership must remain in the Rust transport and Android platform
+layers.
 
 The AirPlay XML Property List boundary caps document size, nesting, entries,
 scalar/data fields, duplicate keys, and base64 decoding. It is not a parser for
