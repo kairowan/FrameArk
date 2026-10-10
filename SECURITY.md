@@ -66,6 +66,12 @@ does not own lease expiry or callback sockets; a future network server must
 add connection deadlines, authorization policy, expiry, and event-queue
 limits at its socket boundary.
 
+The experimental RAOP session rejects unknown codecs, payload mismatches,
+interleaved TCP transport, invalid state transitions, and oversized SDP before
+allocating media state. It does not authenticate Apple senders or decrypt
+protected audio; callers must not expose the unauthenticated state machine to
+untrusted networks or treat it as a FairPlay boundary.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.

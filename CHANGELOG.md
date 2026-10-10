@@ -48,6 +48,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
   foundation; pairing, decryption, decoding, and Apple interoperability remain
   unimplemented.
+- Experimental bounded RAOP ANNOUNCE SDP parser and RTSP session state machine
+  covering OPTIONS, ANNOUNCE, SETUP, RECORD, FLUSH, GET_PARAMETER, and
+  TEARDOWN; pairing, plist/FairPlay, encryption, timing, decoding, and Apple
+  interoperability remain pending.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
