@@ -24,6 +24,8 @@ All notable FrameArk changes will be documented in this file. The project follow
   control lifecycle before and after the stream.
 - Experimental Android `MediaCodec` H.264 and PCM `AudioTrack` renderer
   lifecycles with explicit setup, backpressure, and release paths.
+- Experimental Android Receiver foreground-service lifecycle with explicit
+  start/stop actions, playback notification channel, and M2 manifest baseline.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/

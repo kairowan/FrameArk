@@ -1,6 +1,11 @@
 <resources>
     <string name="app_name">FrameArk Receiver</string>
-    <string name="receiver_status">FrameArk M0\n\n%1$s</string>
+    <string name="receiver_status">FrameArk M2\n\n%1$s</string>
+    <string name="receiver_start">Start receiver service</string>
+    <string name="receiver_stop">Stop receiver service</string>
+    <string name="service_channel">FrameArk playback</string>
+    <string name="service_title">FrameArk Receiver</string>
+    <string name="service_text">Ready for a local-network media session</string>
     <string name="native_loaded">Rust core ABI %1$d loaded</string>
     <string name="native_incompatible">Rust core ABI mismatch: expected %1$d, found %2$d</string>
     <string name="native_unavailable">Rust core unavailable: %1$s</string>
