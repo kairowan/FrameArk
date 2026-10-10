@@ -60,11 +60,13 @@ and XML fields, requires exact `Content-Length`, rejects chunked transfer and
 unsupported URL schemes, and never fetches a caller-supplied media URL. Its
 fixture media helper caps resource bytes and accepts only one bounded range;
 it is not a file/network fetcher. GENA, persistent authorization, and a
-streaming media server are not enabled. The GENA registry caps subscriptions,
-leases, callback schemes, XML property names/values, and pending events but
-does not own lease expiry or callback sockets; a future network server must
-add connection deadlines, authorization policy, expiry, and event-queue
-limits at its socket boundary.
+streaming media server are not enabled. The synchronous TCP adapter adds a
+read timeout, complete-request bound, response-size bound, and closes each
+connection after one response; it does not provide persistent authorization or
+multi-client scheduling. The GENA registry caps subscriptions, leases,
+callback schemes, XML property names/values, and pending events but does not
+own lease expiry or callback sockets; a daemon must add authorization policy,
+expiry, and event-queue limits at its socket boundary.
 
 The experimental RAOP session rejects unknown codecs, payload mismatches,
 interleaved TCP transport, invalid state transitions, and oversized SDP before

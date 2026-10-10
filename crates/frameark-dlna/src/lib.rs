@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::net::{SocketAddr, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::time::Duration;
 
 /// Maximum complete SSDP message accepted by the parser.
 pub const MAX_SSDP_BYTES: usize = 64 * 1024;
@@ -994,10 +996,10 @@ impl GenaRegistry {
 
 /// Bounded SOAP/HTTP MediaRenderer handler.
 ///
-/// The caller owns the TCP listener and connection lifecycle. This type only
-/// parses complete requests and applies a single request to explicit Rust
-/// state, which keeps socket policy and platform rendering outside the protocol
-/// crate. It implements the basic AVTransport, RenderingControl, and
+/// This type parses complete requests and applies a single request to explicit
+/// Rust state. The [`MediaRendererTcpServer`] adapter below adds a bounded
+/// synchronous socket boundary without moving platform rendering into this
+/// protocol crate. It implements the basic AVTransport, RenderingControl, and
 /// ConnectionManager actions needed for a first M3 vertical slice.
 pub struct MediaRendererHttpService {
     description: DeviceDescription,
@@ -1006,6 +1008,125 @@ pub struct MediaRendererHttpService {
     resources: BTreeMap<String, MediaResource>,
     gena: GenaRegistry,
     pending_events: Vec<GenaEvent>,
+}
+
+/// A bounded synchronous TCP adapter for one MediaRenderer service.
+///
+/// The adapter handles one connection per [`serve_once`](Self::serve_once)
+/// call, applies a read timeout, caps the complete HTTP request through
+/// [`HttpRequest::parse`], and closes the connection after one response. A
+/// production daemon can call it from an accept loop or replace it with an
+/// asynchronous socket layer while reusing the same handler and state.
+pub struct MediaRendererTcpServer {
+    listener: TcpListener,
+    service: MediaRendererHttpService,
+    read_timeout: Duration,
+}
+
+impl MediaRendererTcpServer {
+    /// Binds a listener and rejects a zero read timeout before accepting work.
+    pub fn bind(
+        address: SocketAddr,
+        service: MediaRendererHttpService,
+        read_timeout: Duration,
+    ) -> Result<Self, DlnaError> {
+        if read_timeout.is_zero() {
+            return Err(DlnaError::Invalid("HTTP read timeout"));
+        }
+        let listener = TcpListener::bind(address).map_err(|error| DlnaError::Io(error.kind()))?;
+        Ok(Self {
+            listener,
+            service,
+            read_timeout,
+        })
+    }
+
+    /// Returns the OS-assigned listener address, including an ephemeral port.
+    pub fn local_addr(&self) -> Result<SocketAddr, DlnaError> {
+        self.listener
+            .local_addr()
+            .map_err(|error| DlnaError::Io(error.kind()))
+    }
+
+    /// Provides read-only access to the handler state between connections.
+    pub fn service(&self) -> &MediaRendererHttpService {
+        &self.service
+    }
+
+    /// Provides mutable access for registering resources or draining events.
+    pub fn service_mut(&mut self) -> &mut MediaRendererHttpService {
+        &mut self.service
+    }
+
+    /// Accepts one bounded request, sends one response, and closes the stream.
+    pub fn serve_once(&mut self) -> Result<SocketAddr, DlnaError> {
+        let (mut stream, peer) = self
+            .listener
+            .accept()
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        stream
+            .set_read_timeout(Some(self.read_timeout))
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        let request = read_http_request(&mut stream)?;
+        let response = self.service.handle(&request);
+        let encoded = response.encode()?;
+        stream
+            .write_all(&encoded)
+            .and_then(|_| stream.flush())
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        Ok(peer)
+    }
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, DlnaError> {
+    let mut bytes = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        if bytes.len() >= MAX_HTTP_BYTES {
+            return Err(DlnaError::TooLarge("HTTP request"));
+        }
+        match HttpRequest::parse(&bytes) {
+            Ok(request) => return Ok(request),
+            Err(error) if request_may_be_incomplete(&bytes, &error) => {}
+            Err(error) => return Err(error),
+        }
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        if read == 0 {
+            return Err(DlnaError::Invalid("HTTP request"));
+        }
+        let remaining = MAX_HTTP_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+}
+
+fn request_may_be_incomplete(bytes: &[u8], error: &DlnaError) -> bool {
+    if *error == DlnaError::Invalid("HTTP terminator") {
+        return true;
+    }
+    if *error != DlnaError::Invalid("HTTP content length") {
+        return false;
+    }
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return true;
+    };
+    let Ok(header_text) = std::str::from_utf8(&bytes[..header_end]) else {
+        return false;
+    };
+    let Some(content_length) = header_text
+        .split("\r\n")
+        .skip(1)
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            (name.eq_ignore_ascii_case("content-length"))
+                .then(|| value.trim().parse::<usize>().ok())
+        })
+        .flatten()
+    else {
+        return false;
+    };
+    bytes.len() - header_end - 4 < content_length
 }
 
 impl MediaRendererHttpService {
@@ -1958,6 +2079,37 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn tcp_renderer_serves_one_bounded_loopback_request() {
+        let service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut server = MediaRendererTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            service,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(b"GET /device.xml HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        });
+
+        let peer = server.serve_once().unwrap();
+        let response = client.join().unwrap();
+        assert!(peer.ip().is_loopback());
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(
+            response
+                .windows(17)
+                .any(|window| window == b"FrameArk Renderer")
+        );
     }
 
     fn soap_request(path: &str, service: &str, action: &str, arguments: &str) -> HttpRequest {
