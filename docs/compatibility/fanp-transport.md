@@ -25,6 +25,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Rust QUIC media receiver orchestration | Pass on a real pinned-QUIC loopback: FAM1 frames are decoded, routed to both renderers, counted, and reset on FIN | `quic_media_stream_reaches_renderers_and_cleans_up` |
 | Native Offer → Start → media → Stop vertical sequence | Pass on a real pinned-QUIC loopback with backend, renderer-factory, control-state, media counters, and cleanup assertions | `control_and_media_complete_one_native_session` |
 | Android renderer configuration | Pass for JVM config validation and Android lint/build; hardware behavior unverified | `MediaTrackConfigTest`, Android `lint test assembleDebug` |
+| Android Receiver foreground-service lifecycle | Pass for manifest, notification-service wiring, and action-policy JVM tests; device reclaim behavior unverified | `ReceiverServicePolicyTest`, Android `lint test assembleDebug` |
 | Fixture sender CLI validation | Pass; bounded fixture file, frame-count, interval, pairing-code, and required-input checks | `frameark-cli` unit tests |
 
 ## Explicit limits
