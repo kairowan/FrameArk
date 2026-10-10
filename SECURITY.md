@@ -57,10 +57,12 @@ backend reset; the control profile carries no encoded media or remote input.
 
 The experimental DLNA handler bounds HTTP headers, bodies, SOAP argument text,
 and XML fields, requires exact `Content-Length`, rejects chunked transfer and
-unsupported URL schemes, and never fetches a caller-supplied media URL. GENA,
-media serving, and persistent authorization are not enabled; a future network
-server must add connection deadlines, authorization policy, and event-queue
-limits at its socket boundary.
+unsupported URL schemes, and never fetches a caller-supplied media URL. Its
+fixture media helper caps resource bytes and accepts only one bounded range;
+it is not a file/network fetcher. GENA, persistent authorization, and a
+streaming media server are not enabled; a future network server must add
+connection deadlines, authorization policy, and event-queue limits at its
+socket boundary.
 
 ## Disclosure and fixes
 

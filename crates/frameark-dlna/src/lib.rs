@@ -24,6 +24,12 @@ pub const MAX_HTTP_BYTES: usize = 128 * 1024;
 pub const MAX_HTTP_HEADERS: usize = 64;
 /// Maximum bytes used for one SOAP argument value.
 pub const MAX_SOAP_ARGUMENT_BYTES: usize = 16 * 1024;
+/// Maximum in-memory media resource accepted by the bounded response helper.
+pub const MAX_MEDIA_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum resources registered on one handler.
+pub const MAX_MEDIA_RESOURCES: usize = 16;
+/// Maximum DIDL-Lite items emitted by one metadata document.
+pub const MAX_DIDL_ITEMS: usize = 8;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -663,6 +669,198 @@ impl Default for MediaRendererState {
     }
 }
 
+/// One inclusive byte range for an HTTP 206 response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByteRange {
+    /// Inclusive first byte.
+    pub start: usize,
+    /// Inclusive last byte.
+    pub end: usize,
+}
+
+impl ByteRange {
+    /// Parses one RFC 7233-style `bytes=start-end` or `bytes=-suffix` range.
+    /// Multiple ranges and unsatisfiable ranges are rejected before allocation.
+    pub fn parse(value: &str, total_length: usize) -> Result<Self, DlnaError> {
+        if total_length == 0 {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        let value = value.trim();
+        let Some(spec) = value.strip_prefix("bytes=") else {
+            return Err(DlnaError::Invalid("HTTP range"));
+        };
+        if spec.is_empty() || spec.contains(',') {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        let (first, last) = spec
+            .split_once('-')
+            .ok_or(DlnaError::Invalid("HTTP range"))?;
+        if first.is_empty() {
+            let suffix = last
+                .parse::<usize>()
+                .map_err(|_| DlnaError::Invalid("HTTP range"))?;
+            if suffix == 0 {
+                return Err(DlnaError::Invalid("HTTP range"));
+            }
+            let start = total_length.saturating_sub(suffix);
+            return Ok(Self {
+                start,
+                end: total_length - 1,
+            });
+        }
+        let start = first
+            .parse::<usize>()
+            .map_err(|_| DlnaError::Invalid("HTTP range"))?;
+        if start >= total_length {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        let end = if last.is_empty() {
+            total_length - 1
+        } else {
+            last.parse::<usize>()
+                .map_err(|_| DlnaError::Invalid("HTTP range"))?
+                .min(total_length - 1)
+        };
+        if end < start {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+/// A bounded in-memory HTTP resource exposed by the caller-owned server.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaResource {
+    /// Origin-form path used to request the resource.
+    pub path: String,
+    /// MIME type returned in `Content-Type`.
+    pub content_type: String,
+    /// DLNA protocolInfo value returned in `contentFeatures.dlna.org`.
+    pub protocol_info: String,
+    /// Resource bytes. A production server may replace this helper with a
+    /// streaming source while retaining the same range policy.
+    pub body: Vec<u8>,
+}
+
+impl MediaResource {
+    /// Creates a bounded resource descriptor and rejects header injection.
+    pub fn new(
+        path: impl Into<String>,
+        content_type: impl Into<String>,
+        protocol_info: impl Into<String>,
+        body: Vec<u8>,
+    ) -> Result<Self, DlnaError> {
+        let resource = Self {
+            path: path.into(),
+            content_type: content_type.into(),
+            protocol_info: protocol_info.into(),
+            body,
+        };
+        if !resource.path.starts_with('/') {
+            return Err(DlnaError::InvalidField("media path"));
+        }
+        for (value, field) in [
+            (&resource.path, "media path"),
+            (&resource.content_type, "media content type"),
+            (&resource.protocol_info, "media protocol info"),
+        ] {
+            validate_field(value, field)?;
+        }
+        if resource.body.is_empty() {
+            return Err(DlnaError::InvalidField("media body"));
+        }
+        if resource.body.len() > MAX_MEDIA_RESOURCE_BYTES {
+            return Err(DlnaError::TooLarge("media resource"));
+        }
+        Ok(resource)
+    }
+}
+
+/// One resource entry in a generated DIDL-Lite item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DidlResource {
+    /// Absolute or origin-form media URI.
+    pub uri: String,
+    /// DLNA protocolInfo value.
+    pub protocol_info: String,
+    /// Optional `HH:MM:SS` duration.
+    pub duration: Option<String>,
+    /// Optional byte size.
+    pub size: Option<usize>,
+}
+
+/// A bounded DIDL-Lite item for `CurrentURIMetaData`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DidlLiteItem {
+    /// Stable DIDL object identifier.
+    pub id: String,
+    /// Parent container identifier.
+    pub parent_id: String,
+    /// Human-readable title.
+    pub title: String,
+    /// UPnP class, such as `object.item.videoItem`.
+    pub class_name: String,
+    /// One or more resources.
+    pub resources: Vec<DidlResource>,
+}
+
+impl DidlLiteItem {
+    /// Emits one deterministic DIDL-Lite document after validating bounds.
+    pub fn to_xml(&self) -> Result<String, DlnaError> {
+        if self.resources.is_empty() || self.resources.len() > MAX_DIDL_ITEMS {
+            return Err(DlnaError::InvalidField("DIDL resources"));
+        }
+        for (value, field) in [
+            (&self.id, "DIDL id"),
+            (&self.parent_id, "DIDL parent id"),
+            (&self.title, "DIDL title"),
+            (&self.class_name, "DIDL class"),
+        ] {
+            validate_field(value, field)?;
+        }
+        let mut xml = "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\"><item restricted=\"1\"".to_string();
+        xml.push_str(" id=\"");
+        xml.push_str(&xml_escape(&self.id));
+        xml.push_str("\" parentID=\"");
+        xml.push_str(&xml_escape(&self.parent_id));
+        xml.push_str("\">");
+        xml.push_str("<dc:title>");
+        xml.push_str(&xml_escape(&self.title));
+        xml.push_str("</dc:title><upnp:class>");
+        xml.push_str(&xml_escape(&self.class_name));
+        xml.push_str("</upnp:class>");
+        for resource in &self.resources {
+            for (value, field) in [
+                (&resource.uri, "DIDL resource URI"),
+                (&resource.protocol_info, "DIDL protocol info"),
+            ] {
+                validate_field(value, field)?;
+            }
+            xml.push_str("<res protocolInfo=\"");
+            xml.push_str(&xml_escape(&resource.protocol_info));
+            if let Some(duration) = &resource.duration {
+                validate_field(duration, "DIDL duration")?;
+                xml.push_str(" duration=\"");
+                xml.push_str(&xml_escape(duration));
+                xml.push('"');
+            }
+            if let Some(size) = resource.size {
+                xml.push_str(" size=\"");
+                xml.push_str(&size.to_string());
+                xml.push('"');
+            }
+            xml.push('>');
+            xml.push_str(&xml_escape(&resource.uri));
+            xml.push_str("</res>");
+        }
+        xml.push_str("</item></DIDL-Lite>");
+        if xml.len() > MAX_SOAP_ARGUMENT_BYTES {
+            return Err(DlnaError::TooLarge("DIDL metadata"));
+        }
+        Ok(xml)
+    }
+}
+
 /// Bounded SOAP/HTTP MediaRenderer handler.
 ///
 /// The caller owns the TCP listener and connection lifecycle. This type only
@@ -674,6 +872,7 @@ pub struct MediaRendererHttpService {
     description: DeviceDescription,
     device_description_path: String,
     state: MediaRendererState,
+    resources: BTreeMap<String, MediaResource>,
 }
 
 impl MediaRendererHttpService {
@@ -684,6 +883,7 @@ impl MediaRendererHttpService {
             description,
             device_description_path: "/device.xml".to_string(),
             state: MediaRendererState::default(),
+            resources: BTreeMap::new(),
         })
     }
 
@@ -697,11 +897,22 @@ impl MediaRendererHttpService {
         &mut self.state
     }
 
+    /// Registers or replaces one bounded media resource for HTTP GET/Range.
+    pub fn register_media_resource(&mut self, resource: MediaResource) -> Result<(), DlnaError> {
+        if !self.resources.contains_key(&resource.path)
+            && self.resources.len() >= MAX_MEDIA_RESOURCES
+        {
+            return Err(DlnaError::TooLarge("media resources"));
+        }
+        self.resources.insert(resource.path.clone(), resource);
+        Ok(())
+    }
+
     /// Applies one parsed request and returns an HTTP response.
     pub fn handle(&mut self, request: &HttpRequest) -> HttpResponse {
         let path = request.target.split('?').next().unwrap_or(&request.target);
         match request.method.as_str() {
-            "GET" => self.handle_get(path),
+            "GET" => self.handle_get(path, request),
             "POST" => self.handle_post(path, request),
             _ => {
                 let mut response = HttpResponse::empty(405, "Method Not Allowed");
@@ -713,7 +924,24 @@ impl MediaRendererHttpService {
         }
     }
 
-    fn handle_get(&self, path: &str) -> HttpResponse {
+    fn handle_get(&self, path: &str, request: &HttpRequest) -> HttpResponse {
+        if let Some(resource) = self.resources.get(path) {
+            let range = match request.header("range") {
+                Some(value) => match ByteRange::parse(value, resource.body.len()) {
+                    Ok(range) => Some(range),
+                    Err(_) => {
+                        let mut response = HttpResponse::empty(416, "Range Not Satisfiable");
+                        response.headers.insert(
+                            "content-range".to_string(),
+                            format!("bytes */{}", resource.body.len()),
+                        );
+                        return response;
+                    }
+                },
+                None => None,
+            };
+            return self.media_response(resource, range);
+        }
         if path == self.device_description_path {
             return match self.description.to_xml() {
                 Ok(xml) => HttpResponse::xml(200, "OK", xml),
@@ -724,6 +952,49 @@ impl MediaRendererHttpService {
             return HttpResponse::xml(200, "OK", scpd_xml(service));
         }
         HttpResponse::empty(404, "Not Found")
+    }
+
+    fn media_response(&self, resource: &MediaResource, range: Option<ByteRange>) -> HttpResponse {
+        let mut response = if let Some(range) = range {
+            let body = resource.body[range.start..=range.end].to_vec();
+            let mut response = HttpResponse {
+                status: 206,
+                reason: "Partial Content".to_string(),
+                headers: BTreeMap::new(),
+                body,
+            };
+            response.headers.insert(
+                "content-range".to_string(),
+                format!(
+                    "bytes {}-{}/{}",
+                    range.start,
+                    range.end,
+                    resource.body.len()
+                ),
+            );
+            response
+        } else {
+            HttpResponse {
+                status: 200,
+                reason: "OK".to_string(),
+                headers: BTreeMap::new(),
+                body: resource.body.clone(),
+            }
+        };
+        response
+            .headers
+            .insert("content-type".to_string(), resource.content_type.clone());
+        response
+            .headers
+            .insert("accept-ranges".to_string(), "bytes".to_string());
+        response.headers.insert(
+            "contentfeatures.dlna.org".to_string(),
+            resource.protocol_info.clone(),
+        );
+        response
+            .headers
+            .insert("transfermode.dlna.org".to_string(), "Streaming".to_string());
+        response
     }
 
     fn handle_post(&mut self, path: &str, request: &HttpRequest) -> HttpResponse {
@@ -1437,6 +1708,80 @@ mod tests {
                 .unwrap()
                 .contains("GetPositionInfo")
         );
+    }
+
+    #[test]
+    fn range_and_didl_contracts_are_bounded_and_escaped() {
+        assert_eq!(
+            ByteRange::parse("bytes=2-5", 10).unwrap(),
+            ByteRange { start: 2, end: 5 }
+        );
+        assert_eq!(
+            ByteRange::parse("bytes=-3", 10).unwrap(),
+            ByteRange { start: 7, end: 9 }
+        );
+        assert!(ByteRange::parse("bytes=2-5,7-8", 10).is_err());
+        assert!(ByteRange::parse("bytes=99-", 10).is_err());
+
+        let item = DidlLiteItem {
+            id: "item-1".to_string(),
+            parent_id: "0".to_string(),
+            title: "A & B".to_string(),
+            class_name: "object.item.videoItem".to_string(),
+            resources: vec![DidlResource {
+                uri: "https://media.example/video.mp4?a=1&b=2".to_string(),
+                protocol_info: "http-get:*:video/mp4:*".to_string(),
+                duration: Some("00:00:12".to_string()),
+                size: Some(12_345),
+            }],
+        };
+        let xml = item.to_xml().unwrap();
+        assert!(xml.contains("A &amp; B"));
+        assert!(xml.contains("a=1&amp;b=2"));
+        assert!(xml.contains("duration=\"00:00:12\""));
+    }
+
+    #[test]
+    fn renderer_serves_full_and_partial_media_without_fetching_urls() {
+        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        service
+            .register_media_resource(
+                MediaResource::new(
+                    "/media/test.bin",
+                    "video/mp4",
+                    "http-get:*:video/mp4:*",
+                    b"0123456789".to_vec(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let full =
+            HttpRequest::parse(b"GET /media/test.bin HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let response = service.handle(&full);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"0123456789");
+        assert_eq!(
+            response.headers.get("accept-ranges"),
+            Some(&"bytes".to_string())
+        );
+
+        let partial = HttpRequest::parse(
+            b"GET /media/test.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=3-6\r\n\r\n",
+        )
+        .unwrap();
+        let response = service.handle(&partial);
+        assert_eq!(response.status, 206);
+        assert_eq!(response.body, b"3456");
+        assert_eq!(
+            response.headers.get("content-range"),
+            Some(&"bytes 3-6/10".to_string())
+        );
+
+        let invalid = HttpRequest::parse(
+            b"GET /media/test.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=99-\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(service.handle(&invalid).status, 416);
     }
 
     #[test]
