@@ -22,10 +22,23 @@ class TrustSettingsController(
     }
 
     fun approve(peer: FrameArkNative.TrustedPeer): MutationResult {
+        return approveMutation { native.trustPeer(peer) }
+    }
+
+    /**
+     * Persists a proof-verified raw key only after this explicit UI approval.
+     * The native bridge still owns canonical fingerprinting and key-rotation
+     * policy; this controller owns the encrypted snapshot rollback boundary.
+     */
+    fun approve(peer: FrameArkNative.VerifiedPeerKey): MutationResult {
+        return approveMutation { native.trustPeerPublicKey(peer) }
+    }
+
+    private fun approveMutation(apply: () -> Boolean): MutationResult {
         if (native.isReceiverRunning()) return MutationResult.Rejected(Reason.RECEIVER_RUNNING)
         val previous = native.exportTrustSnapshot()
             ?: return MutationResult.Rejected(Reason.PERSISTENCE_FAILED)
-        if (!native.trustPeer(peer)) return MutationResult.Rejected(Reason.INVALID_PEER)
+        if (!apply()) return MutationResult.Rejected(Reason.INVALID_PEER)
         if (snapshotStore.persist()) return MutationResult.Applied
         native.importTrustSnapshot(previous)
         return MutationResult.Rejected(Reason.PERSISTENCE_FAILED)

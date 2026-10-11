@@ -50,4 +50,40 @@ class TrustSettingsControllerTest {
             assertTrue(file.delete() || !file.exists())
         }
     }
+
+    @Test
+    fun proof_key_approval_uses_rust_bridge_and_encrypted_snapshot() {
+        var forwarded: Triple<String, ByteArray, String>? = null
+        val snapshot = byteArrayOf('F'.code.toByte(), 'T'.code.toByte(), 'R'.code.toByte(), '1'.code.toByte(), 0, 1, 0, 1)
+        val native = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            trustPeerPublicKeyProvider = { id, key, label ->
+                forwarded = Triple(id, key, label)
+                0
+            },
+            trustSnapshotExportProvider = { snapshot },
+            trustSnapshotImportProvider = { 0 },
+        )
+        val file = Files.createTempFile("frameark-proof-controller", ".bin").toFile().also { it.delete() }
+        val store = AndroidTrustSnapshotStore(
+            file,
+            native,
+            keyProvider = { SecretKeySpec(ByteArray(32) { it.toByte() }, "AES") },
+        )
+        val controller = TrustSettingsController(native, store)
+        val publicKey = ByteArray(32) { it.toByte() }
+        try {
+            assertEquals(
+                TrustSettingsController.MutationResult.Applied,
+                controller.approve(FrameArkNative.VerifiedPeerKey("sender-1", publicKey, "Phone")),
+            )
+            assertEquals("sender-1", forwarded?.first)
+            assertEquals(publicKey.toList(), forwarded?.second?.toList())
+            assertEquals("Phone", forwarded?.third)
+            assertTrue(file.readBytes().isNotEmpty())
+        } finally {
+            assertTrue(file.delete() || !file.exists())
+        }
+    }
 }
