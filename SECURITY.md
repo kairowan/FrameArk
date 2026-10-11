@@ -177,6 +177,13 @@ The mirror audio contract caps access-unit bytes and duration, restricts sample
 rates/channels, and requires PCM16 payload alignment. It does not decrypt,
 decode, conceal loss, or provide an audio output authorization boundary.
 
+The experimental `RaopAudioCoordinator` rejects RAOP packets whose source IP,
+SSRC, or negotiated payload type does not match the caller-provided session
+binding before they enter the jitter buffer. These values are only trustworthy
+when obtained from an authenticated RTSP boundary; the coordinator itself does
+not implement Apple pairing, FairPlay/AES-CTR decryption, or sender
+authorization.
+
 The `frameark-diagnostics` recorder keeps only bounded, caller-redacted
 summaries in memory. It strips control characters and omits session identifiers
 from transition records, but it cannot know whether a caller supplied a secret
