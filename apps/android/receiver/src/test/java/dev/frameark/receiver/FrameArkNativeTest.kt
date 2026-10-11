@@ -95,6 +95,33 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun proof_key_trust_bridge_requires_bounded_key_and_forwards_raw_key() {
+        var forwarded: Triple<String, ByteArray, String>? = null
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            trustPeerPublicKeyProvider = { deviceId, publicKey, label ->
+                forwarded = Triple(deviceId, publicKey, label)
+                0
+            },
+        )
+        val publicKey = ByteArray(32) { it.toByte() }
+        assertTrue(
+            bridge.trustPeerPublicKey(
+                FrameArkNative.VerifiedPeerKey("sender-1", publicKey, "Phone"),
+            ),
+        )
+        assertEquals("sender-1", forwarded?.first)
+        assertEquals(publicKey.toList(), forwarded?.second?.toList())
+        assertEquals("Phone", forwarded?.third)
+        assertFalse(
+            bridge.trustPeerPublicKey(
+                FrameArkNative.VerifiedPeerKey("sender-1", ByteArray(31), "Phone"),
+            ),
+        )
+    }
+
+    @Test
     fun rejects_malformed_peer_trust_before_crossing_jni() {
         var trustCalls = 0
         val bridge = FrameArkNative(
