@@ -122,6 +122,46 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeer
     }
 }
 
+/// Adds or refreshes an explicitly approved peer from its verified raw public
+/// key. The proof/signature check and user approval happen before this JNI
+/// entry point; Rust only derives the canonical trust fingerprint here.
+/// Return values: 0 accepted, -2 key changed, -3 malformed/lock failure,
+/// -4 registry capacity exhausted.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeerPublicKey(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    device_id: JString<'_>,
+    public_key: JByteArray<'_>,
+    label: JString<'_>,
+) -> jint {
+    let Ok(device_id) = env.get_string(&device_id) else {
+        return -3;
+    };
+    let Ok(label) = env.get_string(&label) else {
+        return -3;
+    };
+    let Ok(public_key) = env.convert_byte_array(&public_key) else {
+        return -3;
+    };
+    let Ok(device_id) = DeviceId::try_from(device_id.to_string_lossy().into_owned()) else {
+        return -3;
+    };
+    let label = label.to_string_lossy().into_owned();
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    match state
+        .trust_registry
+        .trust_public_key(device_id, &public_key, label)
+    {
+        Ok(_) => 0,
+        Err(TrustError::IdentityChanged) => -2,
+        Err(TrustError::Capacity) => -4,
+        Err(_) => -3,
+    }
+}
+
 /// Explicitly revokes one trusted peer. Return values: 0 revoked, -3 unknown
 /// or malformed/lock failure.
 #[unsafe(no_mangle)]

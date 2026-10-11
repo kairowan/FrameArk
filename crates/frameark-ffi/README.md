@@ -58,11 +58,13 @@ possession, persistent peer trust, or binding of the Keystore key to the
 ephemeral TLS certificate; temporary certificate pinning and PIN pairing remain
 the transport authentication mechanism.
 
-The bridge also exposes `nativeTrustPeer`, `nativeRevokePeer`, and
-`nativeIsPeerTrusted` for an explicit Android approval UI. These calls delegate
-validation, capacity, identity-change rejection, and revocation to Rust's
-bounded `frameark-trust::TrustRegistry`; Kotlin forwards only public IDs,
-fingerprints, and labels. `nativeExportTrustSnapshot` and
+The bridge also exposes `nativeTrustPeer`, `nativeTrustPeerPublicKey`,
+`nativeRevokePeer`, and `nativeIsPeerTrusted` for an explicit Android approval
+UI. These calls delegate validation, capacity, identity-change rejection, and
+revocation to Rust's bounded `frameark-trust::TrustRegistry`; the raw-key
+variant derives the canonical fingerprint in Rust and is reserved for a key
+that FANP has already verified and the user has approved. Kotlin forwards only
+bounded public IDs, keys/fingerprints, and labels. `nativeExportTrustSnapshot` and
 `nativeImportTrustSnapshot` expose only the bounded public `FTR1` bytes; import
 is rejected while a session is active. `AndroidTrustSnapshotStore` encrypts
 those bytes with an Android Keystore AES-GCM key and atomically replaces an
