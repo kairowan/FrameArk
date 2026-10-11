@@ -177,6 +177,57 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeIsPeerTru
     }
 }
 
+/// Exports the bounded public trust registry snapshot for caller-owned secure
+/// storage. The returned FTR1 bytes contain no private keys or pairing codes;
+/// a null result means the state lock or snapshot encoder was unavailable.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeExportTrustSnapshot(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jbyteArray {
+    let Ok(state) = receiver_state().lock() else {
+        return std::ptr::null_mut();
+    };
+    let Some(snapshot) = export_trust_snapshot(&state) else {
+        return std::ptr::null_mut();
+    };
+    env.byte_array_from_slice(&snapshot)
+        .map(|array| array.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Imports a bounded public trust registry snapshot before a session starts.
+/// Return values: 0 accepted, -2 active session, -3 malformed/lock failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeImportTrustSnapshot(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    snapshot: JByteArray<'_>,
+) -> jint {
+    let Ok(bytes) = env.convert_byte_array(&snapshot) else {
+        return -3;
+    };
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    import_trust_snapshot(&mut state, &bytes)
+}
+
+fn export_trust_snapshot(state: &NativeReceiverState) -> Option<Vec<u8>> {
+    state.trust_registry.encode().ok()
+}
+
+fn import_trust_snapshot(state: &mut NativeReceiverState, bytes: &[u8]) -> jint {
+    let Ok(registry) = TrustRegistry::decode(bytes) else {
+        return -3;
+    };
+    if state.session.is_some() || state.network.is_some() {
+        return -2;
+    }
+    state.trust_registry = registry;
+    0
+}
+
 fn install_device_identity(
     state: &mut NativeReceiverState,
     alias: &str,
@@ -1067,6 +1118,29 @@ mod tests {
             state.trust_registry.revoke(&device_id),
             Err(TrustError::UnknownDevice)
         );
+    }
+
+    #[test]
+    fn trust_snapshot_bridge_round_trips_before_start_and_rejects_active_replace() {
+        let mut source = NativeReceiverState::default();
+        let device_id = DeviceId::try_from("sender-1").unwrap();
+        let fingerprint = DeviceFingerprint::new(
+            "ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89",
+        )
+        .unwrap();
+        source
+            .trust_registry
+            .trust(device_id.clone(), fingerprint.clone(), "Sender")
+            .unwrap();
+        let snapshot = export_trust_snapshot(&source).unwrap();
+        let mut restored = NativeReceiverState::default();
+        assert_eq!(import_trust_snapshot(&mut restored, &snapshot), 0);
+        assert!(restored.trust_registry.is_trusted(&device_id, &fingerprint));
+        restored.session = Some(Session::new(
+            SessionId::try_from("test-session").unwrap(),
+            DeviceId::try_from("receiver").unwrap(),
+        ));
+        assert_eq!(import_trust_snapshot(&mut restored, &snapshot), -2);
     }
 
     #[test]

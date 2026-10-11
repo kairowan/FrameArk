@@ -33,11 +33,16 @@ class FrameArkReceiverService : Service() {
     private lateinit var multicastLockCoordinator: ReceiverMulticastLockCoordinator
     private var multicastLock: WifiManager.MulticastLock? = null
     private lateinit var identityCoordinator: ReceiverIdentityCoordinator
+    private lateinit var trustSnapshotStore: AndroidTrustSnapshotStore
     private var identityReady = false
 
     override fun onCreate() {
         super.onCreate()
         native = FrameArkNative()
+        trustSnapshotStore = AndroidTrustSnapshotStore(
+            file = filesDir.resolve(TRUST_SNAPSHOT_FILE),
+            native = native,
+        )
         playbackLoop = MediaPlaybackLoop(
             MediaPlaybackPump(
                 native,
@@ -109,12 +114,18 @@ class FrameArkReceiverService : Service() {
         identityReady = when (val identityState = identityCoordinator.initialize()) {
             is ReceiverIdentityCoordinator.State.Ready -> {
                 val installed = native.setDeviceIdentity(identityState.identity)
-                if (installed) {
-                    Log.i(TAG, "device identity ready")
-                } else {
+                if (!installed) {
                     Log.e(TAG, "native identity bridge unavailable; receiver will remain stopped")
+                    false
+                } else {
+                    val restored = trustSnapshotStore.restore()
+                    if (restored) {
+                        Log.i(TAG, "device identity and trust snapshot ready")
+                    } else {
+                        Log.e(TAG, "trust snapshot could not be restored; receiver will remain stopped")
+                    }
+                    restored
                 }
-                installed
             }
 
             is ReceiverIdentityCoordinator.State.Failed -> {
@@ -155,6 +166,9 @@ class FrameArkReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        if (!trustSnapshotStore.persist()) {
+            Log.w(TAG, "trust snapshot was not persisted")
+        }
         networkObserver.close()
         mainHandler.removeCallbacksAndMessages(null)
         coordinator.close()
@@ -163,6 +177,14 @@ class FrameArkReceiverService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** Persists an explicitly approved Rust trust mutation through Keystore. */
+    fun trustPeer(peer: FrameArkNative.TrustedPeer): Boolean =
+        native.trustPeer(peer) && trustSnapshotStore.persist()
+
+    /** Persists an explicit Rust trust revocation through Keystore. */
+    fun revokePeer(deviceId: String): Boolean =
+        native.revokePeer(deviceId) && trustSnapshotStore.persist()
 
     private fun onVideoFrame(frame: FrameArkNative.MediaFrame) {
         // Surface/MediaCodec ownership is attached by the active UI session.
@@ -231,6 +253,7 @@ class FrameArkReceiverService : Service() {
     companion object {
         private const val CHANNEL_ID = "frameark.receiver.playback"
         private const val NOTIFICATION_ID = 1001
+        private const val TRUST_SNAPSHOT_FILE = "frameark-trust.fats"
         private const val TAG = "FrameArkReceiver"
     }
 }

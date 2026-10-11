@@ -243,11 +243,12 @@ gate, not sender authorization or a substitute for Rust trust approval.
 
 The Android JNI trust calls delegate peer add/refresh, explicit revoke, and
 fingerprint matching to the bounded Rust `TrustRegistry`. A changed fingerprint
-is rejected until revocation; capacity and labels remain bounded. The bridge
-does not authenticate a sender, persist the registry, encrypt a snapshot, or
-decide whether a user approved a request. UI and platform secure-storage
-integration must remain outside the JNI parser and be added before remembered
-trust is advertised.
+is rejected until revocation; capacity and labels remain bounded. The snapshot
+JNI calls expose only bounded public `FTR1` bytes and reject replacement during
+an active session. `AndroidTrustSnapshotStore` encrypts those bytes with an
+Android Keystore AES-GCM key and atomically replaces an app-private file. This
+does not authenticate a sender, prove key possession, or decide whether a user
+approved a request; remembered trust must remain behind an explicit approval UI.
 
 The JNI lifecycle requires that public identity before opening its network
 listener. Rust validates the bounded ASCII alias and SHA-256 fingerprint, uses
