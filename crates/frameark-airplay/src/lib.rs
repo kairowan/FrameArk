@@ -1413,6 +1413,15 @@ pub enum MirrorOrientation {
     Deg270,
 }
 
+/// Video codec explicitly declared by a mirror SETUP property list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorVideoCodec {
+    /// H.264 is the only codec currently assembled by the mirror pipeline.
+    H264,
+    /// H.265 is recognized as a conditional capability but is not assembled.
+    H265,
+}
+
 impl TryFrom<u16> for MirrorOrientation {
     type Error = AirplayError;
 
@@ -2048,6 +2057,8 @@ pub struct MirrorTransport {
 /// Bounded video/audio parameters carried by a mirror setup Property List.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MirrorVideoConfig {
+    /// Codec declared by the sender, with H.265 kept explicit at the boundary.
+    pub codec: MirrorVideoCodec,
     /// Coded video width in pixels.
     pub width: u16,
     /// Coded video height in pixels.
@@ -2152,6 +2163,26 @@ impl MirrorVideoConfig {
         let PlistValue::Dictionary(dictionary) = value else {
             return Err(AirplayError::Invalid("mirror configuration"));
         };
+        let codec = match dictionary.get("codec") {
+            None => MirrorVideoCodec::H264,
+            Some(PlistValue::String(value))
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "h264" | "h.264" | "avc"
+                ) =>
+            {
+                MirrorVideoCodec::H264
+            }
+            Some(PlistValue::String(value))
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "h265" | "h.265" | "hevc"
+                ) =>
+            {
+                return Err(AirplayError::Invalid("unsupported mirror video codec"));
+            }
+            Some(_) => return Err(AirplayError::Invalid("mirror video codec")),
+        };
         let width = plist_unsigned(dictionary, "width")?;
         let height = plist_unsigned(dictionary, "height")?;
         let orientation_value = plist_unsigned(dictionary, "orientation")?;
@@ -2170,6 +2201,7 @@ impl MirrorVideoConfig {
         }
         MirrorClock::new(audio_sample_rate)?;
         Ok(Self {
+            codec,
             width: width as u16,
             height: height as u16,
             orientation,
@@ -4173,6 +4205,34 @@ mod tests {
         );
         assert!(MirrorSession::new("", 7010).is_err());
         assert!(MirrorSession::new("mirror-session", 0).is_err());
+    }
+
+    #[test]
+    fn mirror_setup_rejects_conditional_h265_without_mutating_session() {
+        let mut config = BTreeMap::new();
+        config.insert("codec".to_string(), PlistValue::String("hevc".to_string()));
+        config.insert("width".to_string(), PlistValue::Integer(1920));
+        config.insert("height".to_string(), PlistValue::Integer(1080));
+        config.insert("orientation".to_string(), PlistValue::Integer(0));
+        config.insert("audio_sample_rate".to_string(), PlistValue::Integer(48_000));
+        let body = encode_xml_plist(&PlistValue::Dictionary(config)).unwrap();
+        let mut session = MirrorSession::new("mirror-session", 7010).unwrap();
+
+        assert_eq!(
+            session.handle(&request(
+                "SETUP",
+                1,
+                &[(
+                    "transport",
+                    "RTP/AVP/UDP;unicast;mode=record;control_port=7011"
+                )],
+                &body,
+            )),
+            Err(AirplayError::Invalid("unsupported mirror video codec"))
+        );
+        assert_eq!(session.state(), MirrorSessionState::Idle);
+        assert!(session.config().is_none());
+        assert!(session.transport().is_none());
     }
 
     #[test]

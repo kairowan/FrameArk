@@ -22,7 +22,8 @@ AirPlay/RAOP interoperability.
   address for higher-level RTSP policy enforcement;
 - bounded mirror RTSP session state with OPTIONS/SETUP/RECORD,
   GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, XML/
-  binary plist video configuration checks, and atomic SETUP reconfiguration
+  binary plist video configuration checks (explicit H.264/H.265 codec gate),
+  and atomic SETUP reconfiguration
   while streaming;
 - bounded mirror AAC/PCM16 audio format and access-unit contracts with sample
   timestamps, duration, channel, and payload-size validation;
@@ -40,8 +41,10 @@ encryption policy. These remain caller-owned decisions. The crate does not
 decode audio or perform Apple pairing; it is a deterministic protocol contract
 that a future daemon can connect to platform audio and timing adapters.
 
-FairPlay, AES-CTR decryption, pairing, DMAP metadata, AirPlay 2, H.265, and
-Apple device compatibility are not implemented or implied. The
+FairPlay, AES-CTR decryption, pairing, DMAP metadata, AirPlay 2, H.265 media
+assembly, and Apple device compatibility are not implemented or implied. An
+explicit H.265 SETUP value is rejected as a conditional unsupported capability
+instead of being silently interpreted as H.264. The
 compatibility label is **Experimental**.
 
 ```powershell
