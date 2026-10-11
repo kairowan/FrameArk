@@ -20,38 +20,31 @@ import android.util.Log
 class FrameArkReceiverService : Service() {
     private lateinit var native: FrameArkNative
     private lateinit var playbackLoop: MediaPlaybackLoop
+    private lateinit var coordinator: ReceiverSessionCoordinator
 
     override fun onCreate() {
         super.onCreate()
         native = FrameArkNative()
         playbackLoop = MediaPlaybackLoop(
             MediaPlaybackPump(native, ::onVideoFrame, ::onAudioFrame),
-            onError = { Log.w(TAG, "media playback loop stopped after consumer failure") },
+            onError = {
+                Log.w(TAG, "media playback loop stopped after consumer failure")
+                coordinator.onPlaybackFailure()
+            },
         )
+        coordinator = ReceiverSessionCoordinator(native, playbackLoop)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = ReceiverServicePolicy.normalize(intent?.action)
         if (ReceiverServicePolicy.isStop(action)) {
-            playbackLoop.stop()
-            native.stopReceiver()
+            coordinator.stop()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
-        when (native.startReceiver()) {
-            is FrameArkNative.ReceiverResult.Started,
-            is FrameArkNative.ReceiverResult.AlreadyStarted,
-            -> Unit
-
-            else -> {
-                stopSelfResult(startId)
-                return START_NOT_STICKY
-            }
-        }
-        if (!playbackLoop.start()) {
-            native.stopReceiver()
+        if (!coordinator.start()) {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
@@ -60,8 +53,7 @@ class FrameArkReceiverService : Service() {
     }
 
     override fun onDestroy() {
-        playbackLoop.close()
-        native.stopReceiver()
+        coordinator.close()
         super.onDestroy()
     }
 
