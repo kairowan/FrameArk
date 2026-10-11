@@ -19,6 +19,7 @@ DLNA/UPnP MediaRenderer work.
   bodies, monotonic lease expiry, and stale callback cleanup for caller-owned
   callback HTTP;
 - deterministic bounded HTTP `NOTIFY` request encoding for queued GENA events;
+- a bounded synchronous plain-HTTP callback client with explicit HTTPS rejection;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 
@@ -36,13 +37,18 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 `GetVolume`, and the basic ConnectionManager queries. Media URLs are limited to
 `http://` and `https://`; FrameArk does not fetch URLs or bypass DRM.
 
-HTTP chunked transfer, callback connection retries, callback connection I/O,
-full DIDL-Lite parsing,
+HTTP chunked transfer, callback connection retries and HTTPS/TLS, full DIDL-Lite parsing,
 multicast lease scheduling, streaming file backends, real decoder integration,
 and named client interoperability are not implemented yet. The TCP adapter is
 single-request and synchronous, so it is not a production multi-client daemon.
 `GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
 client but does not open callback sockets or retry failures.
+`GenaCallbackClient` supplies plain-HTTP socket I/O. Subscriptions expire on
+monotonic deadlines; subscribe, renew, publish, request handling, and event
+draining reap stale records. An optional host timer can call
+`expire_subscriptions()` for idle cleanup and record its removal count.
+Events already drained to a caller are caller-owned and require a lease check
+if delivery is delayed.
 The compatibility label is **Experimental**, not Stable.
 
 Run the focused tests with:

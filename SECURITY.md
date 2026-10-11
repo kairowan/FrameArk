@@ -64,14 +64,17 @@ The experimental DLNA handler bounds HTTP headers, bodies, SOAP argument text,
 and XML fields, requires exact `Content-Length`, rejects chunked transfer and
 unsupported URL schemes, and never fetches a caller-supplied media URL. Its
 fixture media helper caps resource bytes and accepts only one bounded range;
-it is not a file/network fetcher. GENA, persistent authorization, and a
-streaming media server are not enabled. The synchronous TCP adapter adds a
+it is not a file/network fetcher. Persistent authorization and a streaming
+media server are not enabled. The synchronous TCP adapter adds a
 read timeout, complete-request bound, response-size bound, and closes each
 connection after one response; it does not provide persistent authorization or
 multi-client scheduling. The GENA registry caps subscriptions, leases,
-callback schemes, XML property names/values, and pending events but does not
-own lease expiry or callback sockets; a daemon must add authorization policy,
-expiry, and event-queue limits at its socket boundary.
+callback schemes, XML property names/values, and pending events. Monotonic
+deadlines are enforced on subscription mutations and event publication; the
+HTTP service drops expired/unsubscribed pending events before handing them to
+callback I/O. A daemon must add authorization policy and re-check leases if it
+delays delivery of already-drained events. Idle cleanup is available through
+`expire_subscriptions`; no background scheduler is started by the library.
 The SSDP multicast helper sends only the bounded standard IPv4 announcement to
 the caller's selected UDP socket; it does not join interfaces, schedule bursts,
 authenticate discovery peers, or expose a trust boundary.
@@ -79,7 +82,7 @@ authenticate discovery peers, or expose a trust boundary.
 caps the generated request. `GenaCallbackClient` adds bounded plain-HTTP
 connect/read/write timeouts and exact-length response parsing, rejects HTTPS
 unless a caller-owned TLS adapter is supplied, and does not provide callback
-authentication, retries, lease expiry, or SSRF policy beyond URL/authority
+authentication, retries, or SSRF policy beyond URL/authority
 validation.
 
 The experimental RAOP session rejects unknown codecs, payload mismatches,
