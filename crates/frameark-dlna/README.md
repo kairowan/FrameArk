@@ -29,6 +29,9 @@ DLNA/UPnP MediaRenderer work.
 - a bounded media-format probe that extracts MIME type, optional DLNA profile,
   and content length from a caller-owned HTTP response and matches it against
   the renderer capability report;
+- a caller-injected bounded remote media range fetch that validates DNS/network
+  policy, requires a matching `206 Content-Range` for requested chunks, rejects
+  redirects and range-ignoring origins, and returns at most one bounded body;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 - a caller-injected, bounded DNS-aware media URI policy for public-only or
@@ -67,8 +70,12 @@ later redirect or DNS change. `GenaEvent::encode_http_notify` prepares bytes for
 client but does not open callback sockets or retry failures.
 `send_gena_callback_with_connector` reuses the bounded request and response
 parser with a vetted TLS stream, but does not implement TLS or prove peer
-authentication. `MediaFormatProbe` is metadata-only: it does not fetch a URL,
-follow redirects, inspect a decoder, or override authorization and DNS policy.
+authentication. `MediaFormatProbe` is metadata-only. The
+`fetch_media_range_with_connector` helper adds one bounded range request for a
+caller-owned playback pipeline, but it does not provide unbounded URL
+streaming, follow redirects, inspect a decoder, or override authorization and
+DNS policy. The caller must schedule additional ranges and own cancellation,
+TLS, authentication, buffering, and output.
 `GenaCallbackClient` supplies plain-HTTP socket I/O. Subscriptions expire on
 monotonic deadlines; subscribe, renew, publish, request handling, and event
 draining reap stale records. An optional host timer can call
