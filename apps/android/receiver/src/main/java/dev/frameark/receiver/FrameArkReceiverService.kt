@@ -32,7 +32,13 @@ class FrameArkReceiverService : Service() {
         super.onCreate()
         native = FrameArkNative()
         playbackLoop = MediaPlaybackLoop(
-            MediaPlaybackPump(native, ::onVideoFrame, ::onAudioFrame),
+            MediaPlaybackPump(
+                native,
+                ::onVideoFrame,
+                ::onAudioFrame,
+                videoConfigConsumer = ::onVideoConfig,
+                audioConfigConsumer = ::onAudioConfig,
+            ),
             onError = {
                 Log.w(TAG, "media playback loop stopped after consumer failure")
                 coordinator.onPlaybackFailure()
@@ -113,6 +119,18 @@ class FrameArkReceiverService : Service() {
     private fun onAudioFrame(frame: FrameArkNative.MediaFrame) {
         // Audio decoder/AudioTrack ownership remains in the platform adapter.
         check(frame.kind == FrameArkNative.MediaKind.AUDIO)
+    }
+
+    private fun onVideoConfig(config: FrameArkNative.VideoConfig) {
+        Log.i(
+            TAG,
+            "video config ${config.codec} ${config.width}x${config.height} " +
+                "${config.frameRateNumerator}/${config.frameRateDenominator}",
+        )
+    }
+
+    private fun onAudioConfig(config: FrameArkNative.AudioConfig) {
+        Log.i(TAG, "audio config ${config.codec} ${config.sampleRate}Hz/${config.channels}ch")
     }
 
     private fun startAsForeground() {

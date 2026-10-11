@@ -15,7 +15,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use frameark_api::{AudioFrame, AudioRenderer, EncodedMediaSink, VideoFrame, VideoRenderer};
-use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState};
+use frameark_core::{
+    AudioConfig, CORE_ABI_VERSION, DeviceId, MediaCodec, Session, SessionId, SessionState,
+    VideoConfig,
+};
 use frameark_discovery::{DiscoveryConfig, MdnsDiscovery, PublishedRegistration, PublishedService};
 use frameark_native::media_session::MediaSession;
 use frameark_native::{
@@ -36,6 +39,8 @@ const MEDIA_FRAME_MAGIC: &[u8; 4] = b"FAMF";
 const MEDIA_FRAME_VERSION: u8 = 1;
 const MEDIA_KIND_VIDEO: u8 = 1;
 const MEDIA_KIND_AUDIO: u8 = 2;
+const MEDIA_CONFIG_MAGIC: &[u8; 4] = b"FAMC";
+const MEDIA_CONFIG_VERSION: u8 = 1;
 const NETWORK_SERVER_NAME: &str = "frameark.local";
 const DISCOVERY_INSTANCE_NAME: &str = "FrameArk Receiver";
 const DISCOVERY_HOST_NAME: &str = "frameark.local.";
@@ -54,6 +59,8 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeVersion(
 struct NativeReceiverState {
     session: Option<Session>,
     media_queue: VecDeque<NativeMediaFrame>,
+    video_config: Option<VideoConfig>,
+    audio_config: Option<AudioConfig>,
     network: Option<NetworkRuntime>,
 }
 
@@ -273,10 +280,8 @@ struct NetworkVideoRenderer;
 impl VideoRenderer for NetworkVideoRenderer {
     type Error = ();
 
-    fn configure(
-        &mut self,
-        _config: frameark_core::VideoConfig,
-    ) -> std::result::Result<(), Self::Error> {
+    fn configure(&mut self, config: VideoConfig) -> std::result::Result<(), Self::Error> {
+        set_video_config(config);
         Ok(())
     }
 
@@ -304,10 +309,8 @@ struct NetworkAudioRenderer;
 impl AudioRenderer for NetworkAudioRenderer {
     type Error = ();
 
-    fn configure(
-        &mut self,
-        _config: frameark_core::AudioConfig,
-    ) -> std::result::Result<(), Self::Error> {
+    fn configure(&mut self, config: AudioConfig) -> std::result::Result<(), Self::Error> {
+        set_audio_config(config);
         Ok(())
     }
 
@@ -428,6 +431,9 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
     if state.session.is_some() {
         return 1;
     }
+    state.media_queue.clear();
+    state.video_config = None;
+    state.audio_config = None;
     let Ok(session_id) = SessionId::try_from("android-receiver") else {
         return -1;
     };
@@ -459,6 +465,8 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStopRecei
         return 0;
     };
     state.media_queue.clear();
+    state.video_config = None;
+    state.audio_config = None;
     let network = state.network.take();
     let transition_failed = session.transition(SessionState::Closed).is_err();
     drop(state);
@@ -580,6 +588,36 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePollMedia
     }
 }
 
+/// Takes the newest negotiated video configuration as a bounded `FAMC` envelope.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePollVideoConfig(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jbyteArray {
+    let Some(encoded) = take_video_config() else {
+        return JObject::null().into_raw() as jbyteArray;
+    };
+    match env.byte_array_from_slice(&encoded) {
+        Ok(array) => array.into_raw(),
+        Err(_) => JObject::null().into_raw() as jbyteArray,
+    }
+}
+
+/// Takes the newest negotiated audio configuration as a bounded `FAMC` envelope.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePollAudioConfig(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jbyteArray {
+    let Some(encoded) = take_audio_config() else {
+        return JObject::null().into_raw() as jbyteArray;
+    };
+    match env.byte_array_from_slice(&encoded) {
+        Ok(array) => array.into_raw(),
+        Err(_) => JObject::null().into_raw() as jbyteArray,
+    }
+}
+
 fn submit_java_frame(
     env: &mut JNIEnv<'_>,
     payload: JByteArray<'_>,
@@ -632,6 +670,74 @@ fn encode_media_frame(frame: &NativeMediaFrame) -> Vec<u8> {
     output.extend_from_slice(&(frame.payload.len() as u32).to_be_bytes());
     output.extend_from_slice(&frame.payload);
     output
+}
+
+fn codec_wire_value(codec: MediaCodec) -> u8 {
+    match codec {
+        MediaCodec::H264 => 1,
+        MediaCodec::H265 => 2,
+        MediaCodec::Aac => 3,
+        MediaCodec::Opus => 4,
+        MediaCodec::Pcm => 5,
+        MediaCodec::Alac => 6,
+        MediaCodec::Unknown => 255,
+    }
+}
+
+fn encode_video_config(config: VideoConfig) -> Vec<u8> {
+    let mut output = Vec::with_capacity(24);
+    output.extend_from_slice(MEDIA_CONFIG_MAGIC);
+    output.extend_from_slice(&[
+        MEDIA_CONFIG_VERSION,
+        MEDIA_KIND_VIDEO,
+        codec_wire_value(config.codec),
+        0,
+    ]);
+    output.extend_from_slice(&config.width.to_be_bytes());
+    output.extend_from_slice(&config.height.to_be_bytes());
+    output.extend_from_slice(&config.frame_rate_numerator.to_be_bytes());
+    output.extend_from_slice(&config.frame_rate_denominator.to_be_bytes());
+    output
+}
+
+fn encode_audio_config(config: AudioConfig) -> Vec<u8> {
+    let mut output = Vec::with_capacity(16);
+    output.extend_from_slice(MEDIA_CONFIG_MAGIC);
+    output.extend_from_slice(&[
+        MEDIA_CONFIG_VERSION,
+        MEDIA_KIND_AUDIO,
+        codec_wire_value(config.codec),
+        0,
+    ]);
+    output.extend_from_slice(&config.sample_rate.to_be_bytes());
+    output.extend_from_slice(&u32::from(config.channels).to_be_bytes());
+    output
+}
+
+fn set_video_config(config: VideoConfig) {
+    if let Ok(mut state) = receiver_state().lock() {
+        state.video_config = Some(config);
+    }
+}
+
+fn set_audio_config(config: AudioConfig) {
+    if let Ok(mut state) = receiver_state().lock() {
+        state.audio_config = Some(config);
+    }
+}
+
+fn take_video_config() -> Option<Vec<u8>> {
+    receiver_state()
+        .lock()
+        .ok()
+        .and_then(|mut state| state.video_config.take().map(encode_video_config))
+}
+
+fn take_audio_config() -> Option<Vec<u8>> {
+    receiver_state()
+        .lock()
+        .ok()
+        .and_then(|mut state| state.audio_config.take().map(encode_audio_config))
 }
 
 #[cfg(test)]
@@ -771,6 +877,8 @@ mod tests {
         assert_eq!(report.state, SessionState::Closed);
         network.stop();
         let mut state = receiver_state().lock().unwrap();
+        assert_eq!(state.video_config.unwrap().width, 1280);
+        assert_eq!(state.audio_config.unwrap().sample_rate, 48_000);
         assert_eq!(state.media_queue.len(), 2);
         assert_eq!(
             state.media_queue.pop_front().unwrap().kind,
@@ -810,6 +918,8 @@ mod tests {
                 DeviceId::try_from("media-device").unwrap(),
             )),
             media_queue: VecDeque::new(),
+            video_config: None,
+            audio_config: None,
             network: None,
         };
         assert_eq!(

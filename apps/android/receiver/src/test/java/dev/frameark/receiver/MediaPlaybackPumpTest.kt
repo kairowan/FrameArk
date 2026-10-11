@@ -36,6 +36,8 @@ class MediaPlaybackPumpTest {
             libraryLoader = {},
             versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
             pollMediaProvider = { frames.removeFirstOrNull()?.let(::envelope) },
+            videoConfigProvider = { null },
+            audioConfigProvider = { null },
         )
         val pump = MediaPlaybackPump(native, { video += it.pts }, { audio += it.pts })
 
@@ -69,6 +71,8 @@ class MediaPlaybackPumpTest {
             libraryLoader = {},
             versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
             pollMediaProvider = { frames.removeFirstOrNull()?.let(::envelope) },
+            videoConfigProvider = { null },
+            audioConfigProvider = { null },
         )
         val pump = MediaPlaybackPump(native, {}, {}, maxFramesPerDrain = 2)
 
@@ -87,5 +91,44 @@ class MediaPlaybackPumpTest {
             {},
             maxFramesPerDrain = MediaPlaybackPump.MAX_FRAMES_PER_DRAIN + 1,
         )
+    }
+
+    @Test
+    fun dispatches_native_track_configuration_before_media_frames() {
+        val videoConfig = ByteBuffer.allocate(24)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put("FAMC".toByteArray())
+            .put(1).put(1).put(1).put(0)
+            .putInt(1_280).putInt(720).putInt(30).putInt(1)
+            .array()
+        val audioConfig = ByteBuffer.allocate(16)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put("FAMC".toByteArray())
+            .put(1).put(2).put(4).put(0)
+            .putInt(48_000).putInt(2)
+            .array()
+        var video: FrameArkNative.VideoConfig? = null
+        var audio: FrameArkNative.AudioConfig? = null
+        val native = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            pollMediaProvider = { null },
+            videoConfigProvider = { videoConfig },
+            audioConfigProvider = { audioConfig },
+        )
+        val pump = MediaPlaybackPump(
+            native,
+            videoConsumer = {},
+            audioConsumer = {},
+            videoConfigConsumer = { video = it },
+            audioConfigConsumer = { audio = it },
+        )
+
+        assertTrue(pump.start())
+        assertEquals(0, pump.drainOnce())
+        assertEquals(FrameArkNative.MediaCodecKind.H264, video?.codec)
+        assertEquals(1_280, video?.width)
+        assertEquals(FrameArkNative.MediaCodecKind.OPUS, audio?.codec)
+        assertEquals(48_000, audio?.sampleRate)
     }
 }

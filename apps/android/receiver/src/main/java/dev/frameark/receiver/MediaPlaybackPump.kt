@@ -13,6 +13,8 @@ class MediaPlaybackPump(
     private val videoConsumer: (FrameArkNative.MediaFrame) -> Unit,
     private val audioConsumer: (FrameArkNative.MediaFrame) -> Unit,
     maxFramesPerDrain: Int = DEFAULT_MAX_FRAMES_PER_DRAIN,
+    private val videoConfigConsumer: (FrameArkNative.VideoConfig) -> Unit = {},
+    private val audioConfigConsumer: (FrameArkNative.AudioConfig) -> Unit = {},
 ) {
     companion object {
         const val DEFAULT_MAX_FRAMES_PER_DRAIN = 8
@@ -48,6 +50,8 @@ class MediaPlaybackPump(
      */
     fun drainOnce(): Int {
         if (!active) return 0
+        native.pollVideoConfig()?.let(videoConfigConsumer)
+        native.pollAudioConfig()?.let(audioConfigConsumer)
         var dispatched = 0
         for (index in 0 until drainLimit) {
             val frame = native.pollMediaFrame() ?: break

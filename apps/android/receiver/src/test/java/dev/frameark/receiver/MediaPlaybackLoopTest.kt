@@ -30,6 +30,8 @@ class MediaPlaybackLoopTest {
             libraryLoader = {},
             versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
             pollMediaProvider = { frames.removeFirstOrNull() },
+            videoConfigProvider = { null },
+            audioConfigProvider = { null },
         )
         val pump = MediaPlaybackPump(
             native,
@@ -54,6 +56,8 @@ class MediaPlaybackLoopTest {
             libraryLoader = {},
             versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
             pollMediaProvider = { envelope(1, 9) },
+            videoConfigProvider = { null },
+            audioConfigProvider = { null },
         )
         val loop = MediaPlaybackLoop(
             MediaPlaybackPump(native, { error("decoder rejected frame") }, {}),
