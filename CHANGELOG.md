@@ -16,6 +16,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Added atomic AirPlay mirror SETUP reconfiguration while Streaming; invalid
   updates leave the active transport and video configuration unchanged.
 
+- Added an opt-in DLNA file media resource backend that validates an explicit
+  regular file and streams bounded HTTP Range responses without retaining the
+  full file in renderer memory; URL fetching remains disabled.
+
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary

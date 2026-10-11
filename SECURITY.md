@@ -64,8 +64,12 @@ The experimental DLNA handler bounds HTTP headers, bodies, SOAP argument text,
 and XML fields, requires exact `Content-Length`, rejects chunked transfer and
 unsupported URL schemes, and never fetches a caller-supplied media URL. Its
 fixture media helper caps resource bytes and accepts only one bounded range;
-it is not a file/network fetcher. Persistent authorization and a streaming
-media server are not enabled. The synchronous TCP adapter adds a
+it is not a network URL fetcher. An explicitly registered regular file can be
+served through the TCP adapter using one bounded chunk buffer and one validated
+range; the file path is canonicalized at registration and is never taken from
+the HTTP request. The adapter rejects files that change length before serving,
+but persistent authorization, TLS, and format probing remain the daemon's
+responsibility. The synchronous TCP adapter adds a
 read timeout, complete-request bound, response-size bound, and closes each
 connection after one response; it does not provide persistent authorization or
 multi-client scheduling. The GENA registry caps subscriptions, leases,

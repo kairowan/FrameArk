@@ -8,8 +8,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Maximum complete SSDP message accepted by the parser.
@@ -28,6 +30,10 @@ pub const MAX_HTTP_HEADERS: usize = 64;
 pub const MAX_SOAP_ARGUMENT_BYTES: usize = 16 * 1024;
 /// Maximum in-memory media resource accepted by the bounded response helper.
 pub const MAX_MEDIA_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum file size accepted by the explicit streaming media backend.
+pub const MAX_MEDIA_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Maximum bytes copied per file-response write before yielding to the socket.
+pub const MAX_MEDIA_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 /// Maximum resources registered on one handler.
 pub const MAX_MEDIA_RESOURCES: usize = 16;
 /// Maximum DIDL-Lite items emitted by one metadata document.
@@ -873,6 +879,123 @@ impl MediaResource {
     }
 }
 
+/// One inclusive byte range for an explicitly registered file resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl FileByteRange {
+    fn parse(value: &str, total_length: u64) -> Result<Self, DlnaError> {
+        if total_length == 0 {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        let value = value.trim();
+        let Some(spec) = value.strip_prefix("bytes=") else {
+            return Err(DlnaError::Invalid("HTTP range"));
+        };
+        if spec.is_empty() || spec.contains(',') {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        let (first, last) = spec
+            .split_once('-')
+            .ok_or(DlnaError::Invalid("HTTP range"))?;
+        if first.is_empty() {
+            let suffix = last
+                .parse::<u64>()
+                .map_err(|_| DlnaError::Invalid("HTTP range"))?;
+            if suffix == 0 {
+                return Err(DlnaError::Invalid("HTTP range"));
+            }
+            return Ok(Self {
+                start: total_length.saturating_sub(suffix),
+                end: total_length - 1,
+            });
+        }
+        let start = first
+            .parse::<u64>()
+            .map_err(|_| DlnaError::Invalid("HTTP range"))?;
+        if start >= total_length {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        let end = if last.is_empty() {
+            total_length - 1
+        } else {
+            last.parse::<u64>()
+                .map_err(|_| DlnaError::Invalid("HTTP range"))?
+                .min(total_length - 1)
+        };
+        if end < start {
+            return Err(DlnaError::Invalid("HTTP range"));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+/// Explicit file-backed media metadata for the streaming TCP adapter.
+///
+/// The caller chooses and registers the file; the HTTP handler never resolves
+/// a URL, accepts a path from a request, or walks a directory. File bytes are
+/// copied in bounded chunks and are not retained in the renderer state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileMediaResource {
+    /// Origin-form path used to request the resource.
+    pub path: String,
+    /// MIME type returned in `Content-Type`.
+    pub content_type: String,
+    /// DLNA protocolInfo value returned in `contentFeatures.dlna.org`.
+    pub protocol_info: String,
+    /// Canonical file selected by the caller.
+    pub file_path: PathBuf,
+    /// File length captured when the resource is registered.
+    pub length: u64,
+}
+
+impl FileMediaResource {
+    /// Creates a bounded descriptor after canonicalizing one regular file.
+    pub fn new(
+        path: impl Into<String>,
+        content_type: impl Into<String>,
+        protocol_info: impl Into<String>,
+        file_path: impl Into<PathBuf>,
+    ) -> Result<Self, DlnaError> {
+        let file_path = file_path.into();
+        let metadata =
+            std::fs::metadata(&file_path).map_err(|error| DlnaError::Io(error.kind()))?;
+        if !metadata.is_file() {
+            return Err(DlnaError::InvalidField("media file"));
+        }
+        let length = metadata.len();
+        if length == 0 {
+            return Err(DlnaError::InvalidField("media file"));
+        }
+        if length > MAX_MEDIA_FILE_BYTES {
+            return Err(DlnaError::TooLarge("media file"));
+        }
+        let resource = Self {
+            path: path.into(),
+            content_type: content_type.into(),
+            protocol_info: protocol_info.into(),
+            file_path: file_path
+                .canonicalize()
+                .map_err(|error| DlnaError::Io(error.kind()))?,
+            length,
+        };
+        if !resource.path.starts_with('/') {
+            return Err(DlnaError::InvalidField("media path"));
+        }
+        for (value, field) in [
+            (&resource.path, "media path"),
+            (&resource.content_type, "media content type"),
+            (&resource.protocol_info, "media protocol info"),
+        ] {
+            validate_field(value, field)?;
+        }
+        Ok(resource)
+    }
+}
+
 /// One resource entry in a generated DIDL-Lite item.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DidlResource {
@@ -1262,6 +1385,7 @@ pub struct MediaRendererHttpService {
     device_description_path: String,
     state: MediaRendererState,
     resources: BTreeMap<String, MediaResource>,
+    file_resources: BTreeMap<String, FileMediaResource>,
     gena: GenaRegistry,
     pending_events: Vec<GenaEvent>,
 }
@@ -1324,6 +1448,9 @@ impl MediaRendererTcpServer {
             .set_read_timeout(Some(self.read_timeout))
             .map_err(|error| DlnaError::Io(error.kind()))?;
         let request = read_http_request(&mut stream)?;
+        if self.service.stream_file_response(&request, &mut stream)? {
+            return Ok(peer);
+        }
         let response = self.service.handle(&request);
         let encoded = response.encode()?;
         stream
@@ -1332,6 +1459,41 @@ impl MediaRendererTcpServer {
             .map_err(|error| DlnaError::Io(error.kind()))?;
         Ok(peer)
     }
+}
+
+fn write_file_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    protocol_info: &str,
+    content_length: u64,
+    content_range: Option<String>,
+) -> Result<(), DlnaError> {
+    let mut headers = vec![
+        ("content-length", content_length.to_string()),
+        ("connection", "close".to_string()),
+        ("content-type", content_type.to_string()),
+        ("accept-ranges", "bytes".to_string()),
+        ("contentfeatures.dlna.org", protocol_info.to_string()),
+        ("transfermode.dlna.org", "Streaming".to_string()),
+    ];
+    if let Some(content_range) = content_range {
+        headers.push(("content-range", content_range));
+    }
+    let mut output = format!("HTTP/1.1 {status} {reason}\r\n").into_bytes();
+    for (name, value) in headers {
+        validate_field(name, "HTTP response header name")?;
+        validate_field(&value, "HTTP response header value")?;
+        output.extend_from_slice(name.as_bytes());
+        output.extend_from_slice(b": ");
+        output.extend_from_slice(value.as_bytes());
+        output.extend_from_slice(b"\r\n");
+    }
+    output.extend_from_slice(b"\r\n");
+    stream
+        .write_all(&output)
+        .map_err(|error| DlnaError::Io(error.kind()))
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, DlnaError> {
@@ -1485,6 +1647,7 @@ impl MediaRendererHttpService {
             device_description_path: "/device.xml".to_string(),
             state: MediaRendererState::default(),
             resources: BTreeMap::new(),
+            file_resources: BTreeMap::new(),
             gena: GenaRegistry::default(),
             pending_events: Vec::new(),
         })
@@ -1503,11 +1666,25 @@ impl MediaRendererHttpService {
     /// Registers or replaces one bounded media resource for HTTP GET/Range.
     pub fn register_media_resource(&mut self, resource: MediaResource) -> Result<(), DlnaError> {
         if !self.resources.contains_key(&resource.path)
-            && self.resources.len() >= MAX_MEDIA_RESOURCES
+            && self.resources.len() + self.file_resources.len() >= MAX_MEDIA_RESOURCES
         {
             return Err(DlnaError::TooLarge("media resources"));
         }
         self.resources.insert(resource.path.clone(), resource);
+        Ok(())
+    }
+
+    /// Registers or replaces one explicit file-backed resource.
+    pub fn register_file_media_resource(
+        &mut self,
+        resource: FileMediaResource,
+    ) -> Result<(), DlnaError> {
+        if !self.file_resources.contains_key(&resource.path)
+            && self.resources.len() + self.file_resources.len() >= MAX_MEDIA_RESOURCES
+        {
+            return Err(DlnaError::TooLarge("media resources"));
+        }
+        self.file_resources.insert(resource.path.clone(), resource);
         Ok(())
     }
 
@@ -1530,6 +1707,95 @@ impl MediaRendererHttpService {
         let removed = self.gena.expire();
         self.discard_inactive_events();
         removed
+    }
+
+    fn stream_file_response(
+        &self,
+        request: &HttpRequest,
+        stream: &mut TcpStream,
+    ) -> Result<bool, DlnaError> {
+        if request.method != "GET" {
+            return Ok(false);
+        }
+        let path = request.target.split('?').next().unwrap_or(&request.target);
+        let Some(resource) = self.file_resources.get(path) else {
+            return Ok(false);
+        };
+        let range = match request.header("range") {
+            Some(value) => match FileByteRange::parse(value, resource.length) {
+                Ok(range) => Some(range),
+                Err(_) => {
+                    write_file_headers(
+                        stream,
+                        416,
+                        "Range Not Satisfiable",
+                        &resource.content_type,
+                        &resource.protocol_info,
+                        0,
+                        Some(format!("bytes */{}", resource.length)),
+                    )?;
+                    return Ok(true);
+                }
+            },
+            None => None,
+        };
+        let (start, end, status, reason, content_range) = if let Some(range) = range {
+            (
+                range.start,
+                range.end,
+                206,
+                "Partial Content",
+                Some(format!(
+                    "bytes {}-{}/{}",
+                    range.start, range.end, resource.length
+                )),
+            )
+        } else {
+            (0, resource.length - 1, 200, "OK", None)
+        };
+        let content_length = end
+            .checked_sub(start)
+            .and_then(|length| length.checked_add(1))
+            .ok_or(DlnaError::Invalid("media file range"))?;
+        write_file_headers(
+            stream,
+            status,
+            reason,
+            &resource.content_type,
+            &resource.protocol_info,
+            content_length,
+            content_range,
+        )?;
+        let mut file =
+            File::open(&resource.file_path).map_err(|error| DlnaError::Io(error.kind()))?;
+        let current_length = file
+            .metadata()
+            .map_err(|error| DlnaError::Io(error.kind()))?
+            .len();
+        if current_length != resource.length {
+            return Err(DlnaError::Invalid("media file changed"));
+        }
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        let mut remaining = content_length;
+        let mut buffer = vec![0_u8; MAX_MEDIA_STREAM_CHUNK_BYTES];
+        while remaining > 0 {
+            let requested = remaining.min(buffer.len() as u64) as usize;
+            let read = file
+                .read(&mut buffer[..requested])
+                .map_err(|error| DlnaError::Io(error.kind()))?;
+            if read == 0 {
+                return Err(DlnaError::Invalid("media file changed"));
+            }
+            stream
+                .write_all(&buffer[..read])
+                .map_err(|error| DlnaError::Io(error.kind()))?;
+            remaining -= read as u64;
+        }
+        stream
+            .flush()
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        Ok(true)
     }
 
     fn discard_inactive_events(&mut self) {
@@ -2509,6 +2775,61 @@ mod tests {
                 .windows(17)
                 .any(|window| window == b"FrameArk Renderer")
         );
+    }
+
+    #[test]
+    fn tcp_renderer_streams_explicit_file_ranges_without_loading_the_file() {
+        let path = std::env::temp_dir().join(format!(
+            "frameark-dlna-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let payload = (0..(256 * 1024 + 17))
+            .map(|value| (value % 251) as u8)
+            .collect::<Vec<_>>();
+        std::fs::write(&path, &payload).unwrap();
+        let resource = FileMediaResource::new(
+            "/media/movie.bin",
+            "video/mp4",
+            "http-get:*:video/mp4:*",
+            &path,
+        )
+        .unwrap();
+        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        service.register_file_media_resource(resource).unwrap();
+        let mut server = MediaRendererTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            service,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(
+                    b"GET /media/movie.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=4-200000\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        });
+        server.serve_once().unwrap();
+        let response = client.join().unwrap();
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        let headers = std::str::from_utf8(&response[..header_end]).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+        assert!(headers.contains("content-length: 199997"));
+        assert!(headers.contains("content-range: bytes 4-200000/262161"));
+        assert_eq!(&response[header_end + 4..], &payload[4..=200_000]);
+        std::fs::remove_file(path).unwrap();
     }
 
     fn soap_request(path: &str, service: &str, action: &str, arguments: &str) -> HttpRequest {

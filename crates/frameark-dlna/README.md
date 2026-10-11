@@ -14,6 +14,8 @@ DLNA/UPnP MediaRenderer work.
   `RenderingControl`, and `ConnectionManager` SOAP actions;
 - single-range HTTP media responses with bounded in-memory resources and
   DLNA response headers;
+- an explicit file-backed media resource registry that streams bounded HTTP
+  Range responses in chunks without loading the file into renderer memory;
 - deterministic DIDL-Lite item generation for URI metadata;
 - bounded GENA subscription/renew/unsubscribe policy with sequenced event
   bodies, monotonic lease expiry, and stale callback cleanup for caller-owned
@@ -38,8 +40,10 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 `http://` and `https://`; FrameArk does not fetch URLs or bypass DRM.
 
 HTTP chunked transfer, callback connection retries and HTTPS/TLS, full DIDL-Lite parsing,
-multicast lease scheduling, streaming file backends, real decoder integration,
-and named client interoperability are not implemented yet. The TCP adapter is
+multicast lease scheduling, network URL fetching, real decoder integration,
+and named client interoperability are not implemented yet. File streaming is
+opt-in: a daemon must explicitly register a regular file and still provide
+authorization, lifecycle, and media format policy. The TCP adapter is
 single-request and synchronous, so it is not a production multi-client daemon.
 `GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
 client but does not open callback sockets or retry failures.
