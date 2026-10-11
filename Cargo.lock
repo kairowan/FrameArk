@@ -201,6 +201,7 @@ name = "frameark-trust"
 version = "0.1.0"
 dependencies = [
  "frameark-core",
+ "ring",
 ]
 
 [[package]]
