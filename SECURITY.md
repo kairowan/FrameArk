@@ -246,9 +246,11 @@ fingerprint matching to the bounded Rust `TrustRegistry`. A changed fingerprint
 is rejected until revocation; capacity and labels remain bounded. The snapshot
 JNI calls expose only bounded public `FTR1` bytes and reject replacement during
 an active session. `AndroidTrustSnapshotStore` encrypts those bytes with an
-Android Keystore AES-GCM key and atomically replaces an app-private file. This
-does not authenticate a sender, prove key possession, or decide whether a user
-approved a request; remembered trust must remain behind an explicit approval UI.
+Android Keystore AES-GCM key and atomically replaces an app-private file. The
+experimental settings surface blocks mutations while streaming and requires
+the operator to enter the displayed identity values, but typed values are not
+proof of sender authentication or key possession; pairing-driven approval must
+replace this surface before a Stable claim.
 
 The JNI lifecycle requires that public identity before opening its network
 listener. Rust validates the bounded ASCII alias and SHA-256 fingerprint, uses
