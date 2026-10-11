@@ -1022,7 +1022,7 @@ mod tests {
     use super::*;
     use frameark_core::{Capability, DeviceId, Session, SessionId, SessionState};
     use ring::signature::KeyPair;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1175,6 +1175,81 @@ mod tests {
         let identity = server_session.peer_identity().expect("verified identity");
         assert_eq!(identity.device_id, "sender-1");
         assert_eq!(identity.public_key, public_key);
+        client.close();
+        server_session.close();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_peer_proof_can_enroll_the_rust_trust_registry() {
+        let server = Arc::new(
+            PairingServer::bind(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("004207").unwrap(),
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let key_pair =
+            ring::signature::Ed25519KeyPair::from_seed_unchecked(&[8_u8; 32]).expect("test key");
+        let public_key: [u8; PEER_PUBLIC_KEY_BYTES] = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("ed25519 public key");
+        let registry = Arc::new(Mutex::new(frameark_trust::TrustRegistry::new(4).unwrap()));
+        let accepting = Arc::clone(&server);
+        let registry_for_server = Arc::clone(&registry);
+        let server_task = tokio::spawn(async move {
+            accepting
+                .accept_pairing_with_peer_proof(TEST_TIMEOUT, move |proof| {
+                    let approved = DeviceId::try_from(proof.device_id.clone())
+                        .ok()
+                        .and_then(|device_id| {
+                            registry_for_server.lock().ok().and_then(|mut registry| {
+                                registry
+                                    .trust_public_key(device_id, &proof.public_key, "Proof sender")
+                                    .ok()
+                            })
+                        })
+                        .is_some();
+                    async move { approved }
+                })
+                .await
+        });
+        let client = PairingClient::connect_with_identity(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("004207").unwrap(),
+            PeerIdentity {
+                device_id: "sender-proof".to_string(),
+                public_key,
+            },
+            move |transcript| {
+                let signature = key_pair.sign(transcript);
+                let mut output = [0_u8; PEER_SIGNATURE_BYTES];
+                output.copy_from_slice(signature.as_ref());
+                Ok(output)
+            },
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let server_session = server_task.await.unwrap().unwrap();
+        let fingerprint = frameark_trust::DeviceFingerprint::from_public_key(&public_key).unwrap();
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .is_trusted(&DeviceId::try_from("sender-proof").unwrap(), &fingerprint,)
+        );
+        assert_eq!(
+            server_session.peer_identity().unwrap().device_id,
+            "sender-proof"
+        );
         client.close();
         server_session.close();
         server.close();
