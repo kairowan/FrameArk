@@ -30,6 +30,9 @@ AirPlay/RAOP interoperability.
   session state machine with caller-owned UDP ports.
 - bounded RAOP `SET_PARAMETER`/`GET_PARAMETER` text controls for volume,
   sample progress, and a small title/artist/album/genre/composer metadata set.
+- bounded HLS media-playlist parsing with target/sequence/end-list state,
+  segment duration limits, and relative/HTTP(S) URI traversal/credential
+  checks; fetching, caching, and decoding remain caller-owned.
 
 The RTSP session does not own a TCP socket, and the RTP socket adapter does not
 join multicast groups or enforce the negotiated peer, SSRC, payload type, or
