@@ -59,6 +59,28 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
 
+  runtime:
+    name: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build reference receiver
+        run: cargo build -p framearkd --locked
+      - name: Start reference receiver and verify listener smoke
+        shell: bash
+        run: |
+          set +e
+          timeout --signal=TERM 8s target/debug/framearkd \
+            --bind 127.0.0.1:0 \
+            --server-name localhost \
+            --pairing-code 123456
+          status=$?
+          if [[ "$status" -ne 124 ]]; then
+            echo "framearkd did not remain alive through the runtime smoke window (status=$status)"
+            exit "$status"
+          fi
+
   android:
     name: android
     runs-on: ubuntu-latest
@@ -101,6 +123,7 @@ jobs:
     needs:
       - repository
       - rust
+      - runtime
       - android
     runs-on: ubuntu-latest
     steps:
@@ -108,8 +131,10 @@ jobs:
         env:
           REPOSITORY_RESULT: ${{ needs.repository.result }}
           RUST_RESULT: ${{ needs.rust.result }}
+          RUNTIME_RESULT: ${{ needs.runtime.result }}
           ANDROID_RESULT: ${{ needs.android.result }}
         run: |
           test "$REPOSITORY_RESULT" = "success"
           test "$RUST_RESULT" = "success"
+          test "$RUNTIME_RESULT" = "success"
           test "$ANDROID_RESULT" = "success"
