@@ -18,6 +18,8 @@ AirPlay/RAOP interoperability.
   orientation metadata plus a 90 kHz A/V clock policy;
 - bounded mirror video RTP pipeline for single-NAL, STAP-A, and FU-A payloads,
   marker-delimited access units, sequence recovery, and orientation metadata;
+- bounded caller-owned UDP RTP socket parsing that returns each packet's source
+  address for higher-level RTSP policy enforcement;
 - bounded mirror RTSP session state with OPTIONS/SETUP/RECORD,
   GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, and
   XML/binary plist video configuration checks;
@@ -26,13 +28,14 @@ AirPlay/RAOP interoperability.
 - an explicit OPTIONS → ANNOUNCE → SETUP → RECORD → FLUSH/TEARDOWN RTSP
   session state machine with caller-owned UDP ports.
 
-The session does not own TCP/UDP sockets, decode audio, or perform Apple
-pairing. It is a deterministic protocol contract that a future daemon can
-connect to platform audio and timing adapters.
+The RTSP session does not own a TCP socket, and the RTP socket adapter does not
+join multicast groups or enforce the negotiated peer, SSRC, payload type, or
+encryption policy. These remain caller-owned decisions. The crate does not
+decode audio or perform Apple pairing; it is a deterministic protocol contract
+that a future daemon can connect to platform audio and timing adapters.
 
-FairPlay, AES-CTR decryption, pairing, AirPlay 2,
-H.265, mirror audio socket transport, and Apple device compatibility are not
-implemented or implied. The
+FairPlay, AES-CTR decryption, pairing, AirPlay 2, H.265, and Apple device
+compatibility are not implemented or implied. The
 compatibility label is **Experimental**.
 
 ```powershell

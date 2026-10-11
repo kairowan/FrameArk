@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::io::ErrorKind;
+use std::net::{SocketAddr, UdpSocket};
 
 /// Maximum RTSP message size accepted before parsing.
 pub const MAX_RTSP_BYTES: usize = 64 * 1024;
@@ -13,6 +15,8 @@ pub const MAX_RTSP_BYTES: usize = 64 * 1024;
 pub const MAX_RTSP_BODY_BYTES: usize = 32 * 1024;
 /// Maximum RTP payload size accepted by the bounded audio contract.
 pub const MAX_RTP_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Maximum datagram buffer used by the RTP socket adapter.
+pub const MAX_RTP_PACKET_BYTES: usize = 12 + MAX_RTP_PAYLOAD_BYTES;
 /// Maximum packets retained by one RAOP RTP jitter buffer.
 pub const MAX_RTP_JITTER_PACKETS: usize = 128;
 /// Maximum SDP body accepted by ANNOUNCE.
@@ -57,6 +61,8 @@ pub enum AirplayError {
     Invalid(&'static str),
     /// A caller supplied an invalid session field.
     InvalidField(&'static str),
+    /// The operating system rejected a bounded RTP socket operation.
+    Io(ErrorKind),
 }
 
 impl Display for AirplayError {
@@ -65,7 +71,58 @@ impl Display for AirplayError {
             Self::TooLarge(field) => write!(formatter, "AirPlay {field} exceeds its bound"),
             Self::Invalid(field) => write!(formatter, "invalid AirPlay {field}"),
             Self::InvalidField(field) => write!(formatter, "invalid AirPlay field {field}"),
+            Self::Io(kind) => write!(formatter, "AirPlay RTP socket operation failed: {kind}"),
         }
+    }
+}
+
+/// A bounded UDP adapter for the already-negotiated unencrypted RTP profile.
+///
+/// The adapter owns only the datagram socket and packet parsing. It does not
+/// select codecs, decrypt payloads, join multicast groups, or advance a
+/// jitter buffer. Callers should apply the RTSP-negotiated peer, SSRC, payload
+/// type, and loss policy before handing packets to a media pipeline.
+#[derive(Debug)]
+pub struct RtpReceiverSocket {
+    socket: UdpSocket,
+}
+
+impl RtpReceiverSocket {
+    /// Binds an IPv4 or IPv6 UDP socket for one RTP media track.
+    pub fn bind(local_addr: SocketAddr) -> Result<Self, AirplayError> {
+        let socket = UdpSocket::bind(local_addr).map_err(|error| AirplayError::Io(error.kind()))?;
+        Ok(Self { socket })
+    }
+
+    /// Returns the OS-assigned local address.
+    pub fn local_addr(&self) -> Result<SocketAddr, AirplayError> {
+        self.socket
+            .local_addr()
+            .map_err(|error| AirplayError::Io(error.kind()))
+    }
+
+    /// Configures the bounded receive deadline used by [`Self::recv`].
+    pub fn set_read_timeout(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), AirplayError> {
+        self.socket
+            .set_read_timeout(timeout)
+            .map_err(|error| AirplayError::Io(error.kind()))
+    }
+
+    /// Receives and parses one RTP datagram, returning its source address.
+    pub fn recv(&self) -> Result<(RtpAudioPacket, SocketAddr), AirplayError> {
+        let mut buffer = vec![0_u8; MAX_RTP_PACKET_BYTES + 1];
+        let (length, source) = self
+            .socket
+            .recv_from(&mut buffer)
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        if length > MAX_RTP_PACKET_BYTES {
+            return Err(AirplayError::TooLarge("RTP packet"));
+        }
+        let packet = RtpAudioPacket::parse(&buffer[..length])?;
+        Ok((packet, source))
     }
 }
 
@@ -2315,6 +2372,42 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn rtp_receiver_socket_parses_loopback_datagrams_with_source() {
+        let receiver = RtpReceiverSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let packet = rtp_packet(12);
+        sender
+            .send_to(&packet.encode().unwrap(), receiver.local_addr().unwrap())
+            .unwrap();
+
+        let (received, source) = receiver.recv().unwrap();
+        assert_eq!(received, packet);
+        assert_eq!(source, sender.local_addr().unwrap());
+    }
+
+    #[test]
+    fn rtp_receiver_socket_preserves_bounded_parse_errors() {
+        let receiver = RtpReceiverSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(&[0_u8; 12], receiver.local_addr().unwrap())
+            .unwrap();
+        assert_eq!(receiver.recv(), Err(AirplayError::Invalid("RTP version")));
+
+        let packet = rtp_packet(13);
+        sender
+            .send_to(&packet.encode().unwrap(), receiver.local_addr().unwrap())
+            .unwrap();
+        assert_eq!(receiver.recv().unwrap().0, packet);
     }
 
     fn rtp_packet(sequence: u16) -> RtpAudioPacket {
