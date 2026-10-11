@@ -37,6 +37,10 @@ pub const MAX_MIRROR_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_MIRROR_NAL_UNITS: usize = 256;
 /// Maximum mirror dimension accepted before platform allocation.
 pub const MAX_MIRROR_DIMENSION: u16 = 8192;
+/// Maximum encoded mirror audio access-unit payload.
+pub const MAX_MIRROR_AUDIO_ACCESS_UNIT_BYTES: usize = 256 * 1024;
+/// Maximum audio samples represented by one mirror access unit.
+pub const MAX_MIRROR_AUDIO_DURATION_SAMPLES: u32 = 192_000;
 /// Video clock rate used by the mirror timing contract.
 pub const MIRROR_VIDEO_CLOCK_HZ: u32 = 90_000;
 /// Maximum mirror RTSP session identifier length.
@@ -922,6 +926,94 @@ pub struct MirrorVideoConfig {
     pub orientation: MirrorOrientation,
     /// Audio sample rate used for the A/V clock policy.
     pub audio_sample_rate: u32,
+}
+
+/// Encoded audio format labels accepted by the mirror media contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorAudioCodec {
+    /// AAC access units remain encoded until a platform decoder consumes them.
+    Aac,
+    /// Signed little-endian PCM16 samples.
+    Pcm16,
+}
+
+/// Validated audio format metadata for one mirror track.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorAudioFormat {
+    /// Encoded audio codec.
+    pub codec: MirrorAudioCodec,
+    /// Sample rate in Hz.
+    pub sample_rate: u32,
+    /// Interleaved channel count.
+    pub channels: u8,
+}
+
+impl MirrorAudioFormat {
+    /// Creates a format after applying shared sample-rate/channel bounds.
+    pub fn new(
+        codec: MirrorAudioCodec,
+        sample_rate: u32,
+        channels: u8,
+    ) -> Result<Self, AirplayError> {
+        if !(8_000..=192_000).contains(&sample_rate) || !(1..=8).contains(&channels) {
+            return Err(AirplayError::Invalid("mirror audio format"));
+        }
+        Ok(Self {
+            codec,
+            sample_rate,
+            channels,
+        })
+    }
+}
+
+/// One bounded mirror audio access unit with an audio-sample timestamp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirrorAudioAccessUnit {
+    /// Audio sample timestamp in the format's sample clock.
+    pub pts_samples: u64,
+    /// Number of samples represented by this access unit.
+    pub duration_samples: u32,
+    /// Format used to interpret the payload.
+    pub format: MirrorAudioFormat,
+    /// Encoded or PCM16 payload bytes.
+    pub payload: Vec<u8>,
+}
+
+impl MirrorAudioAccessUnit {
+    /// Creates one bounded access unit without decoding or copying platform data.
+    pub fn new(
+        pts_samples: u64,
+        duration_samples: u32,
+        format: MirrorAudioFormat,
+        payload: Vec<u8>,
+    ) -> Result<Self, AirplayError> {
+        if duration_samples == 0 || duration_samples > MAX_MIRROR_AUDIO_DURATION_SAMPLES {
+            return Err(AirplayError::Invalid("mirror audio duration"));
+        }
+        if payload.is_empty() || payload.len() > MAX_MIRROR_AUDIO_ACCESS_UNIT_BYTES {
+            return Err(AirplayError::TooLarge("mirror audio access unit"));
+        }
+        if format.codec == MirrorAudioCodec::Pcm16
+            && !payload
+                .len()
+                .is_multiple_of(usize::from(format.channels) * 2)
+        {
+            return Err(AirplayError::Invalid("mirror PCM payload"));
+        }
+        Ok(Self {
+            pts_samples,
+            duration_samples,
+            format,
+            payload,
+        })
+    }
+
+    /// Returns the audio sample timestamp immediately after this unit.
+    pub fn end_samples(&self) -> Result<u64, AirplayError> {
+        self.pts_samples
+            .checked_add(u64::from(self.duration_samples))
+            .ok_or(AirplayError::TooLarge("mirror audio timestamp"))
+    }
 }
 
 impl MirrorVideoConfig {
@@ -2222,6 +2314,26 @@ mod tests {
         assert_eq!(clock.offset_90khz(90_000, 48_000).unwrap(), 0);
         assert!(clock.offset_90khz(90_000 + 90_001, 48_000).is_err());
         assert!(MirrorClock::new(1_000).is_err());
+    }
+
+    #[test]
+    fn mirror_audio_contract_bounds_aac_pcm_and_timestamps() {
+        let aac = MirrorAudioFormat::new(MirrorAudioCodec::Aac, 48_000, 2).unwrap();
+        let aac_unit = MirrorAudioAccessUnit::new(96_000, 1_024, aac, vec![1, 2, 3]).unwrap();
+        assert_eq!(aac_unit.end_samples().unwrap(), 97_024);
+
+        let pcm = MirrorAudioFormat::new(MirrorAudioCodec::Pcm16, 44_100, 2).unwrap();
+        let pcm_unit = MirrorAudioAccessUnit::new(0, 441, pcm, vec![0; 1_764]).unwrap();
+        assert_eq!(pcm_unit.payload.len(), 1_764);
+        assert!(MirrorAudioFormat::new(MirrorAudioCodec::Aac, 7_999, 2).is_err());
+        assert!(MirrorAudioAccessUnit::new(0, 0, aac, vec![1]).is_err());
+        assert!(MirrorAudioAccessUnit::new(0, 1, pcm, vec![1]).is_err());
+        assert!(
+            MirrorAudioAccessUnit::new(u64::MAX, 1, aac, vec![1])
+                .unwrap()
+                .end_samples()
+                .is_err()
+        );
     }
 
     #[test]

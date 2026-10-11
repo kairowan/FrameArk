@@ -19,6 +19,8 @@ AirPlay/RAOP interoperability.
 - bounded mirror RTSP session state with OPTIONS/SETUP/RECORD,
   GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, and
   XML/binary plist video configuration checks;
+- bounded mirror AAC/PCM16 audio format and access-unit contracts with sample
+  timestamps, duration, channel, and payload-size validation;
 - an explicit OPTIONS → ANNOUNCE → SETUP → RECORD → FLUSH/TEARDOWN RTSP
   session state machine with caller-owned UDP ports.
 

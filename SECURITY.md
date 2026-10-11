@@ -111,6 +111,10 @@ configuration before entering Streaming. It owns no socket or authorization;
 callers must authenticate the sender and enforce connection deadlines before
 exposing it to an untrusted network.
 
+The mirror audio contract caps access-unit bytes and duration, restricts sample
+rates/channels, and requires PCM16 payload alignment. It does not decrypt,
+decode, conceal loss, or provide an audio output authorization boundary.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
