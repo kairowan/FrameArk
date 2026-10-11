@@ -145,7 +145,8 @@ available.
 endpoint snapshot and the service notification may display the port and
 temporary pairing code to the local user. The certificate remains in memory;
 the coordinator does not copy it into logs, preferences, or notification
-text.
+text. Best-effort mDNS metadata advertises protocol/capability labels only; it
+never advertises the pairing code or certificate.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on

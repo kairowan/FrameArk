@@ -42,7 +42,8 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
   MediaCodec/AudioTrack; the Android JNI bridge now accepts bounded FANP
   pairings and forwards encoded frames to the queue. The Android service gates
   playback on an endpoint snapshot and presents the temporary port/code in its
-  notification, but the adapters remain platform lifecycle components and no
+  notification; the Rust bridge best-effort publishes non-secret DNS-SD
+  metadata, but the adapters remain platform lifecycle components and no
   physical-device callback has been verified.
 - No input, clipboard, file-transfer, management stream, congestion-control
   policy, or datagram media path is implemented.

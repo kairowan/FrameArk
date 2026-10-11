@@ -156,6 +156,7 @@ version = "0.1.0"
 dependencies = [
  "frameark-api",
  "frameark-core",
+ "frameark-discovery",
  "frameark-native",
  "frameark-transport",
  "jni",
