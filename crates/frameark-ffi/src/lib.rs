@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use frameark_api::{AudioFrame, AudioRenderer, EncodedMediaSink, VideoFrame, VideoRenderer};
 use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState};
+use frameark_discovery::{DiscoveryConfig, MdnsDiscovery, PublishedRegistration, PublishedService};
 use frameark_native::media_session::MediaSession;
 use frameark_native::{
     MediaRendererFactory, NativeMediaControlReceiver, ReceiverPolicy, SessionBackend, SessionOffer,
@@ -36,6 +37,8 @@ const MEDIA_FRAME_VERSION: u8 = 1;
 const MEDIA_KIND_VIDEO: u8 = 1;
 const MEDIA_KIND_AUDIO: u8 = 2;
 const NETWORK_SERVER_NAME: &str = "frameark.local";
+const DISCOVERY_INSTANCE_NAME: &str = "FrameArk Receiver";
+const DISCOVERY_HOST_NAME: &str = "frameark.local.";
 const NETWORK_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Returns the core ABI version expected by the Android receiver.
@@ -57,9 +60,73 @@ struct NativeReceiverState {
 struct NetworkRuntime {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    discovery: Option<DiscoveryRuntime>,
     port: u16,
     pairing_code: u32,
     certificate_der: Vec<u8>,
+}
+
+struct DiscoveryRuntime {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl DiscoveryRuntime {
+    fn start(port: u16) -> Option<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+        let join = thread::Builder::new()
+            .name("frameark-fanp-discovery".to_string())
+            .spawn(move || {
+                let Ok(discovery) = MdnsDiscovery::new(DiscoveryConfig::all_interfaces()) else {
+                    let _ = ready_sender.send(false);
+                    return;
+                };
+                let Ok(service) =
+                    PublishedService::new(DISCOVERY_INSTANCE_NAME, DISCOVERY_HOST_NAME, port)
+                        .and_then(|service| service.with_property("proto", "fanp1"))
+                        .and_then(|service| service.with_property("ver", "0.1"))
+                        .and_then(|service| service.with_property("tls", "pin"))
+                        .and_then(|service| service.with_property("media", "h264,opus,aac"))
+                else {
+                    let _ = ready_sender.send(false);
+                    return;
+                };
+                let Ok(registration) = discovery.publish(&service) else {
+                    let _ = ready_sender.send(false);
+                    return;
+                };
+                if ready_sender.send(true).is_err() {
+                    return;
+                }
+                while !stop_thread.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                unregister_discovery(registration, discovery);
+            })
+            .ok()?;
+        if ready_receiver.recv().ok() != Some(true) {
+            let _ = join.join();
+            return None;
+        }
+        Some(Self {
+            stop,
+            join: Some(join),
+        })
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn unregister_discovery(registration: PublishedRegistration, discovery: MdnsDiscovery) {
+    let _ = registration.unregister();
+    let _ = discovery.shutdown();
 }
 
 impl NetworkRuntime {
@@ -133,9 +200,11 @@ impl NetworkRuntime {
         let (port, certificate_der) = ready_receiver
             .recv()
             .map_err(|_| "FANP startup".to_string())??;
+        let discovery = DiscoveryRuntime::start(port);
         Ok(Self {
             stop,
             join: Some(join),
+            discovery,
             port,
             pairing_code: pairing_value,
             certificate_der,
@@ -143,6 +212,9 @@ impl NetworkRuntime {
     }
 
     fn stop(mut self) {
+        if let Some(discovery) = self.discovery.take() {
+            discovery.stop();
+        }
         self.stop.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
             let _ = join.join();

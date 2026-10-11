@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 frameark-api = { path = "../frameark-api" }
 frameark-core.workspace = true
+frameark-discovery = { path = "../frameark-discovery" }
 frameark-native = { path = "../frameark-native" }
 frameark-transport = { path = "../frameark-transport" }
 jni.workspace = true

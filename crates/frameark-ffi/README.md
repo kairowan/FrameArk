@@ -2,12 +2,15 @@
 
 `frameark-ffi` is the small JNI boundary used by the Android Receiver. It
 exports the versioned ABI check plus a bounded start/stop/running lifecycle
-bridge, an ephemeral FANP QUIC listener, and an encoded media-frame queue
+bridge, an ephemeral FANP QUIC listener with best-effort mDNS publication, and an encoded media-frame queue
 backed by a Rust `frameark-core::Session` protected by a process-local mutex.
 
 The listener accepts bounded temporary FANP pairings and drives the existing
 Rust control/media receiver into the JNI queue. It exposes only its ephemeral
 port, pairing code, and pinned certificate through explicit JNI getters. The
+listener publishes `_frameark._udp.local.` metadata without the pairing code;
+publication is withdrawn when the lifecycle stops and remains optional when a
+platform mDNS backend is unavailable. The
 bridge still does not own Android `Surface` objects, decode media, or persist
 trust. The Kotlin service owns Android lifecycle and notifications; Rust
 remains the owner of protocol/session state. Native video and audio submissions
