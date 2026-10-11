@@ -46,8 +46,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   escaped UPnP device-description generation; network/SOAP interoperability
   remains unimplemented.
 - Experimental bounded DLNA SSDP UDP publisher with alive/byebye and matching
-  M-SEARCH response loopback coverage; multicast scheduling remains outside
-  the crate.
+  M-SEARCH response loopback coverage; it now has a one-shot standard IPv4
+  multicast notify method, while scheduling and interface policy remain
+  outside the crate.
 - Experimental bounded DLNA HTTP/SOAP MediaRenderer handler serving device and
   SCPD descriptions and applying AVTransport, RenderingControl, and
   ConnectionManager actions to explicit Rust state; GENA, DIDL-Lite, HTTP
