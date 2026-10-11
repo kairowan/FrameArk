@@ -146,6 +146,7 @@ version = "0.1.0"
 name = "frameark-ffi"
 version = "0.1.0"
 dependencies = [
+ "frameark-api",
  "frameark-core",
  "jni",
 ]

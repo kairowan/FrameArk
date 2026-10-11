@@ -35,6 +35,10 @@ All notable FrameArk changes will be documented in this file. The project follow
   video/audio backpressure, versioned `FAMF` polling envelopes, and Kotlin
   media-kind/PTS/keyframe decoding; physical-device loading, network attachment,
   and hardware renderer callbacks remain pending.
+- Experimental Native encoded-media bridge with a platform `EncodedMediaSink`,
+  QUIC/FAM1-to-sink receiver orchestration, and `JniMediaQueueSink` wiring;
+  Android service attachment, physical-device loading, and codec/render-loop
+  integration remain pending.
 - Experimental `frameark-dlna` foundation with bounded SSDP parsing and
   escaped UPnP device-description generation; network/SOAP interoperability
   remains unimplemented.

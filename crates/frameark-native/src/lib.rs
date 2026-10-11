@@ -21,7 +21,7 @@ use wire::{Command, Request, Response, Status};
 pub use media_control::{
     MediaRendererFactory, NativeMediaControlReceiver, NativeMediaSessionReport,
 };
-pub use media_receiver::{MediaStreamReport, NativeMediaReceiver};
+pub use media_receiver::{MediaStreamReport, NativeEncodedMediaReceiver, NativeMediaReceiver};
 pub use offer::{ReceiverPolicy, SessionOffer};
 
 /// Maximum retained lifecycle/diagnostic events per connection.

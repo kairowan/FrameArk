@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
+use frameark_api::{AudioFrame, EncodedMediaSink, VideoFrame};
 use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState};
 use jni::{
     JNIEnv,
@@ -47,6 +48,46 @@ struct NativeMediaFrame {
     pts: i64,
     keyframe: bool,
     payload: Vec<u8>,
+}
+
+/// Encoded FANP sink that feeds the process-local JNI polling queue.
+///
+/// A native network/session coordinator can pass this sink to
+/// `frameark_native::NativeEncodedMediaReceiver`; Android then polls the same
+/// queue and submits the returned envelopes to `MediaCodec`/`AudioTrack`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct JniMediaQueueSink;
+
+impl EncodedMediaSink for JniMediaQueueSink {
+    type Error = ();
+
+    fn push_video(&mut self, frame: VideoFrame<'_>) -> std::result::Result<(), Self::Error> {
+        if submit_media_frame(NativeMediaFrame {
+            kind: MEDIA_KIND_VIDEO,
+            pts: frame.timestamp,
+            keyframe: frame.keyframe,
+            payload: frame.data.to_vec(),
+        }) == 0
+        {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn push_audio(&mut self, frame: AudioFrame<'_>) -> std::result::Result<(), Self::Error> {
+        if submit_media_frame(NativeMediaFrame {
+            kind: MEDIA_KIND_AUDIO,
+            pts: frame.timestamp,
+            keyframe: false,
+            payload: frame.data.to_vec(),
+        }) == 0
+        {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 
 static RECEIVER_STATE: OnceLock<Mutex<NativeReceiverState>> = OnceLock::new();
@@ -221,7 +262,7 @@ fn encode_media_frame(frame: &NativeMediaFrame) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState};
+    use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState, TrackId};
 
     use super::*;
 
@@ -299,6 +340,31 @@ mod tests {
             ),
             1
         );
+        state.session = None;
+        state.media_queue.clear();
+    }
+
+    #[test]
+    fn jni_media_queue_sink_accepts_encoded_platform_samples() {
+        let state = receiver_state();
+        state.lock().unwrap().session = Some(Session::new(
+            SessionId::try_from("sink-session").unwrap(),
+            DeviceId::try_from("sink-device").unwrap(),
+        ));
+        let track_id = TrackId::new("video-0").unwrap();
+        let mut sink = JniMediaQueueSink;
+        sink.push_video(frameark_api::VideoFrame {
+            track_id: &track_id,
+            data: &[7, 8],
+            timestamp: 90_000,
+            keyframe: true,
+        })
+        .unwrap();
+        let mut state = state.lock().unwrap();
+        let queued = state.media_queue.pop_front().unwrap();
+        assert_eq!(queued.kind, MEDIA_KIND_VIDEO);
+        assert_eq!(queued.pts, 90_000);
+        assert_eq!(queued.payload, vec![7, 8]);
         state.session = None;
         state.media_queue.clear();
     }

@@ -95,7 +95,9 @@ frame at 4 MiB and the queue at 16 frames, and maps ABI/start/stop/media
 failures without logging JNI arguments. The `FAMF` poll envelope is not an
 authorization boundary or decoder; real network pairing, persistent identity,
 and renderer ownership must remain in the Rust transport and Android platform
-layers.
+layers. `JniMediaQueueSink` only accepts samples after the Rust receiver
+lifecycle is started; it does not open sockets, authenticate senders, or grant
+Android decoder/surface access.
 
 The AirPlay XML Property List boundary caps document size, nesting, entries,
 scalar/data fields, duplicate keys, and base64 decoding. It is not a parser for
