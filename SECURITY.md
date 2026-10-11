@@ -114,6 +114,15 @@ address to satisfy a public-only or local-network-only policy. It does not
 open sockets, follow redirects, or prevent a later DNS change; fetchers must
 pin the validated result or repeat the policy at connection time.
 
+The AirPlay HLS boundary follows the same fail-closed model. Its connector
+receives only a validated HTTP(S) authority and origin-form target, while the
+crate emits one bounded GET and parses one response. It rejects credentials,
+fragments, duplicate headers, unsupported transfer encoding, non-HLS MIME
+types, oversized bodies, and non-2xx statuses; it never follows redirects,
+resolves DNS, establishes TLS, fetches segments, or caches media. A daemon must
+apply DNS rebinding, private-network, certificate, authorization, timeout, and
+redirect policy before supplying the stream.
+
 The DLNA `MediaFormatCapabilities` report is validated and bounded before it is
 advertised through `ConnectionManager`; it is not a decoder probe or a promise
 that a remote URL is safe to fetch. `MediaFormatProbe` only parses bounded

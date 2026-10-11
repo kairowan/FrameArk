@@ -69,6 +69,10 @@ pub const MAX_RAOP_METADATA_FIELDS: usize = 8;
 pub const MAX_RAOP_METADATA_VALUE_BYTES: usize = 512;
 /// Maximum UTF-8 HLS media-playlist size accepted by the AirPlay URL boundary.
 pub const MAX_HLS_PLAYLIST_BYTES: usize = 64 * 1024;
+/// Maximum HTTP header bytes accepted while fetching one HLS playlist.
+pub const MAX_HLS_HTTP_HEADER_BYTES: usize = 8 * 1024;
+/// Maximum complete HTTP response retained while fetching one HLS playlist.
+pub const MAX_HLS_HTTP_RESPONSE_BYTES: usize = MAX_HLS_PLAYLIST_BYTES + MAX_HLS_HTTP_HEADER_BYTES;
 /// Maximum media segments retained by one HLS playlist.
 pub const MAX_HLS_SEGMENTS: usize = 512;
 /// Maximum segment URI length accepted by the HLS playlist boundary.
@@ -1144,6 +1148,284 @@ impl HlsMediaPlaylist {
             segments,
         })
     }
+}
+
+/// A bounded HLS playlist response obtained through a caller-owned transport.
+///
+/// The protocol crate emits one GET request and parses one response. The
+/// caller-owned connector remains responsible for DNS, redirect, certificate,
+/// authentication, and network-class policy. This prevents a future URL
+/// playback path from silently turning playlist playback into an SSRF-capable
+/// network client.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HlsPlaylistResponse {
+    /// HTTP status returned by the playlist origin.
+    pub status: u16,
+    /// Lowercase response headers retained for diagnostics and policy checks.
+    pub headers: BTreeMap<String, String>,
+    /// Parsed bounded media playlist.
+    pub playlist: HlsMediaPlaylist,
+}
+
+/// Fetches and parses one HLS media playlist through a caller-owned stream.
+///
+/// The connector receives a validated `http`/`https` scheme, authority,
+/// origin-form request target, and timeout. It must enforce DNS, redirect,
+/// TLS, authentication, and cancellation policy before returning a stream.
+/// This function never follows redirects, resolves hosts, or decodes media.
+pub fn fetch_hls_playlist_with_connector<F, S>(
+    playlist_url: &str,
+    timeout: Duration,
+    connector: F,
+) -> Result<HlsPlaylistResponse, AirplayError>
+where
+    F: FnOnce(&str, &str, &str, Duration) -> Result<S, AirplayError>,
+    S: Read + Write,
+{
+    if timeout.is_zero() {
+        return Err(AirplayError::Invalid("HLS playlist timeout"));
+    }
+    let (scheme, authority, target) = split_hls_playlist_url(playlist_url)?;
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nAccept: application/vnd.apple.mpegurl, audio/mpegurl\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = connector(&scheme, &authority, &target, timeout)?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|error| AirplayError::Io(error.kind()))?;
+    let response = read_hls_http_response(&mut stream)?;
+    if !(200..300).contains(&response.status) {
+        return Err(AirplayError::Invalid("HLS playlist status"));
+    }
+    if let Some(content_type) = response.headers.get("content-type") {
+        let mime = content_type
+            .split(';')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(
+            mime.as_str(),
+            "application/vnd.apple.mpegurl"
+                | "application/x-mpegurl"
+                | "audio/mpegurl"
+                | "audio/x-mpegurl"
+        ) {
+            return Err(AirplayError::Invalid("HLS playlist content type"));
+        }
+    }
+    Ok(HlsPlaylistResponse {
+        status: response.status,
+        headers: response.headers,
+        playlist: HlsMediaPlaylist::parse(&response.body)?,
+    })
+}
+
+#[derive(Debug)]
+struct HlsHttpResponse {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+fn read_hls_http_response<R: Read>(stream: &mut R) -> Result<HlsHttpResponse, AirplayError> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4 * 1024];
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len() > MAX_HLS_HTTP_RESPONSE_BYTES {
+            return Err(AirplayError::TooLarge("HLS HTTP response"));
+        }
+        if let Some(header_end) = find_http_header_end(&bytes) {
+            if header_end > MAX_HLS_HTTP_HEADER_BYTES {
+                return Err(AirplayError::TooLarge("HLS HTTP headers"));
+            }
+            if let Some(content_length) = parse_hls_content_length(&bytes[..header_end])? {
+                if content_length > MAX_HLS_PLAYLIST_BYTES {
+                    return Err(AirplayError::TooLarge("HLS playlist"));
+                }
+                let body_len = bytes.len().saturating_sub(header_end + 4);
+                if body_len > content_length {
+                    return Err(AirplayError::Invalid("HLS HTTP content length"));
+                }
+                if body_len == content_length {
+                    break;
+                }
+            }
+        }
+    }
+    parse_hls_http_response(&bytes)
+}
+
+fn parse_hls_http_response(bytes: &[u8]) -> Result<HlsHttpResponse, AirplayError> {
+    let header_end =
+        find_http_header_end(bytes).ok_or(AirplayError::Invalid("HLS HTTP terminator"))?;
+    if header_end > MAX_HLS_HTTP_HEADER_BYTES {
+        return Err(AirplayError::TooLarge("HLS HTTP headers"));
+    }
+    let text = std::str::from_utf8(&bytes[..header_end])
+        .map_err(|_| AirplayError::Invalid("HLS HTTP UTF-8"))?;
+    let mut lines = text.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or(AirplayError::Invalid("HLS HTTP status line"))?;
+    let parts = status_line.splitn(3, ' ').collect::<Vec<_>>();
+    if parts.len() != 3 || !matches!(parts[0], "HTTP/1.0" | "HTTP/1.1") || parts[2].is_empty() {
+        return Err(AirplayError::Invalid("HLS HTTP status line"));
+    }
+    let status = parts[1]
+        .parse::<u16>()
+        .map_err(|_| AirplayError::Invalid("HLS HTTP status"))?;
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or(AirplayError::Invalid("HLS HTTP header"))?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(AirplayError::Invalid("HLS HTTP header name"));
+        }
+        let value = value.trim();
+        if value.is_empty() || value.len() > 2048 {
+            return Err(AirplayError::Invalid("HLS HTTP header value"));
+        }
+        if headers
+            .insert(name.to_ascii_lowercase(), value.to_string())
+            .is_some()
+        {
+            return Err(AirplayError::Invalid("HLS HTTP duplicate header"));
+        }
+    }
+    if headers.contains_key("transfer-encoding") {
+        return Err(AirplayError::Invalid("HLS HTTP transfer encoding"));
+    }
+    let body = bytes[header_end + 4..].to_vec();
+    if body.len() > MAX_HLS_PLAYLIST_BYTES {
+        return Err(AirplayError::TooLarge("HLS playlist"));
+    }
+    if let Some(content_length) = parse_hls_content_length(&bytes[..header_end])?
+        && content_length != body.len()
+    {
+        return Err(AirplayError::Invalid("HLS HTTP content length"));
+    }
+    Ok(HlsHttpResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn parse_hls_content_length(header_bytes: &[u8]) -> Result<Option<usize>, AirplayError> {
+    let text =
+        std::str::from_utf8(header_bytes).map_err(|_| AirplayError::Invalid("HLS HTTP UTF-8"))?;
+    for line in text.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            let length = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| AirplayError::Invalid("HLS HTTP content length"))?;
+            return Ok(Some(length));
+        }
+    }
+    Ok(None)
+}
+
+fn find_http_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn split_hls_playlist_url(url: &str) -> Result<(String, String, String), AirplayError> {
+    if url.len() > MAX_HLS_URI_BYTES || url.contains(['\r', '\n', '#']) {
+        return Err(AirplayError::Invalid("HLS playlist URL"));
+    }
+    let (raw_scheme, remainder) = url
+        .split_once("://")
+        .ok_or(AirplayError::Invalid("HLS playlist URL"))?;
+    let scheme = raw_scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") || remainder.is_empty() {
+        return Err(AirplayError::Invalid("HLS playlist URL"));
+    }
+    let authority_end = remainder.find(['/', '?']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    validate_hls_authority(authority)?;
+    let tail = &remainder[authority_end..];
+    let target = if tail.is_empty() {
+        "/".to_string()
+    } else if tail.starts_with('?') {
+        format!("/{tail}")
+    } else {
+        tail.to_string()
+    };
+    if target.is_empty()
+        || !target.starts_with('/')
+        || target
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(AirplayError::Invalid("HLS playlist URL"));
+    }
+    Ok((scheme, authority.to_string(), target))
+}
+
+fn validate_hls_authority(authority: &str) -> Result<(), AirplayError> {
+    if authority.is_empty()
+        || authority.len() > 512
+        || authority.contains(['@', '\\', '?', '#'])
+        || authority
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(AirplayError::Invalid("HLS playlist authority"));
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let close = rest
+            .find(']')
+            .ok_or(AirplayError::Invalid("HLS playlist authority"))?;
+        if close == 0 || rest[close + 1..].contains('[') {
+            return Err(AirplayError::Invalid("HLS playlist authority"));
+        }
+        let suffix = &rest[close + 1..];
+        if !suffix.is_empty() && !suffix.starts_with(':') {
+            return Err(AirplayError::Invalid("HLS playlist authority"));
+        }
+        validate_hls_port(suffix.strip_prefix(':'))?;
+        return Ok(());
+    }
+    if authority.matches(':').count() > 1 {
+        return Err(AirplayError::Invalid("HLS playlist authority"));
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    if host.is_empty() {
+        return Err(AirplayError::Invalid("HLS playlist authority"));
+    }
+    validate_hls_port(port)
+}
+
+fn validate_hls_port(port: Option<&str>) -> Result<(), AirplayError> {
+    if let Some(port) = port {
+        let number = port
+            .parse::<u16>()
+            .map_err(|_| AirplayError::Invalid("HLS playlist authority"))?;
+        if number == 0 {
+            return Err(AirplayError::Invalid("HLS playlist authority"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_hls_uri(uri: &str) -> Result<(), AirplayError> {
@@ -4225,6 +4507,132 @@ mod tests {
         assert_eq!(
             HlsMediaPlaylist::parse(b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n"),
             Err(AirplayError::Invalid("HLS target duration"))
+        );
+    }
+
+    #[derive(Debug)]
+    struct HlsScriptStream {
+        response: std::io::Cursor<Vec<u8>>,
+        request: Vec<u8>,
+    }
+
+    impl Read for HlsScriptStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buffer)
+        }
+    }
+
+    impl Write for HlsScriptStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.request.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hls_fetch_uses_caller_connector_and_parses_bounded_response() {
+        let playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:3.5,\nsegment.ts\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\n\r\n",
+            playlist.len()
+        )
+        .into_bytes();
+        let mut response = response;
+        response.extend_from_slice(playlist);
+        let mut observed = None;
+        let result = fetch_hls_playlist_with_connector(
+            "https://media.example.test:8443/live/index.m3u8?token=bounded",
+            Duration::from_secs(2),
+            |scheme, authority, target, timeout| {
+                observed = Some((
+                    scheme.to_string(),
+                    authority.to_string(),
+                    target.to_string(),
+                    timeout,
+                ));
+                Ok(HlsScriptStream {
+                    response: std::io::Cursor::new(response),
+                    request: Vec::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.playlist.segments.len(), 1);
+        assert_eq!(
+            observed,
+            Some((
+                "https".to_string(),
+                "media.example.test:8443".to_string(),
+                "/live/index.m3u8?token=bounded".to_string(),
+                Duration::from_secs(2),
+            ))
+        );
+    }
+
+    #[test]
+    fn hls_fetch_rejects_redirects_credentials_bad_types_and_oversized_bodies() {
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.test/x.m3u8\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(
+            fetch_hls_playlist_with_connector(
+                "https://media.example.test/live.m3u8",
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(HlsScriptStream {
+                        response: std::io::Cursor::new(redirect.to_vec()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(AirplayError::Invalid("HLS playlist status"))
+        );
+        assert_eq!(
+            fetch_hls_playlist_with_connector(
+                "https://user:pass@media.example.test/live.m3u8",
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(HlsScriptStream {
+                        response: std::io::Cursor::new(Vec::new()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(AirplayError::Invalid("HLS playlist authority"))
+        );
+        let bad_type = b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(
+            fetch_hls_playlist_with_connector(
+                "http://media.example.test/live.m3u8",
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(HlsScriptStream {
+                        response: std::io::Cursor::new(bad_type.to_vec()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(AirplayError::Invalid("HLS playlist content type"))
+        );
+        let oversized = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_HLS_PLAYLIST_BYTES + 1
+        );
+        assert_eq!(
+            fetch_hls_playlist_with_connector(
+                "http://media.example.test/live.m3u8",
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(HlsScriptStream {
+                        response: std::io::Cursor::new(oversized.into_bytes()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(AirplayError::TooLarge("HLS playlist"))
         );
     }
 
