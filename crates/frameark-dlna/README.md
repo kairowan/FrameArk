@@ -12,6 +12,8 @@ DLNA/UPnP MediaRenderer work.
   connection cleanup;
 - an in-process MediaRenderer handler for `AVTransport`,
   `RenderingControl`, and `ConnectionManager` SOAP actions;
+- a bounded `ConnectionManager` format capability report with deterministic
+  custom sink protocol-info entries;
 - single-range HTTP media responses with bounded in-memory resources and
   DLNA response headers;
 - an explicit file-backed media resource registry that streams bounded HTTP
