@@ -16,6 +16,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Loopback server with pinned certificate and correct six-digit code | Pass | `pinned_quic_pairing_completes_a_temporary_session` |
 | Incorrect code | Pass; client and server report `PairingRejected` | `incorrect_code_is_rejected_without_persisting_trust` |
 | Capability offer intersection | Pass; common capabilities are selected and exposed to core session mapping | `capability_intersection_advances_the_shared_core_session` |
+| Optional Ed25519 sender proof | Pass on loopback; a fresh challenge is signed, verified before capability negotiation, and exposed only on the temporary server session | `peer_identity_proof_is_challenge_bound_and_exposed_to_policy` |
 | No common capability | Pass; both peers report a negotiation rejection | `no_common_capability_is_rejected` |
 | Malformed/oversized frame or capability payload | Parser rejects before payload interpretation | `frame_header_rejects_bad_magic_versions_and_lengths`, `malformed_and_duplicate_entries_are_rejected` |
 | Native Offer → Start → Status → Stop lifecycle | Pass on a fake backend; prepare/start/reset and core states are asserted | `frameark-native::native_control_reaches_prepare_start_status_and_stop` |
@@ -38,6 +39,9 @@ deadlines, dropped request cleanup, trailing-byte rejection, and redacted PIN
 debug formatting. These run over real QUIC loopback, not a mocked transport.
 
 - No persistent trust or device identity is established.
+- The optional sender proof verifies key possession for one temporary session;
+  it does not enroll, revoke, or persist a sender in `frameark-trust`, and no
+  Android/Desktop sender has wired a native keystore signer yet.
 - No end-to-end network receiver connects the Rust stream to Android
   MediaCodec/AudioTrack; the Android JNI bridge now accepts bounded FANP
   pairings and forwards encoded frames to the queue. The Android service gates

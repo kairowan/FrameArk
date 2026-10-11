@@ -16,6 +16,7 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
 use rand::Rng;
 use rcgen::generate_simple_self_signed;
+use ring::signature::{self, UnparsedPublicKey};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::time::timeout;
 
@@ -47,6 +48,15 @@ const PAIR_REJECTED: u8 = 3;
 const CLIENT_HELLO: u8 = 4;
 const SERVER_HELLO: u8 = 5;
 const NEGOTIATION_REJECTED: u8 = 6;
+const PEER_CHALLENGE: u8 = 7;
+const PEER_PROOF: u8 = 8;
+const PEER_PROOF_ACCEPTED: u8 = 9;
+const PEER_PROOF_VERSION: u8 = 1;
+const PEER_PUBLIC_KEY_BYTES: usize = 32;
+const PEER_SIGNATURE_BYTES: usize = 64;
+const PEER_CHALLENGE_BYTES: usize = 32;
+const MAX_PEER_DEVICE_ID_BYTES: usize = 64;
+const PEER_TRANSCRIPT_PREFIX: &[u8] = b"FrameArk FANP peer authentication v1\0";
 
 /// Errors returned by the bounded FANP transport and pairing handshake.
 #[derive(Debug, Eq, PartialEq)]
@@ -63,6 +73,8 @@ pub enum TransportError {
     ApprovalRejected,
     /// The peer rejected or could not complete capability negotiation.
     NegotiationRejected,
+    /// The peer identity proof was malformed or failed verification.
+    PeerAuthenticationRejected,
     /// Local capability validation failed before or during negotiation.
     Negotiation(NegotiationError),
     /// A QUIC stream or connection closed before the handshake completed.
@@ -88,6 +100,9 @@ impl fmt::Display for TransportError {
             Self::PairingRejected => f.write_str("temporary pairing was rejected"),
             Self::ApprovalRejected => f.write_str("caller-owned pairing approval was rejected"),
             Self::NegotiationRejected => f.write_str("FANP capability negotiation was rejected"),
+            Self::PeerAuthenticationRejected => {
+                f.write_str("FANP peer identity proof was rejected")
+            }
             Self::Negotiation(error) => write!(f, "FANP capability negotiation error: {error}"),
             Self::ConnectionClosed => f.write_str("FANP connection closed during pairing"),
             Self::Endpoint => f.write_str("FANP QUIC endpoint error"),
@@ -107,6 +122,103 @@ pub struct PairingCode(String);
 impl fmt::Debug for PairingCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PairingCode([REDACTED])")
+    }
+}
+
+/// A caller-supplied Ed25519 identity used for an optional FANP proof.
+///
+/// The private key never crosses this API. A client signs the server's fresh
+/// challenge through its platform keystore and supplies only the public key
+/// and stable device identifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerIdentity {
+    /// Stable caller-owned device identifier.
+    pub device_id: String,
+    /// Raw Ed25519 public key bytes.
+    pub public_key: [u8; PEER_PUBLIC_KEY_BYTES],
+}
+
+/// A verified sender proof attached to one temporary pairing session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerIdentityProof {
+    /// Stable caller-owned device identifier.
+    pub device_id: String,
+    /// Raw Ed25519 public key bytes.
+    pub public_key: [u8; PEER_PUBLIC_KEY_BYTES],
+    /// Signature over the versioned challenge transcript.
+    pub signature: [u8; PEER_SIGNATURE_BYTES],
+}
+
+impl PeerIdentityProof {
+    /// Builds the exact transcript a client must sign for one challenge.
+    pub fn transcript(device_id: &str, challenge: &[u8; PEER_CHALLENGE_BYTES]) -> Vec<u8> {
+        let mut transcript = Vec::with_capacity(
+            PEER_TRANSCRIPT_PREFIX.len() + 1 + device_id.len() + challenge.len(),
+        );
+        transcript.extend_from_slice(PEER_TRANSCRIPT_PREFIX);
+        transcript.push(device_id.len().min(MAX_PEER_DEVICE_ID_BYTES) as u8);
+        transcript.extend_from_slice(device_id.as_bytes());
+        transcript.extend_from_slice(challenge);
+        transcript
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, TransportError> {
+        if self.device_id.is_empty()
+            || self.device_id.len() > MAX_PEER_DEVICE_ID_BYTES
+            || !self
+                .device_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let mut payload = Vec::with_capacity(
+            2 + self.device_id.len() + PEER_PUBLIC_KEY_BYTES + PEER_SIGNATURE_BYTES,
+        );
+        payload.push(PEER_PROOF_VERSION);
+        payload.push(self.device_id.len() as u8);
+        payload.extend_from_slice(self.device_id.as_bytes());
+        payload.extend_from_slice(&self.public_key);
+        payload.extend_from_slice(&self.signature);
+        Ok(payload)
+    }
+
+    fn decode(payload: &[u8]) -> Result<Self, TransportError> {
+        if payload.len() < 2 || payload[0] != PEER_PROOF_VERSION {
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let id_len = payload[1] as usize;
+        let expected = 2 + id_len + PEER_PUBLIC_KEY_BYTES + PEER_SIGNATURE_BYTES;
+        if id_len == 0 || id_len > MAX_PEER_DEVICE_ID_BYTES || payload.len() != expected {
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let device_id = std::str::from_utf8(&payload[2..2 + id_len])
+            .map_err(|_| TransportError::PeerAuthenticationRejected)?
+            .to_string();
+        if !device_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let key_start = 2 + id_len;
+        let mut public_key = [0_u8; PEER_PUBLIC_KEY_BYTES];
+        public_key.copy_from_slice(&payload[key_start..key_start + PEER_PUBLIC_KEY_BYTES]);
+        let sig_start = key_start + PEER_PUBLIC_KEY_BYTES;
+        let mut signature_bytes = [0_u8; PEER_SIGNATURE_BYTES];
+        signature_bytes.copy_from_slice(&payload[sig_start..]);
+        Ok(Self {
+            device_id,
+            public_key,
+            signature: signature_bytes,
+        })
+    }
+
+    fn verify(&self, challenge: &[u8; PEER_CHALLENGE_BYTES]) -> Result<(), TransportError> {
+        let transcript = Self::transcript(&self.device_id, challenge);
+        UnparsedPublicKey::new(&signature::ED25519, self.public_key)
+            .verify(&transcript, &self.signature)
+            .map_err(|_| TransportError::PeerAuthenticationRejected)
     }
 }
 
@@ -141,6 +253,7 @@ impl PairingCode {
 pub struct PairingSession {
     connection: Connection,
     negotiated: NegotiatedCapabilities,
+    peer_identity: Option<PeerIdentityProof>,
     // A client endpoint must outlive its connection. Server endpoints are held
     // by PairingServer, so this is `Some` only for client-created sessions.
     _endpoint: Option<Endpoint>,
@@ -185,6 +298,11 @@ impl PairingSession {
     /// Returns the capability intersection selected during the handshake.
     pub fn negotiated_capabilities(&self) -> &NegotiatedCapabilities {
         &self.negotiated
+    }
+
+    /// Returns the optional sender identity verified during pairing.
+    pub fn peer_identity(&self) -> Option<&PeerIdentityProof> {
+        self.peer_identity.as_ref()
     }
 
     /// Advances a shared core session through transport, authentication, and
@@ -392,6 +510,133 @@ impl PairingServer {
         Ok(PairingSession {
             connection,
             negotiated,
+            peer_identity: None,
+            _endpoint: None,
+        })
+    }
+
+    /// Accepts one pairing with a verified Ed25519 sender proof.
+    ///
+    /// The proof is bound to a fresh server challenge and is verified before
+    /// capability negotiation. The caller may still apply its own Rust-owned
+    /// trust policy in `approve`; returning `false` rejects the temporary
+    /// session. This method does not persist trust or replace platform
+    /// identity/key management.
+    pub async fn accept_pairing_with_peer_proof<F, Fut>(
+        &self,
+        operation_timeout: Duration,
+        approve: F,
+    ) -> Result<PairingSession, TransportError>
+    where
+        F: FnOnce(PeerIdentityProof) -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let incoming = timeout(operation_timeout, self.endpoint.accept())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .ok_or(TransportError::EndpointClosed)?;
+        let connection = timeout(operation_timeout, incoming)
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        let (mut send, mut receive) = timeout(operation_timeout, connection.accept_bi())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        let frame = read_frame_with_timeout(&mut receive, operation_timeout).await?;
+        if frame.kind != PAIR_REQUEST {
+            reject(&mut send).await?;
+            return Err(TransportError::InvalidFrame);
+        }
+        let supplied_code = PairingCode::parse(String::from_utf8_lossy(&frame.payload))
+            .map_err(|_| TransportError::InvalidPairingCode)?;
+        if supplied_code != self.pairing_code {
+            reject(&mut send).await?;
+            let _ = timeout(operation_timeout, send.stopped()).await;
+            return Err(TransportError::PairingRejected);
+        }
+        write_frame_with_timeout(&mut send, PAIR_ACCEPTED, &[], operation_timeout).await?;
+        let (mut challenge_send, _) = timeout(operation_timeout, connection.open_bi())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        let mut challenge = [0_u8; PEER_CHALLENGE_BYTES];
+        rand::rng().fill(&mut challenge);
+        write_frame_with_timeout(
+            &mut challenge_send,
+            PEER_CHALLENGE,
+            &challenge,
+            operation_timeout,
+        )
+        .await?;
+        let (mut proof_send, mut proof_receive) =
+            timeout(operation_timeout, connection.accept_bi())
+                .await
+                .map_err(|_| TransportError::Timeout)?
+                .map_err(|_| TransportError::ConnectionClosed)?;
+        let proof_frame = read_frame_with_timeout(&mut proof_receive, operation_timeout).await?;
+        if proof_frame.kind != PEER_PROOF {
+            reject_negotiation(&mut proof_send).await?;
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let proof = match PeerIdentityProof::decode(&proof_frame.payload) {
+            Ok(proof) => proof,
+            Err(error) => {
+                reject_negotiation(&mut proof_send).await?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = proof.verify(&challenge) {
+            reject_negotiation(&mut proof_send).await?;
+            return Err(error);
+        }
+        let approved = timeout(operation_timeout, approve(proof.clone()))
+            .await
+            .map_err(|_| TransportError::Timeout)?;
+        if !approved {
+            reject_negotiation(&mut proof_send).await?;
+            let _ = timeout(operation_timeout, proof_send.stopped()).await;
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        write_frame_with_timeout(&mut proof_send, PEER_PROOF_ACCEPTED, &[], operation_timeout)
+            .await?;
+        let (mut hello_send, mut hello_receive) =
+            timeout(operation_timeout, connection.accept_bi())
+                .await
+                .map_err(|_| TransportError::Timeout)?
+                .map_err(|_| TransportError::ConnectionClosed)?;
+        let hello = read_frame_with_timeout(&mut hello_receive, operation_timeout).await?;
+        if hello.kind != CLIENT_HELLO {
+            reject_negotiation(&mut hello_send).await?;
+            return Err(TransportError::NegotiationRejected);
+        }
+        let client_capabilities = match CapabilityOffer::decode(&hello.payload) {
+            Ok(offer) => offer,
+            Err(error) => {
+                reject_negotiation(&mut hello_send).await?;
+                let _ = timeout(operation_timeout, hello_send.stopped()).await;
+                return Err(TransportError::Negotiation(error));
+            }
+        };
+        let negotiated = match self.capabilities.intersect(&client_capabilities) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                reject_negotiation(&mut hello_send).await?;
+                let _ = timeout(operation_timeout, hello_send.stopped()).await;
+                return Err(TransportError::Negotiation(error));
+            }
+        };
+        write_frame_with_timeout(
+            &mut hello_send,
+            SERVER_HELLO,
+            &negotiated.encode(),
+            operation_timeout,
+        )
+        .await?;
+        Ok(PairingSession {
+            connection,
+            negotiated,
+            peer_identity: Some(proof),
             _endpoint: None,
         })
     }
@@ -507,6 +752,7 @@ impl PairingClient {
                 Ok(PairingSession {
                     connection,
                     negotiated,
+                    peer_identity: None,
                     _endpoint: Some(endpoint),
                 })
             }
@@ -516,6 +762,156 @@ impl PairingClient {
             }
             _ => Err(TransportError::InvalidFrame),
         }
+    }
+
+    /// Connects with a caller-owned Ed25519 sender proof.
+    ///
+    /// The `sign` callback receives a fresh, versioned transcript after the
+    /// pinned server has accepted the temporary PIN. It may delegate to an
+    /// Android Keystore, desktop keychain, or another platform signer; the
+    /// private key is never passed to this crate.
+    pub async fn connect_with_identity<F>(
+        server_addr: SocketAddr,
+        server_name: &str,
+        certificate_der: &[u8],
+        pairing_code: PairingCode,
+        identity: PeerIdentity,
+        sign: F,
+        operation_timeout: Duration,
+    ) -> Result<PairingSession, TransportError>
+    where
+        F: FnOnce(&[u8]) -> Result<[u8; PEER_SIGNATURE_BYTES], TransportError>,
+    {
+        if !valid_server_name(server_name)
+            || certificate_der.is_empty()
+            || certificate_der.len() > MAX_CERTIFICATE_BYTES
+        {
+            return Err(TransportError::TlsConfiguration);
+        }
+        let capabilities = CapabilityOffer::default_capabilities();
+        let PeerIdentity {
+            device_id,
+            public_key,
+        } = identity;
+        PeerIdentityProof {
+            device_id: device_id.clone(),
+            public_key,
+            signature: [0_u8; PEER_SIGNATURE_BYTES],
+        }
+        .encode()?;
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(certificate_der.to_vec()))
+            .map_err(|_| TransportError::TlsConfiguration)?;
+        let mut tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tls_config.alpn_protocols = vec![FANP_ALPN.to_vec()];
+        let quic_config =
+            QuicClientConfig::try_from(tls_config).map_err(|_| TransportError::TlsConfiguration)?;
+        let bind_addr = match server_addr {
+            SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        let mut endpoint = Endpoint::client(bind_addr).map_err(|_| TransportError::Endpoint)?;
+        endpoint.set_default_client_config(ClientConfig::new(Arc::new(quic_config)));
+        let connecting = endpoint
+            .connect(server_addr, server_name)
+            .map_err(|_| TransportError::Endpoint)?;
+        let connection = timeout(operation_timeout, connecting)
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        let (mut send, mut receive) = timeout(operation_timeout, connection.open_bi())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        write_frame_with_timeout(
+            &mut send,
+            PAIR_REQUEST,
+            pairing_code.as_str().as_bytes(),
+            operation_timeout,
+        )
+        .await?;
+        let frame = read_frame_with_timeout(&mut receive, operation_timeout).await?;
+        if frame.kind != PAIR_ACCEPTED || !frame.payload.is_empty() {
+            connection.close(0u32.into(), b"pairing rejected");
+            return Err(if frame.kind == PAIR_REJECTED {
+                TransportError::PairingRejected
+            } else {
+                TransportError::InvalidFrame
+            });
+        }
+        let (_, mut challenge_receive) = timeout(operation_timeout, connection.accept_bi())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        let challenge_frame =
+            read_frame_with_timeout(&mut challenge_receive, operation_timeout).await?;
+        if challenge_frame.kind != PEER_CHALLENGE
+            || challenge_frame.payload.len() != PEER_CHALLENGE_BYTES
+        {
+            connection.close(0u32.into(), b"peer authentication rejected");
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let mut challenge = [0_u8; PEER_CHALLENGE_BYTES];
+        challenge.copy_from_slice(&challenge_frame.payload);
+        let transcript = PeerIdentityProof::transcript(&device_id, &challenge);
+        let signature = sign(&transcript)?;
+        let proof = PeerIdentityProof {
+            device_id,
+            public_key,
+            signature,
+        };
+        let (mut proof_send, mut proof_receive) = timeout(operation_timeout, connection.open_bi())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        write_frame_with_timeout(
+            &mut proof_send,
+            PEER_PROOF,
+            &proof.encode()?,
+            operation_timeout,
+        )
+        .await?;
+        let proof_result = read_frame_with_timeout(&mut proof_receive, operation_timeout).await?;
+        if proof_result.kind != PEER_PROOF_ACCEPTED || !proof_result.payload.is_empty() {
+            connection.close(0u32.into(), b"peer authentication rejected");
+            return Err(TransportError::PeerAuthenticationRejected);
+        }
+        let (mut hello_send, mut hello_receive) = timeout(operation_timeout, connection.open_bi())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::ConnectionClosed)?;
+        write_frame_with_timeout(
+            &mut hello_send,
+            CLIENT_HELLO,
+            &capabilities.encode(),
+            operation_timeout,
+        )
+        .await?;
+        let hello = read_frame_with_timeout(&mut hello_receive, operation_timeout).await?;
+        let negotiated = match hello.kind {
+            SERVER_HELLO => {
+                let server_capabilities =
+                    CapabilityOffer::decode(&hello.payload).map_err(TransportError::Negotiation)?;
+                capabilities
+                    .intersect(&server_capabilities)
+                    .map_err(TransportError::Negotiation)?
+            }
+            NEGOTIATION_REJECTED => {
+                connection.close(0u32.into(), b"capability negotiation rejected");
+                return Err(TransportError::NegotiationRejected);
+            }
+            PEER_PROOF => return Err(TransportError::PeerAuthenticationRejected),
+            _ => return Err(TransportError::InvalidFrame),
+        };
+        Ok(PairingSession {
+            connection,
+            negotiated,
+            peer_identity: None,
+            _endpoint: Some(endpoint),
+        })
     }
 }
 
@@ -625,6 +1021,7 @@ fn valid_server_name(server_name: &str) -> bool {
 mod tests {
     use super::*;
     use frameark_core::{Capability, DeviceId, Session, SessionId, SessionState};
+    use ring::signature::KeyPair;
     use std::sync::Arc;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -636,6 +1033,40 @@ mod tests {
         assert!(PairingCode::parse("4207").is_err());
         assert!(PairingCode::parse("00420a").is_err());
         assert_eq!(PairingCode::generate().as_str().len(), PAIRING_CODE_LEN);
+    }
+
+    #[test]
+    fn peer_identity_proof_rejects_malformed_identity_and_tampered_signature() {
+        let malformed = PeerIdentityProof {
+            device_id: "bad identity".to_string(),
+            public_key: [0_u8; PEER_PUBLIC_KEY_BYTES],
+            signature: [0_u8; PEER_SIGNATURE_BYTES],
+        };
+        assert_eq!(
+            malformed.encode(),
+            Err(TransportError::PeerAuthenticationRejected)
+        );
+        let key_pair =
+            ring::signature::Ed25519KeyPair::from_seed_unchecked(&[3_u8; 32]).expect("test key");
+        let public_key: [u8; PEER_PUBLIC_KEY_BYTES] = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("ed25519 public key");
+        let challenge = [9_u8; PEER_CHALLENGE_BYTES];
+        let transcript = PeerIdentityProof::transcript("sender-1", &challenge);
+        let mut signature_bytes = [0_u8; PEER_SIGNATURE_BYTES];
+        signature_bytes.copy_from_slice(key_pair.sign(&transcript).as_ref());
+        signature_bytes[0] ^= 1;
+        let proof = PeerIdentityProof {
+            device_id: "sender-1".to_string(),
+            public_key,
+            signature: signature_bytes,
+        };
+        assert_eq!(
+            proof.verify(&challenge),
+            Err(TransportError::PeerAuthenticationRejected)
+        );
     }
 
     #[test]
@@ -689,6 +1120,61 @@ mod tests {
         );
         let server_session = server_task.await.unwrap().unwrap();
         assert!(server_session.is_temporary());
+        client.close();
+        server_session.close();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_identity_proof_is_challenge_bound_and_exposed_to_policy() {
+        let server = Arc::new(
+            PairingServer::bind(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("004207").unwrap(),
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let key_pair =
+            ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7_u8; 32]).expect("test key");
+        let public_key: [u8; PEER_PUBLIC_KEY_BYTES] = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("ed25519 public key");
+        let accepting = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            accepting
+                .accept_pairing_with_peer_proof(TEST_TIMEOUT, |proof| async move {
+                    proof.device_id == "sender-1"
+                })
+                .await
+        });
+        let client = PairingClient::connect_with_identity(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("004207").unwrap(),
+            PeerIdentity {
+                device_id: "sender-1".to_string(),
+                public_key,
+            },
+            move |transcript| {
+                let signature = key_pair.sign(transcript);
+                let mut output = [0_u8; PEER_SIGNATURE_BYTES];
+                output.copy_from_slice(signature.as_ref());
+                Ok(output)
+            },
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let server_session = server_task.await.unwrap().unwrap();
+        let identity = server_session.peer_identity().expect("verified identity");
+        assert_eq!(identity.device_id, "sender-1");
+        assert_eq!(identity.public_key, public_key);
         client.close();
         server_session.close();
         server.close();
