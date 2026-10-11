@@ -21,6 +21,8 @@ class FrameArkReceiverService : Service() {
     private lateinit var native: FrameArkNative
     private lateinit var playbackLoop: MediaPlaybackLoop
     private lateinit var coordinator: ReceiverSessionCoordinator
+    private lateinit var identityCoordinator: ReceiverIdentityCoordinator
+    private var identityReady = false
 
     override fun onCreate() {
         super.onCreate()
@@ -33,6 +35,22 @@ class FrameArkReceiverService : Service() {
             },
         )
         coordinator = ReceiverSessionCoordinator(native, playbackLoop)
+        identityCoordinator = ReceiverIdentityCoordinator {
+            AndroidDeviceIdentityStore().getOrCreate()
+        }
+        identityReady = when (val identity = identityCoordinator.initialize()) {
+            is ReceiverIdentityCoordinator.State.Ready -> {
+                Log.i(TAG, "device identity ready")
+                true
+            }
+
+            is ReceiverIdentityCoordinator.State.Failed -> {
+                Log.e(TAG, "device identity unavailable; receiver will remain stopped")
+                false
+            }
+
+            ReceiverIdentityCoordinator.State.Uninitialized -> false
+        }
         createNotificationChannel()
     }
 
@@ -41,6 +59,10 @@ class FrameArkReceiverService : Service() {
         if (ReceiverServicePolicy.isStop(action)) {
             coordinator.stop()
             stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+        if (!identityReady) {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }

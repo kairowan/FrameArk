@@ -34,6 +34,16 @@ object DeviceIdentityPolicy {
             .digest(publicKey)
             .joinToString(":") { byte -> "%02x".format(byte) }
     }
+
+    fun validateFingerprint(fingerprint: String) {
+        require(fingerprint.length == 95) { "identity fingerprint must be SHA-256 text" }
+        require(fingerprint.split(':').size == 32) {
+            "identity fingerprint must contain 32 octets"
+        }
+        require(fingerprint.split(':').all { it.length == 2 && it.all { character -> character in "0123456789abcdef" } }) {
+            "identity fingerprint must use lowercase hexadecimal text"
+        }
+    }
 }
 
 /**

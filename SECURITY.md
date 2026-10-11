@@ -184,6 +184,12 @@ in a message. Integrations must avoid credentials, raw URLs, packet payloads,
 device identifiers, and user media, and must obtain consent before exporting a
 snapshot or persisting it outside the process.
 
+The Android Receiver now gates its foreground lifecycle on a successful
+Keystore-backed identity load. Private key material is not exported to Kotlin,
+Rust, logs, notifications, or diagnostics; only a validated public-key
+fingerprint is retained in the identity state. This is an identity-availability
+gate, not sender authorization or a substitute for Rust trust approval.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
