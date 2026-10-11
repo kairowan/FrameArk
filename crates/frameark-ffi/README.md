@@ -11,8 +11,9 @@ port, pairing code, and pinned certificate through explicit JNI getters. The
 listener publishes `_frameark._udp.local.` metadata without the pairing code;
 publication is withdrawn when the lifecycle stops and remains optional when a
 platform mDNS backend is unavailable. The
-bridge still does not own Android `Surface` objects, decode media, or persist
-trust. The Kotlin service owns Android lifecycle and notifications; Rust
+bridge still does not own Android `Surface` objects or decode media. The Kotlin
+service owns Android lifecycle, notifications, and encrypted trust-snapshot
+storage; Rust
 remains the owner of protocol/session state. Native video and audio submissions
 are bounded to 4 MiB each and 16 queued frames, return explicit backpressure,
 and are polled as versioned `FAMF` envelopes. After FANP negotiation, the
@@ -61,5 +62,9 @@ The bridge also exposes `nativeTrustPeer`, `nativeRevokePeer`, and
 `nativeIsPeerTrusted` for an explicit Android approval UI. These calls delegate
 validation, capacity, identity-change rejection, and revocation to Rust's
 bounded `frameark-trust::TrustRegistry`; Kotlin forwards only public IDs,
-fingerprints, and labels. The registry is process-local in this increment and
-does not authenticate the sender, persist a snapshot, or replace user approval.
+fingerprints, and labels. `nativeExportTrustSnapshot` and
+`nativeImportTrustSnapshot` expose only the bounded public `FTR1` bytes; import
+is rejected while a session is active. `AndroidTrustSnapshotStore` encrypts
+those bytes with an Android Keystore AES-GCM key and atomically replaces an
+app-private file. This still does not authenticate the sender, prove key
+possession, or replace an explicit user approval UI.

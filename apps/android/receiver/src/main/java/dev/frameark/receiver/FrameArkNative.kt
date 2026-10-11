@@ -27,11 +27,14 @@ class FrameArkNative(
     trustPeerProvider: ((String, String, String) -> Int)? = null,
     revokePeerProvider: ((String) -> Int)? = null,
     peerTrustedProvider: ((String, String) -> Int)? = null,
+    trustSnapshotExportProvider: (() -> ByteArray?)? = null,
+    trustSnapshotImportProvider: ((ByteArray) -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
         const val EXPECTED_ABI_VERSION = 1
         const val MAX_MEDIA_FRAME_BYTES = 4 * 1024 * 1024
+        const val MAX_TRUST_SNAPSHOT_BYTES = 64 * 1024
         private const val MEDIA_FRAME_HEADER_BYTES = 19
         private const val MEDIA_CONFIG_HEADER_BYTES = 8
         private val MEDIA_FRAME_MAGIC = byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'M'.code.toByte(), 'F'.code.toByte())
@@ -66,6 +69,10 @@ class FrameArkNative(
         revokePeerProvider ?: { deviceId -> nativeRevokePeer(deviceId) }
     private val bridgePeerTrustedProvider: (String, String) -> Int =
         peerTrustedProvider ?: { deviceId, fingerprint -> nativeIsPeerTrusted(deviceId, fingerprint) }
+    private val bridgeTrustSnapshotExportProvider: () -> ByteArray? =
+        trustSnapshotExportProvider ?: { nativeExportTrustSnapshot() }
+    private val bridgeTrustSnapshotImportProvider: (ByteArray) -> Int =
+        trustSnapshotImportProvider ?: { snapshot -> nativeImportTrustSnapshot(snapshot) }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -227,6 +234,25 @@ class FrameArkNative(
             DeviceIdentityPolicy.validateFingerprint(fingerprint)
             bridgePeerTrustedProvider(deviceId, fingerprint) == 1
         }.getOrDefault(false)
+    }
+
+    /** Exports Rust's bounded public trust registry for encrypted platform storage. */
+    fun exportTrustSnapshot(): ByteArray? {
+        when (load()) {
+            is LoadResult.Loaded -> Unit
+            else -> return null
+        }
+        return bridgeTrustSnapshotExportProvider().takeIf { it != null && it.size <= MAX_TRUST_SNAPSHOT_BYTES }
+    }
+
+    /** Imports an encrypted-store-decoded FTR1 snapshot before receiver startup. */
+    fun importTrustSnapshot(snapshot: ByteArray): Boolean {
+        when (load()) {
+            is LoadResult.Loaded -> Unit
+            else -> return false
+        }
+        if (snapshot.isEmpty() || snapshot.size > MAX_TRUST_SNAPSHOT_BYTES) return false
+        return bridgeTrustSnapshotImportProvider(snapshot) == 0
     }
 
     /** Starts the Rust-owned lifecycle after verifying the ABI. */
@@ -391,6 +417,10 @@ class FrameArkNative(
     private external fun nativeRevokePeer(deviceId: String): Int
 
     private external fun nativeIsPeerTrusted(deviceId: String, fingerprint: String): Int
+
+    private external fun nativeExportTrustSnapshot(): ByteArray?
+
+    private external fun nativeImportTrustSnapshot(snapshot: ByteArray): Int
 
     private external fun nativeStartReceiver(): Int
 
