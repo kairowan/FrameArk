@@ -134,6 +134,13 @@ and renderer ownership must remain in the Rust transport and Android platform
 layers. `JniMediaQueueSink` only accepts samples after the Rust receiver
 lifecycle is started; it does not open sockets, authenticate senders, or grant
 Android decoder/surface access.
+
+The Android JNI receiver now owns a bounded, ephemeral FANP QUIC listener for
+each started lifecycle and exposes only its port, temporary pairing code, and
+pinned public certificate to an explicit in-app pairing flow. The listener
+closes and joins its worker before the Rust lifecycle reports stopped; it does
+not persist trust, log pairing material, or imply that a decoder/surface is
+available.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on

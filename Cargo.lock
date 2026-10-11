@@ -156,7 +156,10 @@ version = "0.1.0"
 dependencies = [
  "frameark-api",
  "frameark-core",
+ "frameark-native",
+ "frameark-transport",
  "jni",
+ "tokio",
 ]
 
 [[package]]
