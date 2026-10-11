@@ -24,9 +24,13 @@ address approval seam or the optional Ed25519 peer-proof flow before capability
 negotiation. The address and pairing code alone are not sender identity proof.
 The proof flow binds a fresh server challenge to a bounded device identifier
 and public key; a caller-owned policy then decides whether the verified sender
-may proceed. Verification is temporary and does not persist trust. A
-production trust UI must still connect this proof to its Rust-owned registry
-and platform keystore; typed fingerprints are not sufficient.
+may proceed. Verification is temporary and does not persist trust. After proof
+verification and explicit user approval, a receiver may pass the proof's raw
+public key to `frameark-trust::TrustRegistry::trust_public_key`; Rust then
+derives the same canonical SHA-256 fingerprint used by the encrypted platform
+snapshot. The helper does not verify signatures, so passing an unverified key
+remains a caller error. Platform sender enrollment and reconnect policy are
+still open.
 
 ## Control frame
 

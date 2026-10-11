@@ -7,6 +7,7 @@
 //! platform-protected directory and authenticated user approval.
 
 use frameark_core::DeviceId;
+use ring::digest;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{self, OpenOptions};
@@ -27,6 +28,8 @@ pub const MAX_TRUST_REQUEST_TTL: Duration = Duration::from_secs(3_600);
 pub const MAX_TRUST_LABEL_BYTES: usize = 128;
 /// Length of a lowercase colon-separated SHA-256 fingerprint.
 pub const SHA256_FINGERPRINT_BYTES: usize = 95;
+/// Raw public-key size accepted by [`DeviceFingerprint::from_public_key`].
+pub const SHA256_PUBLIC_KEY_BYTES: usize = 32;
 /// Maximum serialized trust snapshot accepted by the bounded codec.
 pub const MAX_SERIALIZED_TRUST_BYTES: usize = 64 * 1024;
 const SERIALIZED_MAGIC: &[u8; 4] = b"FTR1";
@@ -36,6 +39,8 @@ const SERIALIZED_MAGIC: &[u8; 4] = b"FTR1";
 pub enum TrustError {
     /// The fingerprint is not a lowercase colon-separated SHA-256 value.
     InvalidFingerprint,
+    /// The supplied public key does not have the bounded raw-key size.
+    InvalidPublicKey,
     /// The display label is empty, too large, or contains a control character.
     InvalidLabel,
     /// The registry has reached its explicit capacity.
@@ -161,6 +166,7 @@ impl Display for TrustError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidFingerprint => "invalid SHA-256 fingerprint",
+            Self::InvalidPublicKey => "invalid raw public key",
             Self::InvalidLabel => "invalid trusted-device label",
             Self::Capacity => "trusted-device capacity exhausted",
             Self::IdentityChanged => "trusted-device identity changed",
@@ -197,6 +203,27 @@ impl DeviceFingerprint {
             return Err(TrustError::InvalidFingerprint);
         }
         Ok(Self(value))
+    }
+
+    /// Derives the canonical fingerprint for one raw 32-byte public key.
+    ///
+    /// This performs hashing only; it does not authenticate a key or verify a
+    /// signature. Callers must invoke it only after a protocol-specific
+    /// key-possession proof and explicit user approval have succeeded.
+    pub fn from_public_key(public_key: &[u8]) -> Result<Self, TrustError> {
+        if public_key.len() != SHA256_PUBLIC_KEY_BYTES {
+            return Err(TrustError::InvalidPublicKey);
+        }
+        let digest = digest::digest(&digest::SHA256, public_key);
+        let mut fingerprint = String::with_capacity(SHA256_FINGERPRINT_BYTES);
+        for (index, byte) in digest.as_ref().iter().enumerate() {
+            if index != 0 {
+                fingerprint.push(':');
+            }
+            use std::fmt::Write as _;
+            write!(&mut fingerprint, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Self::new(fingerprint)
     }
 
     /// Returns the normalized fingerprint text.
@@ -519,6 +546,22 @@ impl TrustRegistry {
         Ok(TrustMutation::Added)
     }
 
+    /// Adds or refreshes a peer after its protocol proof was verified.
+    ///
+    /// The registry derives the canonical fingerprint from the raw public key
+    /// so callers cannot accidentally persist a differently formatted value.
+    /// This method still does not verify signatures; callers must establish
+    /// key possession and obtain explicit approval before invoking it.
+    pub fn trust_public_key(
+        &mut self,
+        device_id: DeviceId,
+        public_key: &[u8],
+        label: impl Into<String>,
+    ) -> Result<TrustMutation, TrustError> {
+        let fingerprint = DeviceFingerprint::from_public_key(public_key)?;
+        self.trust(device_id, fingerprint, label)
+    }
+
     /// Explicitly revokes one device record.
     pub fn revoke(&mut self, device_id: &DeviceId) -> Result<TrustedDevice, TrustError> {
         self.records
@@ -659,6 +702,40 @@ mod tests {
         assert_eq!(
             DeviceFingerprint::new("aa:bb"),
             Err(TrustError::InvalidFingerprint)
+        );
+    }
+
+    #[test]
+    fn public_key_fingerprint_is_canonical_and_bounded() {
+        let public_key: Vec<u8> = (0..32).collect();
+        assert_eq!(
+            DeviceFingerprint::from_public_key(&public_key)
+                .unwrap()
+                .as_str(),
+            "63:0d:cd:29:66:c4:33:66:91:12:54:48:bb:b2:5b:4f:f4:12:a4:9c:73:2d:b2:c8:ab:c1:b8:58:1b:d7:10:dd"
+        );
+        assert_eq!(
+            DeviceFingerprint::from_public_key(&public_key[..31]),
+            Err(TrustError::InvalidPublicKey)
+        );
+    }
+
+    #[test]
+    fn trust_public_key_binds_identity_to_derived_fingerprint() {
+        let public_key: Vec<u8> = (0..32).collect();
+        let id = device("phone-1");
+        let mut registry = TrustRegistry::new(1).unwrap();
+        assert_eq!(
+            registry
+                .trust_public_key(id.clone(), &public_key, "Phone")
+                .unwrap(),
+            TrustMutation::Added
+        );
+        let fingerprint = DeviceFingerprint::from_public_key(&public_key).unwrap();
+        assert!(registry.is_trusted(&id, &fingerprint));
+        assert_eq!(
+            registry.trust_public_key(id, &[7; 32], "Rotated"),
+            Err(TrustError::IdentityChanged)
         );
     }
 
