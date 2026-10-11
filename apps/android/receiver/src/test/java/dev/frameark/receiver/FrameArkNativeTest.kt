@@ -109,6 +109,35 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun forwards_optional_one_shot_pairing_approval_gate() {
+        val calls = mutableListOf<String>()
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            pairingApprovalRequiredProvider = { required ->
+                calls += "required:$required"
+                0
+            },
+            pairingApprovalProvider = {
+                calls += "approve"
+                0
+            },
+        )
+
+        assertTrue(bridge.setPairingApprovalRequired(true))
+        assertTrue(bridge.approveNextPairing())
+        assertEquals(listOf("required:true", "approve"), calls)
+    }
+
+    @Test
+    fun pairing_approval_gate_fails_closed_without_a_loaded_native_bridge() {
+        val bridge = FrameArkNative(libraryLoader = { throw UnsatisfiedLinkError("missing") })
+
+        assertFalse(bridge.setPairingApprovalRequired(true))
+        assertFalse(bridge.approveNextPairing())
+    }
+
+    @Test
     fun reports_a_loaded_matching_abi() {
         var requestedLibrary = ""
         val bridge = FrameArkNative(

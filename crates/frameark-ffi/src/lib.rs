@@ -213,6 +213,45 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeImportTru
     import_trust_snapshot(&mut state, &bytes)
 }
 
+/// Enables or disables the optional one-shot post-PIN pairing approval gate.
+/// Return values: 0 accepted while stopped, -2 active receiver, -3 lock
+/// failure. This gate is an authorization seam only; it does not authenticate
+/// a sender identity or persist trust.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetPairingApprovalRequired(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    required: jboolean,
+) -> jint {
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    if state.session.is_some() || state.network.is_some() {
+        return -2;
+    }
+    state.pairing_approval_required = required != 0;
+    state.pairing_approval.store(false, Ordering::Release);
+    0
+}
+
+/// Arms exactly one upcoming FANP pairing when the optional approval gate is
+/// enabled. Return values: 0 armed, -2 gate disabled/not running, -3 lock
+/// failure. The arm is consumed before `PairAccepted` is sent.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeApproveNextPairing(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jint {
+    let Ok(state) = receiver_state().lock() else {
+        return -3;
+    };
+    if !state.pairing_approval_required || state.network.is_none() {
+        return -2;
+    }
+    state.pairing_approval.store(true, Ordering::Release);
+    0
+}
+
 fn export_trust_snapshot(state: &NativeReceiverState) -> Option<Vec<u8>> {
     state.trust_registry.encode().ok()
 }
@@ -296,6 +335,8 @@ struct NativeReceiverState {
     device_id: Option<DeviceId>,
     identity_fingerprint: Option<String>,
     trust_registry: TrustRegistry,
+    pairing_approval_required: bool,
+    pairing_approval: Arc<AtomicBool>,
     network: Option<NetworkRuntime>,
 }
 
@@ -372,7 +413,11 @@ fn unregister_discovery(registration: PublishedRegistration, discovery: MdnsDisc
 }
 
 impl NetworkRuntime {
-    fn start(device_id: DeviceId) -> Result<Self, String> {
+    fn start_with_approval(
+        device_id: DeviceId,
+        approval_required: bool,
+        pairing_approval: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
         let pairing_code = PairingCode::generate();
         let pairing_value = pairing_code
             .as_str()
@@ -425,9 +470,16 @@ impl NetworkRuntime {
                 }
                 runtime.block_on(async move {
                     while !stop_thread.load(Ordering::Acquire) {
+                        let pairing_approval = Arc::clone(&pairing_approval);
                         let accepted = tokio::time::timeout(
                             Duration::from_millis(250),
-                            server.accept_pairing(NETWORK_OPERATION_TIMEOUT),
+                            server.accept_pairing_with_approval(
+                                NETWORK_OPERATION_TIMEOUT,
+                                move |_| async move {
+                                    !approval_required
+                                        || pairing_approval.swap(false, Ordering::AcqRel)
+                                },
+                            ),
                         )
                         .await;
                         let transport = match accepted {
@@ -670,7 +722,11 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
         Ok(session) => session,
         Err(code) => return code,
     };
-    let Ok(network) = NetworkRuntime::start(session.device_id().clone()) else {
+    let Ok(network) = NetworkRuntime::start_with_approval(
+        session.device_id().clone(),
+        state.pairing_approval_required,
+        Arc::clone(&state.pairing_approval),
+    ) else {
         return -4;
     };
     state.media_queue.clear();
@@ -1146,12 +1202,63 @@ mod tests {
     #[test]
     fn network_runtime_exposes_bounded_pairing_material_and_stops_cleanly() {
         let _guard = test_guard();
-        let network =
-            NetworkRuntime::start(DeviceId::try_from("test-device").expect("valid test identity"))
-                .unwrap_or_else(|error| panic!("{error}"));
+        let network = NetworkRuntime::start_with_approval(
+            DeviceId::try_from("test-device").expect("valid test identity"),
+            false,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         assert_ne!(network.port, 0);
         assert!((0..=999_999).contains(&network.pairing_code));
         assert!(!network.certificate_der.is_empty());
+        network.stop();
+    }
+
+    #[test]
+    fn network_runtime_approval_gate_consumes_one_arm() {
+        let _guard = test_guard();
+        let approval = Arc::new(AtomicBool::new(false));
+        let network = NetworkRuntime::start_with_approval(
+            DeviceId::try_from("approval-device").expect("valid test identity"),
+            true,
+            Arc::clone(&approval),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
+        let pairing = PairingCode::parse(format!("{:06}", network.pairing_code))
+            .expect("generated pairing code is six digits");
+        let certificate = network.certificate_der.clone();
+        std::thread::sleep(Duration::from_millis(50));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("approval runtime")
+            .block_on(async {
+                let rejected = PairingClient::connect(
+                    address,
+                    "localhost",
+                    &certificate,
+                    pairing.clone(),
+                    Duration::from_secs(5),
+                )
+                .await;
+                assert!(matches!(
+                    rejected,
+                    Err(frameark_transport::TransportError::PairingRejected)
+                ));
+                approval.store(true, Ordering::Release);
+                let accepted = PairingClient::connect(
+                    address,
+                    "localhost",
+                    &certificate,
+                    pairing,
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("armed pairing");
+                accepted.close();
+                assert!(!approval.load(Ordering::Acquire));
+            });
         network.stop();
     }
 
@@ -1167,8 +1274,10 @@ mod tests {
             state.media_queue.clear();
             state.network = None;
         }
-        let network = NetworkRuntime::start(
+        let network = NetworkRuntime::start_with_approval(
             DeviceId::try_from("loopback-device").expect("valid test identity"),
+            false,
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap_or_else(|error| panic!("{error}"));
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
@@ -1308,6 +1417,8 @@ mod tests {
             device_id: None,
             identity_fingerprint: None,
             trust_registry: TrustRegistry::default(),
+            pairing_approval_required: false,
+            pairing_approval: Arc::new(AtomicBool::new(false)),
             network: None,
         };
         assert_eq!(

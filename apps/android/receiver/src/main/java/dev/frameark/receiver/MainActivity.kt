@@ -32,6 +32,7 @@ class MainActivity : Activity() {
             textSize = 20f
             setPadding(32, 32, 32, 32)
         }
+        val mutationStatus = TextView(this)
         fun refreshStatus() {
             val network = native.networkInfo()
             statusView.text = if (network == null) {
@@ -67,14 +68,33 @@ class MainActivity : Activity() {
             text = getString(R.string.receiver_refresh)
             setOnClickListener { refreshStatus() }
         }
+        val requirePairingApproval = Button(this).apply {
+            text = getString(R.string.pairing_require_approval)
+            setOnClickListener {
+                mutationStatus.text = if (native.setPairingApprovalRequired(true)) {
+                    getString(R.string.pairing_approval_required)
+                } else {
+                    getString(R.string.pairing_approval_rejected)
+                }
+            }
+        }
+        val approveNextPairing = Button(this).apply {
+            text = getString(R.string.pairing_approve_next)
+            setOnClickListener {
+                mutationStatus.text = if (native.approveNextPairing()) {
+                    getString(R.string.pairing_approval_armed)
+                } else {
+                    getString(R.string.pairing_approval_rejected)
+                }
+            }
+        }
         val warning = TextView(this).apply {
-            text = getString(R.string.trust_warning)
+            text = getString(R.string.pairing_warning) + "\n" + getString(R.string.trust_warning)
             setPadding(32, 16, 32, 16)
         }
         val peerId = EditText(this).apply { hint = getString(R.string.trust_device_id_hint) }
         val fingerprint = EditText(this).apply { hint = getString(R.string.trust_fingerprint_hint) }
         val label = EditText(this).apply { hint = getString(R.string.trust_label_hint) }
-        val mutationStatus = TextView(this)
         val approve = Button(this).apply {
             text = getString(R.string.trust_approve)
             setOnClickListener {
@@ -107,6 +127,8 @@ class MainActivity : Activity() {
             addView(start)
             addView(stop)
             addView(refresh)
+            addView(requirePairingApproval)
+            addView(approveNextPairing)
             addView(warning)
             addView(peerId)
             addView(fingerprint)
