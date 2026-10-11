@@ -52,6 +52,12 @@ authenticated key exchange, and user approval before adding or restoring a
 record.
 Do not treat a fingerprint string supplied by an unauthenticated peer as proof
 of identity.
+`PendingTrustRequests` is an ephemeral, bounded approval queue with monotonic
+expiry. It removes a request only after the registry accepts it, explicit
+rejection, or expiry; failed capacity or identity-rotation mutations leave the
+request available for retry. The queue does not authenticate its inputs and is
+never persisted in FTR1, so a transport adapter must verify key possession
+before enqueueing a request and must keep its UI binding access-controlled.
 
 Capability offers are exchanged only after the pinned TLS handshake. The
 current schema requires an exact version match and rejects unknown or duplicate

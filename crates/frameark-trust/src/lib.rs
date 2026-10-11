@@ -13,9 +13,16 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Maximum trusted devices retained by one registry.
 pub const MAX_TRUSTED_DEVICES: usize = 128;
+/// Maximum unactioned pairing approvals retained in memory.
+pub const MAX_PENDING_TRUST_REQUESTS: usize = 16;
+/// Default lifetime for one unactioned pairing approval.
+pub const DEFAULT_TRUST_REQUEST_TTL: Duration = Duration::from_secs(300);
+/// Maximum lifetime accepted for one unactioned pairing approval.
+pub const MAX_TRUST_REQUEST_TTL: Duration = Duration::from_secs(3_600);
 /// Maximum UTF-8 bytes retained for a human-facing trusted-device label.
 pub const MAX_TRUST_LABEL_BYTES: usize = 128;
 /// Length of a lowercase colon-separated SHA-256 fingerprint.
@@ -41,6 +48,14 @@ pub enum TrustError {
     InvalidEncoding,
     /// A serialized trust snapshot exceeds its explicit bound.
     TooLarge,
+    /// The in-memory approval queue has reached its explicit capacity.
+    PendingCapacity,
+    /// A caller referenced an approval request that no longer exists.
+    UnknownRequest,
+    /// An approval request expired before it was acted on.
+    RequestExpired,
+    /// A caller supplied a zero or unbounded approval lifetime.
+    InvalidRequestTtl,
 }
 
 /// Redacted errors from the caller-owned snapshot persistence boundary.
@@ -152,6 +167,10 @@ impl Display for TrustError {
             Self::UnknownDevice => "trusted device is unknown",
             Self::InvalidEncoding => "invalid trust snapshot encoding",
             Self::TooLarge => "trust snapshot exceeds its bound",
+            Self::PendingCapacity => "pending trust request capacity exhausted",
+            Self::UnknownRequest => "trust request is unknown",
+            Self::RequestExpired => "trust request expired",
+            Self::InvalidRequestTtl => "trust request lifetime is invalid",
         })
     }
 }
@@ -195,6 +214,201 @@ impl Debug for DeviceFingerprint {
 impl Display for DeviceFingerprint {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// One authenticated transport's request for explicit user trust approval.
+///
+/// The request is deliberately ephemeral and is never included in an FTR1
+/// snapshot. The caller must obtain the device ID, fingerprint, and label from
+/// an authenticated key-possession boundary before enqueueing it; this type
+/// does not verify signatures or certificates itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustRequest {
+    id: u64,
+    device_id: DeviceId,
+    fingerprint: DeviceFingerprint,
+    label: String,
+    expires_at: Instant,
+}
+
+impl TrustRequest {
+    /// Returns the opaque request identifier shown to the approval adapter.
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the sender's stable device identifier.
+    pub fn device_id(&self) -> &DeviceId {
+        &self.device_id
+    }
+
+    /// Returns the authenticated sender public-key fingerprint.
+    pub fn fingerprint(&self) -> &DeviceFingerprint {
+        &self.fingerprint
+    }
+
+    /// Returns the bounded user-facing sender label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns whether the request is expired at the supplied monotonic time.
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires_at
+    }
+
+    /// Returns the remaining approval lifetime, or zero after expiry.
+    pub fn remaining(&self, now: Instant) -> Duration {
+        self.expires_at.saturating_duration_since(now)
+    }
+}
+
+/// Bounded, ephemeral approval queue shared by pairing adapters and UIs.
+///
+/// Requests are removed only after explicit approve/reject or expiry. Approval
+/// delegates identity rotation, capacity, and persistence-independent policy
+/// to TrustRegistry. The queue itself contains no private key material and
+/// must not be treated as proof that a request was authenticated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingTrustRequests {
+    requests: BTreeMap<u64, TrustRequest>,
+    next_id: u64,
+}
+
+impl Default for PendingTrustRequests {
+    fn default() -> Self {
+        Self {
+            requests: BTreeMap::new(),
+            next_id: 1,
+        }
+    }
+}
+
+impl PendingTrustRequests {
+    /// Returns the number of unexpired requests after a monotonic cleanup.
+    pub fn len(&mut self, now: Instant) -> usize {
+        self.expire(now);
+        self.requests.len()
+    }
+
+    /// Returns whether no unexpired requests remain.
+    pub fn is_empty(&mut self, now: Instant) -> bool {
+        self.len(now) == 0
+    }
+
+    /// Returns a request by ID after removing expired entries.
+    pub fn get(&mut self, id: u64, now: Instant) -> Option<&TrustRequest> {
+        self.expire(now);
+        self.requests.get(&id)
+    }
+
+    /// Returns a deterministic snapshot of unexpired requests for a UI.
+    pub fn list(&mut self, now: Instant) -> Vec<TrustRequest> {
+        self.expire(now);
+        self.requests.values().cloned().collect()
+    }
+
+    /// Queues a request using the default bounded lifetime.
+    pub fn begin(
+        &mut self,
+        device_id: DeviceId,
+        fingerprint: DeviceFingerprint,
+        label: impl Into<String>,
+    ) -> Result<TrustRequest, TrustError> {
+        self.begin_at(
+            device_id,
+            fingerprint,
+            label,
+            DEFAULT_TRUST_REQUEST_TTL,
+            Instant::now(),
+        )
+    }
+
+    /// Queues a request with an explicit bounded lifetime.
+    pub fn begin_with_ttl(
+        &mut self,
+        device_id: DeviceId,
+        fingerprint: DeviceFingerprint,
+        label: impl Into<String>,
+        ttl: Duration,
+    ) -> Result<TrustRequest, TrustError> {
+        self.begin_at(device_id, fingerprint, label, ttl, Instant::now())
+    }
+
+    fn begin_at(
+        &mut self,
+        device_id: DeviceId,
+        fingerprint: DeviceFingerprint,
+        label: impl Into<String>,
+        ttl: Duration,
+        now: Instant,
+    ) -> Result<TrustRequest, TrustError> {
+        if ttl.is_zero() || ttl > MAX_TRUST_REQUEST_TTL {
+            return Err(TrustError::InvalidRequestTtl);
+        }
+        let label = validate_label(label.into())?;
+        self.expire(now);
+        if let Some(existing) = self
+            .requests
+            .values_mut()
+            .find(|request| request.device_id == device_id && request.fingerprint == fingerprint)
+        {
+            existing.label = label;
+            existing.expires_at = now + ttl;
+            return Ok(existing.clone());
+        }
+        if self.requests.len() >= MAX_PENDING_TRUST_REQUESTS {
+            return Err(TrustError::PendingCapacity);
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let request = TrustRequest {
+            id,
+            device_id,
+            fingerprint,
+            label,
+            expires_at: now + ttl,
+        };
+        self.requests.insert(id, request.clone());
+        Ok(request)
+    }
+
+    /// Approves a live request and removes it only after the registry accepts it.
+    pub fn approve(
+        &mut self,
+        id: u64,
+        registry: &mut TrustRegistry,
+        now: Instant,
+    ) -> Result<TrustMutation, TrustError> {
+        let request = self
+            .requests
+            .get(&id)
+            .cloned()
+            .ok_or(TrustError::UnknownRequest)?;
+        if request.is_expired(now) {
+            self.requests.remove(&id);
+            return Err(TrustError::RequestExpired);
+        }
+        let mutation = registry.trust(
+            request.device_id.clone(),
+            request.fingerprint.clone(),
+            request.label.clone(),
+        )?;
+        self.requests.remove(&id);
+        Ok(mutation)
+    }
+
+    /// Rejects one live or expired request without mutating the trust registry.
+    pub fn reject(&mut self, id: u64) -> Result<TrustRequest, TrustError> {
+        self.requests.remove(&id).ok_or(TrustError::UnknownRequest)
+    }
+
+    /// Removes all requests whose monotonic deadline has elapsed.
+    pub fn expire(&mut self, now: Instant) -> usize {
+        let before = self.requests.len();
+        self.requests.retain(|_, request| !request.is_expired(now));
+        before - self.requests.len()
     }
 }
 
@@ -504,6 +718,138 @@ mod tests {
             Err(TrustError::InvalidLabel)
         );
         assert_eq!(TrustRegistry::new(0), Err(TrustError::Capacity));
+    }
+
+    #[test]
+    fn pending_requests_are_bounded_deduplicated_and_expiring() {
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        let now = Instant::now();
+        let mut pending = PendingTrustRequests::default();
+        let first = pending
+            .begin_at(
+                device("phone-1"),
+                fingerprint.clone(),
+                "Phone",
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        assert_eq!(first.id(), 1);
+        assert_eq!(pending.len(now), 1);
+        let refreshed = pending
+            .begin_at(
+                device("phone-1"),
+                fingerprint,
+                "Living room",
+                Duration::from_secs(60),
+                now,
+            )
+            .unwrap();
+        assert_eq!(refreshed.id(), first.id());
+        assert_eq!(refreshed.label(), "Living room");
+        assert_eq!(pending.len(now), 1);
+        for index in 0..MAX_PENDING_TRUST_REQUESTS - 1 {
+            pending
+                .begin_at(
+                    device(&format!("peer-{index}")),
+                    DeviceFingerprint::new(FINGERPRINT).unwrap(),
+                    "Peer",
+                    Duration::from_secs(30),
+                    now,
+                )
+                .unwrap();
+        }
+        assert_eq!(pending.len(now), MAX_PENDING_TRUST_REQUESTS);
+        assert_eq!(
+            pending.begin_at(
+                device("peer-overflow"),
+                DeviceFingerprint::new(FINGERPRINT).unwrap(),
+                "Peer",
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(TrustError::PendingCapacity)
+        );
+        assert_eq!(
+            pending.begin_at(
+                device("phone-2"),
+                DeviceFingerprint::new(FINGERPRINT).unwrap(),
+                "Phone",
+                Duration::ZERO,
+                now,
+            ),
+            Err(TrustError::InvalidRequestTtl)
+        );
+        assert_eq!(
+            pending.expire(now + Duration::from_secs(61)),
+            MAX_PENDING_TRUST_REQUESTS
+        );
+        assert!(pending.is_empty(now + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn pending_approval_commits_only_after_registry_accepts() {
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        let now = Instant::now();
+        let mut pending = PendingTrustRequests::default();
+        let request = pending
+            .begin_at(
+                device("phone-1"),
+                fingerprint.clone(),
+                "Phone",
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let mut registry = TrustRegistry::new(1).unwrap();
+        assert_eq!(
+            pending.approve(request.id(), &mut registry, now),
+            Ok(TrustMutation::Added)
+        );
+        assert!(registry.is_trusted(&device("phone-1"), &fingerprint));
+        assert_eq!(
+            pending.approve(request.id(), &mut registry, now),
+            Err(TrustError::UnknownRequest)
+        );
+
+        let second = pending
+            .begin_at(
+                device("phone-2"),
+                DeviceFingerprint::new(FINGERPRINT).unwrap(),
+                "Tablet",
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            pending.approve(second.id(), &mut registry, now),
+            Err(TrustError::Capacity)
+        );
+        assert!(pending.get(second.id(), now).is_some());
+        assert_eq!(pending.reject(second.id()).unwrap().label(), "Tablet");
+    }
+
+    #[test]
+    fn expired_approval_is_removed_and_fingerprint_debug_is_redacted() {
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        let now = Instant::now();
+        let mut pending = PendingTrustRequests::default();
+        let request = pending
+            .begin_at(
+                device("phone-1"),
+                fingerprint,
+                "Phone",
+                Duration::from_secs(1),
+                now,
+            )
+            .unwrap();
+        assert!(!format!("{request:?}").contains(FINGERPRINT));
+        let mut registry = TrustRegistry::default();
+        assert_eq!(
+            pending.approve(request.id(), &mut registry, now + Duration::from_secs(1),),
+            Err(TrustError::RequestExpired)
+        );
+        assert!(pending.is_empty(now + Duration::from_secs(1)));
     }
 
     #[test]
