@@ -328,6 +328,134 @@ pub enum RtpPushResult {
     DroppedLate,
 }
 
+/// Outcome of filtering and buffering one RAOP RTP packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RaopPacketResult {
+    /// The packet passed peer/SSRC/payload validation and entered the jitter buffer.
+    Buffered,
+    /// The packet arrived after the consumed sequence window.
+    DroppedLate,
+    /// The packet came from a different network peer.
+    RejectedPeer,
+    /// The packet used a different synchronization source.
+    RejectedSsrc,
+}
+
+/// Bounded RAOP packet counters safe for diagnostics and compatibility reports.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RaopAudioReport {
+    /// Packets accepted into the jitter buffer.
+    pub accepted_packets: u64,
+    /// Packets rejected because their source address did not match the session.
+    pub rejected_peer: u64,
+    /// Packets rejected because their SSRC did not match the session.
+    pub rejected_ssrc: u64,
+    /// Packets delivered in sequence order to the decoder boundary.
+    pub delivered_packets: u64,
+    /// Missing sequence numbers explicitly skipped by the caller.
+    pub skipped_packets: u64,
+    /// Packets dropped after arriving late.
+    pub dropped_late: u64,
+}
+
+/// RAOP RTP coordinator that binds a negotiated audio session to one peer and
+/// SSRC before exposing ordered packets to a decoder boundary.
+///
+/// It deliberately does not authenticate Apple pairing, decrypt encrypted
+/// payloads, conceal loss, decode codecs, or own a UDP socket. A caller must
+/// derive the peer and SSRC from its authenticated RTSP session and decide when
+/// a missing sequence is safe to skip.
+#[derive(Debug)]
+pub struct RaopAudioCoordinator {
+    peer: IpAddr,
+    ssrc: u32,
+    payload_type: u8,
+    capacity: usize,
+    jitter: RtpJitterBuffer,
+    report: RaopAudioReport,
+}
+
+impl RaopAudioCoordinator {
+    /// Creates a coordinator for one negotiated peer, SSRC, and RTP payload type.
+    pub fn new(
+        peer: IpAddr,
+        ssrc: u32,
+        payload_type: u8,
+        capacity: usize,
+    ) -> Result<Self, AirplayError> {
+        if payload_type > 127 {
+            return Err(AirplayError::Invalid("RAOP payload type"));
+        }
+        Ok(Self {
+            peer,
+            ssrc,
+            payload_type,
+            capacity,
+            jitter: RtpJitterBuffer::new(capacity)?,
+            report: RaopAudioReport::default(),
+        })
+    }
+
+    /// Filters and buffers one packet received from the caller-owned socket.
+    pub fn push(
+        &mut self,
+        source: SocketAddr,
+        packet: RtpAudioPacket,
+    ) -> Result<RaopPacketResult, AirplayError> {
+        if source.ip() != self.peer {
+            self.report.rejected_peer = self.report.rejected_peer.saturating_add(1);
+            return Ok(RaopPacketResult::RejectedPeer);
+        }
+        if packet.ssrc != self.ssrc {
+            self.report.rejected_ssrc = self.report.rejected_ssrc.saturating_add(1);
+            return Ok(RaopPacketResult::RejectedSsrc);
+        }
+        if packet.payload_type != self.payload_type {
+            return Err(AirplayError::Invalid("RAOP payload type"));
+        }
+        let result = self.jitter.push(packet)?;
+        match result {
+            RtpPushResult::Buffered => {
+                self.report.accepted_packets = self.report.accepted_packets.saturating_add(1);
+                Ok(RaopPacketResult::Buffered)
+            }
+            RtpPushResult::DroppedLate => {
+                self.report.dropped_late = self.report.dropped_late.saturating_add(1);
+                Ok(RaopPacketResult::DroppedLate)
+            }
+        }
+    }
+
+    /// Returns the next ordered packet for the caller-owned decoder boundary.
+    pub fn pop_ready(&mut self) -> Option<RtpAudioPacket> {
+        let packet = self.jitter.pop_ready()?;
+        self.report.delivered_packets = self.report.delivered_packets.saturating_add(1);
+        Some(packet)
+    }
+
+    /// Skips a missing sequence after the caller's transport deadline.
+    pub fn skip_missing_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
+        let skipped = self.jitter.skip_missing_to(sequence)?;
+        self.report.skipped_packets = self
+            .report
+            .skipped_packets
+            .saturating_add(u64::from(skipped));
+        Ok(skipped)
+    }
+
+    /// Returns the bounded report counters.
+    pub const fn report(&self) -> RaopAudioReport {
+        self.report
+    }
+
+    /// Clears buffered packets and counters while retaining negotiated bounds.
+    pub fn reset(&mut self) -> Result<(), AirplayError> {
+        self.jitter = RtpJitterBuffer::new(self.capacity)?;
+        self.report = RaopAudioReport::default();
+        Ok(())
+    }
+}
+
 /// A sequence-aware, bounded jitter buffer for unencrypted RAOP RTP packets.
 ///
 /// The buffer does not conceal loss or decode audio. Callers can use
@@ -2760,6 +2888,53 @@ mod tests {
         );
         assert_eq!(buffer.pop_ready().unwrap().sequence, 0);
         assert!(buffer.skip_missing_to(u16::MAX).is_err());
+    }
+
+    #[test]
+    fn raop_audio_coordinator_filters_peer_and_ssrc_before_ordered_delivery() {
+        let peer = "127.0.0.1".parse().unwrap();
+        let source = "127.0.0.1:5000".parse().unwrap();
+        let mut coordinator = RaopAudioCoordinator::new(peer, 7, 96, 4).unwrap();
+        assert_eq!(
+            coordinator.push(source, rtp_packet(10)).unwrap(),
+            RaopPacketResult::Buffered
+        );
+        assert_eq!(coordinator.pop_ready().unwrap().sequence, 10);
+        assert_eq!(
+            coordinator
+                .push("192.0.2.1:5000".parse().unwrap(), rtp_packet(11))
+                .unwrap(),
+            RaopPacketResult::RejectedPeer
+        );
+        assert_eq!(
+            coordinator
+                .push(
+                    source,
+                    RtpAudioPacket {
+                        ssrc: 8,
+                        sequence: 11,
+                        ..rtp_packet(11)
+                    },
+                )
+                .unwrap(),
+            RaopPacketResult::RejectedSsrc
+        );
+        coordinator.push(source, rtp_packet(13)).unwrap();
+        assert_eq!(coordinator.skip_missing_to(13).unwrap(), 2);
+        assert_eq!(coordinator.pop_ready().unwrap().sequence, 13);
+        assert_eq!(
+            coordinator.report(),
+            RaopAudioReport {
+                accepted_packets: 2,
+                rejected_peer: 1,
+                rejected_ssrc: 1,
+                delivered_packets: 2,
+                skipped_packets: 2,
+                dropped_late: 0,
+            }
+        );
+        coordinator.reset().unwrap();
+        assert_eq!(coordinator.report(), RaopAudioReport::default());
     }
 
     #[test]
