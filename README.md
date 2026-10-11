@@ -118,10 +118,11 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before starting. Repository-specific age
 
 Reviewed release tags publish a source archive, the verified Android release
 APK when the Android product is present, a deterministic SPDX 2.3 SBOM, and
-`SHA256SUMS` covering every published file. The SBOM describes the locked Rust
-workspace; platform SDKs, optional codecs, signatures, and provenance still
-require their own release review. Pre-alpha artifacts must not be treated as a
-Stable compatibility claim.
+`SHA256SUMS` covering every published file. The release workflow also emits
+GitHub OIDC build-provenance attestations for every file in `dist/`. The SBOM
+describes the locked Rust workspace; platform SDKs, optional codecs, and
+platform signing remain separate release-review concerns. Pre-alpha artifacts
+must not be treated as a Stable compatibility claim.
 
 ## Security and privacy / 安全与隐私
 
