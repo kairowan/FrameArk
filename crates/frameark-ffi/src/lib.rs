@@ -266,13 +266,21 @@ mod tests {
 
     use super::*;
 
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn ffi_uses_the_core_abi_version() {
+        let _guard = test_guard();
         assert_eq!(CORE_ABI_VERSION, 1);
     }
 
     #[test]
     fn lifecycle_state_is_bounded_and_idempotent() {
+        let _guard = test_guard();
         let state = receiver_state();
         let mut state = state.lock().unwrap();
         state.session = None;
@@ -288,6 +296,7 @@ mod tests {
 
     #[test]
     fn media_queue_applies_backpressure_and_preserves_envelope() {
+        let _guard = test_guard();
         let mut state = NativeReceiverState {
             session: Some(Session::new(
                 SessionId::try_from("media-session").unwrap(),
@@ -346,6 +355,7 @@ mod tests {
 
     #[test]
     fn jni_media_queue_sink_accepts_encoded_platform_samples() {
+        let _guard = test_guard();
         let state = receiver_state();
         state.lock().unwrap().session = Some(Session::new(
             SessionId::try_from("sink-session").unwrap(),
