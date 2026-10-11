@@ -30,4 +30,3 @@ and decide whether a keyframe or audio-clock reset is required.
 - Malformed or unsupported updates cannot partially replace the live setup.
 - This is a protocol boundary only; it does not claim Apple-device
   interoperability, encrypted media support, or seamless decoder recovery.
-
