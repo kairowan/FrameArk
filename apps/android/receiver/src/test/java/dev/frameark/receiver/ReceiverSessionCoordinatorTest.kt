@@ -46,6 +46,33 @@ class ReceiverSessionCoordinatorTest {
     }
 
     @Test
+    fun network_endpoint_failure_stops_native_before_playback() {
+        val calls = Calls()
+        val native = fakeNativeWithNetwork(
+            calls,
+            port = 0,
+            pairingCode = 123_456,
+            certificate = byteArrayOf(1),
+        )
+        val network = ReceiverNetworkCoordinator(native)
+        val coordinator = ReceiverSessionCoordinator(
+            native,
+            FakePlayback(calls, startResult = true),
+            network = network,
+        )
+
+        assertFalse(coordinator.start())
+        assertEquals(
+            ReceiverSessionCoordinator.State.Failed(
+                ReceiverSessionCoordinator.FailureReason.NETWORK_ENDPOINT_UNAVAILABLE,
+            ),
+            coordinator.state(),
+        )
+        assertEquals(ReceiverNetworkCoordinator.State.Stopped, network.state())
+        assertEquals(listOf("native-start", "native-stop"), calls.events)
+    }
+
+    @Test
     fun stopAndCloseAreIdempotentAndReleaseBothOwners() {
         val calls = Calls()
         val coordinator = ReceiverSessionCoordinator(
@@ -79,6 +106,22 @@ class ReceiverSessionCoordinatorTest {
         startProvider = { calls.events += "native-start"; 0 },
         stopProvider = { calls.events += "native-stop"; 0 },
         runningProvider = { 1 },
+    )
+
+    private fun fakeNativeWithNetwork(
+        calls: Calls,
+        port: Int,
+        pairingCode: Int,
+        certificate: ByteArray,
+    ): FrameArkNative = FrameArkNative(
+        libraryLoader = {},
+        versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+        startProvider = { calls.events += "native-start"; 0 },
+        stopProvider = { calls.events += "native-stop"; 0 },
+        runningProvider = { 1 },
+        networkPortProvider = { port },
+        networkPairingCodeProvider = { pairingCode },
+        networkCertificateProvider = { certificate },
     )
 
     private class FakePlayback(

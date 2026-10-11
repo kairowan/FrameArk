@@ -21,6 +21,7 @@ class FrameArkReceiverService : Service() {
     private lateinit var native: FrameArkNative
     private lateinit var playbackLoop: MediaPlaybackLoop
     private lateinit var coordinator: ReceiverSessionCoordinator
+    private lateinit var networkCoordinator: ReceiverNetworkCoordinator
     private lateinit var identityCoordinator: ReceiverIdentityCoordinator
     private var identityReady = false
 
@@ -34,7 +35,8 @@ class FrameArkReceiverService : Service() {
                 coordinator.onPlaybackFailure()
             },
         )
-        coordinator = ReceiverSessionCoordinator(native, playbackLoop)
+        networkCoordinator = ReceiverNetworkCoordinator(native)
+        coordinator = ReceiverSessionCoordinator(native, playbackLoop, network = networkCoordinator)
         identityCoordinator = ReceiverIdentityCoordinator {
             AndroidDeviceIdentityStore().getOrCreate()
         }
@@ -96,7 +98,7 @@ class FrameArkReceiverService : Service() {
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_frameark)
             .setContentTitle(getString(R.string.service_title))
-            .setContentText(getString(R.string.service_text))
+            .setContentText(notificationText())
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -108,6 +110,18 @@ class FrameArkReceiverService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun notificationText(): String = when (val state = networkCoordinator.state()) {
+        is ReceiverNetworkCoordinator.State.Ready -> getString(
+            R.string.service_text_pairing,
+            state.info.port,
+            state.info.pairingCode,
+        )
+
+        ReceiverNetworkCoordinator.State.Stopped,
+        is ReceiverNetworkCoordinator.State.Failed,
+        -> getString(R.string.service_text)
     }
 
     private fun createNotificationChannel() {
