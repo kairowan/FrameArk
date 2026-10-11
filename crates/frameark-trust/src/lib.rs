@@ -1,0 +1,295 @@
+//! Bounded device identity and trust policy for FrameArk pairing adapters.
+//!
+//! This crate stores only caller-supplied device identifiers, labels, and
+//! SHA-256 public-key fingerprints. It does not generate keys, perform
+//! signatures, persist records, or replace the platform secure keystore.
+
+use frameark_core::DeviceId;
+use std::collections::BTreeMap;
+use std::fmt::{Debug, Display, Formatter};
+
+/// Maximum trusted devices retained by one registry.
+pub const MAX_TRUSTED_DEVICES: usize = 128;
+/// Maximum UTF-8 bytes retained for a human-facing trusted-device label.
+pub const MAX_TRUST_LABEL_BYTES: usize = 128;
+/// Length of a lowercase colon-separated SHA-256 fingerprint.
+pub const SHA256_FINGERPRINT_BYTES: usize = 95;
+
+/// Errors returned when an identity or trust mutation violates policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TrustError {
+    /// The fingerprint is not a lowercase colon-separated SHA-256 value.
+    InvalidFingerprint,
+    /// The display label is empty, too large, or contains a control character.
+    InvalidLabel,
+    /// The registry has reached its explicit capacity.
+    Capacity,
+    /// A known device presented a different public-key fingerprint.
+    IdentityChanged,
+    /// A requested trust record does not exist.
+    UnknownDevice,
+}
+
+impl Display for TrustError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidFingerprint => "invalid SHA-256 fingerprint",
+            Self::InvalidLabel => "invalid trusted-device label",
+            Self::Capacity => "trusted-device capacity exhausted",
+            Self::IdentityChanged => "trusted-device identity changed",
+            Self::UnknownDevice => "trusted device is unknown",
+        })
+    }
+}
+
+impl std::error::Error for TrustError {}
+
+/// A normalized SHA-256 public-key fingerprint.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DeviceFingerprint(String);
+
+impl DeviceFingerprint {
+    /// Validates a lowercase `aa:bb:...` SHA-256 fingerprint.
+    pub fn new(value: impl Into<String>) -> Result<Self, TrustError> {
+        let value = value.into();
+        if value.len() != SHA256_FINGERPRINT_BYTES
+            || value.bytes().enumerate().any(|(index, byte)| {
+                if index % 3 == 2 {
+                    byte != b':'
+                } else {
+                    !matches!(byte, b'0'..=b'9' | b'a'..=b'f')
+                }
+            })
+        {
+            return Err(TrustError::InvalidFingerprint);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the normalized fingerprint text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Debug for DeviceFingerprint {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeviceFingerprint(<redacted>)")
+    }
+}
+
+impl Display for DeviceFingerprint {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One explicitly trusted device record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustedDevice {
+    /// Stable device identifier supplied by discovery or the platform.
+    pub device_id: DeviceId,
+    /// Public-key fingerprint supplied by the authenticated platform boundary.
+    pub fingerprint: DeviceFingerprint,
+    /// User-facing label with no control characters.
+    pub label: String,
+}
+
+/// Outcome of adding or refreshing a trust record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustMutation {
+    /// A new device was added.
+    Added,
+    /// The same identity was already trusted and its label was refreshed.
+    Refreshed,
+}
+
+/// In-memory bounded trust registry used by protocol and platform adapters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustRegistry {
+    capacity: usize,
+    records: BTreeMap<DeviceId, TrustedDevice>,
+}
+
+impl Default for TrustRegistry {
+    fn default() -> Self {
+        Self::with_default_capacity()
+    }
+}
+
+impl TrustRegistry {
+    /// Creates an empty registry with an explicit bounded capacity.
+    pub fn new(capacity: usize) -> Result<Self, TrustError> {
+        if capacity == 0 || capacity > MAX_TRUSTED_DEVICES {
+            return Err(TrustError::Capacity);
+        }
+        Ok(Self {
+            capacity,
+            records: BTreeMap::new(),
+        })
+    }
+
+    /// Creates an empty registry at the maximum supported capacity.
+    pub fn with_default_capacity() -> Self {
+        Self {
+            capacity: MAX_TRUSTED_DEVICES,
+            records: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the number of trusted devices.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Returns whether no trusted devices are present.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Looks up a trusted record without exposing mutable storage.
+    pub fn get(&self, device_id: &DeviceId) -> Option<&TrustedDevice> {
+        self.records.get(device_id)
+    }
+
+    /// Checks both the stable device identifier and the current key fingerprint.
+    pub fn is_trusted(&self, device_id: &DeviceId, fingerprint: &DeviceFingerprint) -> bool {
+        self.records
+            .get(device_id)
+            .is_some_and(|record| &record.fingerprint == fingerprint)
+    }
+
+    /// Adds a new record or refreshes the label for the same key identity.
+    ///
+    /// A changed fingerprint is rejected until the caller explicitly revokes
+    /// the old record, preventing silent key replacement during reconnect.
+    pub fn trust(
+        &mut self,
+        device_id: DeviceId,
+        fingerprint: DeviceFingerprint,
+        label: impl Into<String>,
+    ) -> Result<TrustMutation, TrustError> {
+        let label = validate_label(label.into())?;
+        if let Some(existing) = self.records.get_mut(&device_id) {
+            if existing.fingerprint != fingerprint {
+                return Err(TrustError::IdentityChanged);
+            }
+            existing.label = label;
+            return Ok(TrustMutation::Refreshed);
+        }
+        if self.records.len() >= self.capacity {
+            return Err(TrustError::Capacity);
+        }
+        self.records.insert(
+            device_id.clone(),
+            TrustedDevice {
+                device_id,
+                fingerprint,
+                label,
+            },
+        );
+        Ok(TrustMutation::Added)
+    }
+
+    /// Explicitly revokes one device record.
+    pub fn revoke(&mut self, device_id: &DeviceId) -> Result<TrustedDevice, TrustError> {
+        self.records
+            .remove(device_id)
+            .ok_or(TrustError::UnknownDevice)
+    }
+}
+
+fn validate_label(label: String) -> Result<String, TrustError> {
+    if label.trim().is_empty()
+        || label.len() > MAX_TRUST_LABEL_BYTES
+        || label.chars().any(char::is_control)
+    {
+        return Err(TrustError::InvalidLabel);
+    }
+    Ok(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FINGERPRINT: &str = "9f:64:a7:47:e1:b9:7f:13:1f:ab:b6:b4:47:29:6c:9b:6f:02:01:e7:9f:b3:c5:35:6e:6c:77:e8:9b:6a:80:6a";
+
+    fn device(value: &str) -> DeviceId {
+        DeviceId::try_from(value).unwrap()
+    }
+
+    #[test]
+    fn fingerprint_requires_lowercase_sha256_text() {
+        assert_eq!(
+            DeviceFingerprint::new(FINGERPRINT).unwrap().as_str(),
+            FINGERPRINT
+        );
+        assert_eq!(
+            DeviceFingerprint::new(FINGERPRINT.to_ascii_uppercase()),
+            Err(TrustError::InvalidFingerprint)
+        );
+        assert_eq!(
+            DeviceFingerprint::new("aa:bb"),
+            Err(TrustError::InvalidFingerprint)
+        );
+    }
+
+    #[test]
+    fn trust_refreshes_labels_but_rejects_silent_key_rotation() {
+        let mut registry = TrustRegistry::new(2).unwrap();
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        let id = device("phone-1");
+        assert_eq!(
+            registry
+                .trust(id.clone(), fingerprint.clone(), "Living room")
+                .unwrap(),
+            TrustMutation::Added
+        );
+        assert!(registry.is_trusted(&id, &fingerprint));
+        assert_eq!(
+            registry
+                .trust(id.clone(), fingerprint.clone(), "Phone")
+                .unwrap(),
+            TrustMutation::Refreshed
+        );
+        assert_eq!(registry.get(&id).unwrap().label, "Phone");
+        let changed = DeviceFingerprint::new(
+            "aa:64:a7:47:e1:b9:7f:13:1f:ab:b6:b4:47:29:6c:9b:6f:02:01:e7:9f:b3:c5:35:6e:6c:77:e8:9b:6a:80:6a",
+        )
+        .unwrap();
+        assert_eq!(
+            registry.trust(id, changed, "Rotated"),
+            Err(TrustError::IdentityChanged)
+        );
+    }
+
+    #[test]
+    fn revoke_is_explicit_and_capacity_is_bounded() {
+        let mut registry = TrustRegistry::new(1).unwrap();
+        let id = device("phone-1");
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        registry
+            .trust(id.clone(), fingerprint.clone(), "Phone")
+            .unwrap();
+        assert_eq!(
+            registry.trust(device("laptop-1"), fingerprint.clone(), "Laptop"),
+            Err(TrustError::Capacity)
+        );
+        assert_eq!(registry.revoke(&id).unwrap().device_id, id);
+        assert_eq!(registry.revoke(&id), Err(TrustError::UnknownDevice));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn labels_are_bounded_and_redacted_debug_does_not_expose_fingerprint() {
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        assert!(!format!("{fingerprint:?}").contains(FINGERPRINT));
+        let mut registry = TrustRegistry::with_default_capacity();
+        assert_eq!(
+            registry.trust(device("phone-1"), fingerprint, "\n"),
+            Err(TrustError::InvalidLabel)
+        );
+        assert_eq!(TrustRegistry::new(0), Err(TrustError::Capacity));
+    }
+}

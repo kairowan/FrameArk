@@ -20,6 +20,11 @@ All notable FrameArk changes will be documented in this file. The project follow
   regular file and streams bounded HTTP Range responses without retaining the
   full file in renderer memory; URL fetching remains disabled.
 
+- Added experimental `frameark-trust` bounded fingerprint registry with
+  explicit revocation, silent-key-change rejection, capacity limits, and
+  redacted diagnostics; persistent storage and cryptographic verification remain
+  platform responsibilities.
+
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary

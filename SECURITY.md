@@ -41,6 +41,14 @@ trust, protect a remembered identity, or expose an internet relay. Do not log,
 persist, or reuse pairing codes; report any certificate-verification,
 downgrade, replay, or code-disclosure issue privately.
 
+The experimental `frameark-trust` registry accepts only bounded lowercase
+SHA-256 public-key fingerprints, rejects silent key changes for a known device,
+and requires explicit revocation before replacement. It is in-memory and does
+not verify signatures or persist records; platform adapters must use secure
+storage, authenticated key exchange, and user approval before adding a record.
+Do not treat a fingerprint string supplied by an unauthenticated peer as proof
+of identity.
+
 Capability offers are exchanged only after the pinned TLS handshake. The
 current schema requires an exact version match and rejects unknown or duplicate
 entries before allocation; it does not silently downgrade or authorize media,
