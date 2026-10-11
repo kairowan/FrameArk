@@ -402,6 +402,95 @@ impl RtpAudioPacket {
     }
 }
 
+/// Bounded mirror-audio RTP adapter that combines sequence recovery with the
+/// validated AAC/PCM16 access-unit contract.
+///
+/// Network sockets, encryption, decoder selection, and clock feedback remain
+/// outside this crate. The caller pushes parsed RTP packets, calls
+/// [`Self::pop_ready`] in sequence order, and explicitly advances across a
+/// missing packet after its transport deadline.
+#[derive(Debug)]
+pub struct MirrorAudioPipeline {
+    format: MirrorAudioFormat,
+    payload_type: u8,
+    samples_per_packet: u32,
+    jitter: RtpJitterBuffer,
+}
+
+impl MirrorAudioPipeline {
+    /// Creates a pipeline for one negotiated mirror audio payload type.
+    pub fn new(
+        format: MirrorAudioFormat,
+        payload_type: u8,
+        samples_per_packet: u32,
+        capacity: usize,
+    ) -> Result<Self, AirplayError> {
+        if payload_type > 127 {
+            return Err(AirplayError::Invalid("mirror audio payload type"));
+        }
+        if samples_per_packet == 0 || samples_per_packet > MAX_MIRROR_AUDIO_DURATION_SAMPLES {
+            return Err(AirplayError::Invalid("mirror audio packet duration"));
+        }
+        Ok(Self {
+            format,
+            payload_type,
+            samples_per_packet,
+            jitter: RtpJitterBuffer::new(capacity)?,
+        })
+    }
+
+    /// Inserts a parsed RTP packet after validating the negotiated payload type.
+    pub fn push(&mut self, packet: RtpAudioPacket) -> Result<RtpPushResult, AirplayError> {
+        if packet.payload_type != self.payload_type {
+            return Err(AirplayError::Invalid("mirror audio payload type"));
+        }
+        if self.format.codec == MirrorAudioCodec::Pcm16
+            && !packet
+                .payload
+                .len()
+                .is_multiple_of(usize::from(self.format.channels) * 2)
+        {
+            return Err(AirplayError::Invalid("mirror PCM payload"));
+        }
+        self.jitter.push(packet)
+    }
+
+    /// Returns the next sequence-ordered access unit, if one is ready.
+    pub fn pop_ready(&mut self) -> Result<Option<MirrorAudioAccessUnit>, AirplayError> {
+        let Some(packet) = self.jitter.pop_ready() else {
+            return Ok(None);
+        };
+        let duration_samples = if self.format.codec == MirrorAudioCodec::Pcm16 {
+            u32::try_from(packet.payload.len() / (usize::from(self.format.channels) * 2))
+                .map_err(|_| AirplayError::Invalid("mirror audio packet duration"))?
+        } else {
+            self.samples_per_packet
+        };
+        MirrorAudioAccessUnit::new(
+            u64::from(packet.timestamp),
+            duration_samples,
+            self.format,
+            packet.payload,
+        )
+        .map(Some)
+    }
+
+    /// Advances over a missing sequence after the caller's loss deadline.
+    pub fn skip_missing_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
+        self.jitter.skip_missing_to(sequence)
+    }
+
+    /// Returns the number of packets waiting for ordered delivery.
+    pub fn buffered_len(&self) -> usize {
+        self.jitter.buffered_len()
+    }
+
+    /// Returns the number of packets dropped after arriving late.
+    pub fn dropped_late(&self) -> u64 {
+        self.jitter.dropped_late()
+    }
+}
+
 /// Codec names currently understood by the experimental RAOP boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RaopCodec {
@@ -2044,6 +2133,78 @@ mod tests {
         );
         assert_eq!(buffer.pop_ready().unwrap().sequence, 0);
         assert!(buffer.skip_missing_to(u16::MAX).is_err());
+    }
+
+    #[test]
+    fn mirror_audio_pipeline_reorders_rtp_and_builds_access_units() {
+        let format = MirrorAudioFormat::new(MirrorAudioCodec::Aac, 48_000, 2).unwrap();
+        let mut pipeline = MirrorAudioPipeline::new(format, 96, 1_024, 4).unwrap();
+        let packet = |sequence: u16, timestamp: u32, payload: u8| RtpAudioPacket {
+            marker: false,
+            payload_type: 96,
+            sequence,
+            timestamp,
+            ssrc: 7,
+            payload: vec![payload],
+        };
+        pipeline.push(packet(1, 0, 1)).unwrap();
+        pipeline.push(packet(3, 2_048, 3)).unwrap();
+        pipeline.push(packet(2, 1_024, 2)).unwrap();
+        let first = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(first.pts_samples, 0);
+        assert_eq!(first.duration_samples, 1_024);
+        assert_eq!(first.payload, vec![1]);
+        let second = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(second.pts_samples, 1_024);
+        assert_eq!(second.payload, vec![2]);
+        let third = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(third.pts_samples, 2_048);
+        assert_eq!(third.payload, vec![3]);
+        assert!(pipeline.pop_ready().unwrap().is_none());
+    }
+
+    #[test]
+    fn mirror_audio_pipeline_enforces_payload_and_loss_policy() {
+        let pcm = MirrorAudioFormat::new(MirrorAudioCodec::Pcm16, 48_000, 2).unwrap();
+        let mut pipeline = MirrorAudioPipeline::new(pcm, 97, 960, 2).unwrap();
+        let bad_payload = RtpAudioPacket {
+            marker: false,
+            payload_type: 97,
+            sequence: 4,
+            timestamp: 3_840,
+            ssrc: 7,
+            payload: vec![1],
+        };
+        assert_eq!(
+            pipeline.push(bad_payload),
+            Err(AirplayError::Invalid("mirror PCM payload"))
+        );
+        let wrong_type = RtpAudioPacket {
+            payload_type: 96,
+            payload: vec![0; 4],
+            ..rtp_packet(4)
+        };
+        assert_eq!(
+            pipeline.push(wrong_type),
+            Err(AirplayError::Invalid("mirror audio payload type"))
+        );
+        pipeline
+            .push(RtpAudioPacket {
+                payload_type: 97,
+                payload: vec![0; 4],
+                ..rtp_packet(10)
+            })
+            .unwrap();
+        pipeline
+            .push(RtpAudioPacket {
+                payload_type: 97,
+                payload: vec![0; 4],
+                ..rtp_packet(12)
+            })
+            .unwrap();
+        assert!(pipeline.pop_ready().unwrap().is_some());
+        assert_eq!(pipeline.skip_missing_to(12).unwrap(), 1);
+        assert!(pipeline.pop_ready().unwrap().is_some());
     }
 
     fn request(method: &str, cseq: u32, headers: &[(&str, &str)], body: &[u8]) -> RtspMessage {
