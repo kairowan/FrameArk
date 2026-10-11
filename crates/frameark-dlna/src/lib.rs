@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Maximum complete SSDP message accepted by the parser.
 pub const MAX_SSDP_BYTES: usize = 64 * 1024;
@@ -971,6 +971,7 @@ pub struct GenaSubscription {
     pub timeout_seconds: u32,
     /// Next event sequence number.
     pub next_sequence: u32,
+    expires_at: Instant,
 }
 
 /// One event notification that a caller-owned HTTP client can POST to a
@@ -1128,6 +1129,7 @@ impl GenaRegistry {
             service_type: service_type.to_string(),
             timeout_seconds,
             next_sequence: 0,
+            expires_at: Instant::now() + Duration::from_secs(timeout_seconds as u64),
         };
         self.subscriptions
             .insert(subscription.sid.clone(), subscription.clone());
@@ -1144,7 +1146,9 @@ impl GenaRegistry {
             .subscriptions
             .get_mut(sid)
             .ok_or(DlnaError::Invalid("GENA SID"))?;
-        subscription.timeout_seconds = parse_gena_timeout(timeout)?;
+        let timeout_seconds = parse_gena_timeout(timeout)?;
+        subscription.timeout_seconds = timeout_seconds;
+        subscription.expires_at = Instant::now() + Duration::from_secs(timeout_seconds as u64);
         Ok(subscription.clone())
     }
 
@@ -1163,6 +1167,7 @@ impl GenaRegistry {
         properties: &BTreeMap<String, String>,
     ) -> Result<Vec<GenaEvent>, DlnaError> {
         validate_service_type(service_type)?;
+        self.expire_at(Instant::now());
         let body = gena_property_set(properties)?;
         let mut events = Vec::new();
         for subscription in self.subscriptions.values_mut() {
@@ -1189,6 +1194,24 @@ impl GenaRegistry {
     /// Returns whether no active subscriptions are registered.
     pub fn is_empty(&self) -> bool {
         self.subscriptions.is_empty()
+    }
+
+    /// Removes subscriptions whose monotonic lease deadline has passed.
+    ///
+    /// The caller may invoke this from a daemon timer. `publish` also calls it
+    /// immediately before creating events, so expired callbacks never receive
+    /// a new notification even when the host does not run a dedicated timer.
+    pub fn expire(&mut self) -> usize {
+        self.expire_at(Instant::now())
+    }
+
+    /// Removes subscriptions expired at an explicit instant for deterministic
+    /// tests and platform schedulers.
+    pub fn expire_at(&mut self, now: Instant) -> usize {
+        let before = self.subscriptions.len();
+        self.subscriptions
+            .retain(|_, subscription| subscription.expires_at > now);
+        before.saturating_sub(self.subscriptions.len())
     }
 }
 
@@ -1465,6 +1488,7 @@ impl MediaRendererHttpService {
 
     /// Applies one parsed request and returns an HTTP response.
     pub fn handle(&mut self, request: &HttpRequest) -> HttpResponse {
+        self.gena.expire();
         let path = request.target.split('?').next().unwrap_or(&request.target);
         match request.method.as_str() {
             "GET" => self.handle_get(path, request),
@@ -2614,6 +2638,52 @@ mod tests {
                     Some("Second-0")
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn gena_registry_expires_leases_before_publishing() {
+        let mut registry = GenaRegistry::default();
+        let _subscription = registry
+            .subscribe(
+                AVTRANSPORT_SERVICE,
+                "http://127.0.0.1:9000/events",
+                Some("Second-60"),
+            )
+            .unwrap();
+        let now = Instant::now();
+        assert_eq!(registry.expire_at(now), 0);
+
+        let mut properties = BTreeMap::new();
+        properties.insert("TransportState".to_string(), "PLAYING".to_string());
+        assert_eq!(
+            registry
+                .publish(AVTRANSPORT_SERVICE, &properties)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert_eq!(registry.expire_at(now + Duration::from_secs(61)), 1);
+        assert_eq!(registry.len(), 0);
+        assert!(
+            registry
+                .publish(AVTRANSPORT_SERVICE, &properties)
+                .unwrap()
+                .is_empty()
+        );
+
+        let renewed = registry
+            .subscribe(
+                AVTRANSPORT_SERVICE,
+                "http://127.0.0.1:9000/events",
+                Some("Second-60"),
+            )
+            .unwrap();
+        registry.renew(&renewed.sid, Some("Second-120")).unwrap();
+        assert_eq!(
+            registry.expire_at(Instant::now() + Duration::from_secs(61)),
+            0
         );
     }
 
