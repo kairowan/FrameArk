@@ -14,7 +14,8 @@ receiver/device compatibility result.
 ```text
 cargo run -p framearkd -- --bind 127.0.0.1:4433 \
   --server-name localhost --pairing-code 123456 \
-  --certificate-out target/framearkd.der --once
+  --certificate-out target/framearkd.der \
+  --diagnostics-out target/framearkd.diagnostics.tsv --once
 ```
 
 The daemon prints the selected address, pairing code, and certificate byte
@@ -24,3 +25,7 @@ after the sender sends `Stop` or the bounded timeout expires.
 
 Use `--once` to exit after one pairing; without it, rejected pairing attempts
 are discarded and the listener continues accepting temporary sessions.
+
+The optional diagnostics path receives a bounded, tab-separated support summary
+of startup, pairing, and session outcomes. It contains no packets, credentials,
+URLs, device identifiers, or media; persistence is explicit and caller-owned.

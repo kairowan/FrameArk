@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use frameark_api::{AudioFrame, AudioRenderer, VideoFrame, VideoRenderer};
-use frameark_core::{AudioConfig, DeviceId, Session, SessionId, VideoConfig};
+use frameark_core::{
+    AudioConfig, DeviceId, DiagnosticEvent, EventLevel, Session, SessionId, VideoConfig,
+};
+use frameark_diagnostics::DiagnosticRecorder;
 use frameark_native::{
     MediaRendererFactory, NativeMediaControlReceiver, NativeMediaSessionReport, ReceiverPolicy,
     SessionOffer,
@@ -25,6 +28,7 @@ const DEFAULT_SERVER_NAME: &str = "frameark.local";
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_CERTIFICATE_BYTES: usize = 16 * 1024;
+const MAX_DIAGNOSTICS_BYTES: usize = 128 * 1024;
 
 #[derive(Debug)]
 struct DaemonError(String);
@@ -45,6 +49,7 @@ struct Options {
     timeout: Duration,
     once: bool,
     certificate_out: Option<String>,
+    diagnostics_out: Option<String>,
 }
 
 #[derive(Default)]
@@ -172,7 +177,8 @@ impl frameark_native::SessionBackend for CountingBackend {
 
 fn usage() -> &'static str {
     "usage: framearkd [--bind HOST:PORT] [--server-name NAME] \
-     [--pairing-code CODE] [--timeout-ms N] [--certificate-out PATH] [--once]"
+     [--pairing-code CODE] [--timeout-ms N] [--certificate-out PATH] \
+     [--diagnostics-out PATH] [--once]"
 }
 
 fn option_value(args: &[String], name: &str) -> std::result::Result<Option<String>, DaemonError> {
@@ -220,6 +226,7 @@ fn parse_options(args: &[String]) -> std::result::Result<Options, DaemonError> {
         timeout: Duration::from_millis(timeout_ms),
         once: args.iter().any(|value| value == "--once"),
         certificate_out: option_value(args, "--certificate-out")?,
+        diagnostics_out: option_value(args, "--diagnostics-out")?,
     })
 }
 
@@ -247,7 +254,31 @@ fn print_report(report: &NativeMediaSessionReport, counters: &Arc<Mutex<Counters
     );
 }
 
+fn write_diagnostics(
+    path: &str,
+    recorder: &DiagnosticRecorder,
+) -> std::result::Result<(), DaemonError> {
+    let output = recorder.render_text();
+    if output.len() > MAX_DIAGNOSTICS_BYTES {
+        return Err(DaemonError(
+            "diagnostics output exceeds its bound".to_string(),
+        ));
+    }
+    fs::write(path, output)
+        .map_err(|_| DaemonError("diagnostics output could not be written".to_string()))
+}
+
 async fn run(options: Options) -> std::result::Result<(), Box<dyn Error>> {
+    let mut diagnostics = DiagnosticRecorder::new(128)
+        .map_err(|_| DaemonError("diagnostics recorder could not start".to_string()))?;
+    diagnostics.record(
+        0,
+        &DiagnosticEvent::new(
+            EventLevel::Info,
+            "receiver.starting",
+            "reference receiver is starting",
+        ),
+    );
     let server = Arc::new(
         PairingServer::bind_with_capabilities(
             options.bind,
@@ -271,15 +302,49 @@ async fn run(options: Options) -> std::result::Result<(), Box<dyn Error>> {
         server.certificate_der().len(),
         options.once,
     );
+    diagnostics.record(
+        0,
+        &DiagnosticEvent::new(
+            EventLevel::Info,
+            "receiver.listening",
+            "FANP listener is ready",
+        ),
+    );
     loop {
         let transport = match server.accept_pairing(options.timeout).await {
             Ok(transport) => transport,
             Err(_) if !options.once => {
                 eprintln!("pairing-attempt-rejected");
+                diagnostics.record(
+                    0,
+                    &DiagnosticEvent::new(
+                        EventLevel::Warn,
+                        "receiver.pairing_rejected",
+                        "pairing attempt rejected",
+                    ),
+                );
                 continue;
             }
-            Err(_) => return Err(DaemonError("FANP pairing failed".to_string()).into()),
+            Err(_) => {
+                diagnostics.record(
+                    0,
+                    &DiagnosticEvent::new(
+                        EventLevel::Error,
+                        "receiver.pairing_failed",
+                        "pairing failed before a session started",
+                    ),
+                );
+                return Err(DaemonError("FANP pairing failed".to_string()).into());
+            }
         };
+        diagnostics.record(
+            0,
+            &DiagnosticEvent::new(
+                EventLevel::Info,
+                "session.paired",
+                "temporary pairing completed",
+            ),
+        );
         let counters = Arc::new(Mutex::new(Counters::default()));
         let receiver = NativeMediaControlReceiver::new(
             transport,
@@ -303,14 +368,37 @@ async fn run(options: Options) -> std::result::Result<(), Box<dyn Error>> {
         )
         .map_err(|_| DaemonError("FANP receiver policy was rejected".to_string()))?;
         match receiver.serve(options.timeout).await {
-            Ok(report) => print_report(&report, &counters),
-            Err(_) => eprintln!("session-failed; resources-released=true"),
+            Ok(report) => {
+                print_report(&report, &counters);
+                diagnostics.record(
+                    0,
+                    &DiagnosticEvent::new(
+                        EventLevel::Info,
+                        "session.completed",
+                        "reference session completed and resources were released",
+                    ),
+                );
+            }
+            Err(_) => {
+                eprintln!("session-failed; resources-released=true");
+                diagnostics.record(
+                    0,
+                    &DiagnosticEvent::new(
+                        EventLevel::Error,
+                        "session.failed",
+                        "reference session failed and resources were released",
+                    ),
+                );
+            }
         }
         if options.once {
             break;
         }
     }
     server.close();
+    if let Some(path) = options.diagnostics_out.as_deref() {
+        write_diagnostics(path, &diagnostics)?;
+    }
     Ok(())
 }
 
@@ -346,7 +434,13 @@ mod tests {
     #[test]
     fn usage_exposes_reference_receiver_controls() {
         let text = usage();
-        for option in ["--bind", "--server-name", "--pairing-code", "--once"] {
+        for option in [
+            "--bind",
+            "--server-name",
+            "--pairing-code",
+            "--diagnostics-out",
+            "--once",
+        ] {
             assert!(text.contains(option));
         }
     }
