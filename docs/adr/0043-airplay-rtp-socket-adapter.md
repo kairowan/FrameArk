@@ -33,4 +33,3 @@ placing the socket behind authorization and lifecycle timeouts.
 - The feature does not increase the compatibility claim: Apple pairing,
   FairPlay/AES-CTR, decoder integration, peer authorization, and device
   interoperability remain Experimental or unsupported.
-
