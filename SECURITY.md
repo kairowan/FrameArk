@@ -61,7 +61,10 @@ remote input, file transfer, or internet relay.
 The CLI management commands accept the certificate and pairing code only for
 one bounded invocation. They do not persist them, create a trust record, or
 reuse a connection across commands; operators must protect the command line,
-fixture paths, and certificate files supplied to the process.
+fixture paths, and certificate files supplied to the process. `framearkd` is a
+reference/fixture receiver with the same temporary pairing boundary; it does
+not add persistent authorization, decoder isolation, or a production access
+policy and must not be exposed as an internet service.
 
 Authenticated control streams enforce one bounded frame per stream and a total
 operation deadline. Cancellation closes the connection rather than reusing
