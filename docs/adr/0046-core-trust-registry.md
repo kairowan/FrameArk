@@ -20,6 +20,10 @@ bounded display label. A same-key reconnect refreshes the label; a different
 fingerprint is rejected until the caller explicitly revokes the record. The
 registry has a bounded capacity and emits no secret material in `Debug` output.
 
+The registry also exposes a deterministic bounded `FTR1` snapshot codec. The
+codec is a serialization contract only; it does not encrypt or authenticate a
+snapshot and must be wrapped by the platform's secure storage.
+
 The crate does not generate keys, verify signatures, persist records, or
 perform user-facing PIN/TV confirmation. Android, desktop, and future daemon
 adapters remain responsible for secure persistence, cryptographic verification,

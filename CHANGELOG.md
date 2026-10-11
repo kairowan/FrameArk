@@ -25,6 +25,10 @@ All notable FrameArk changes will be documented in this file. The project follow
   redacted diagnostics; persistent storage and cryptographic verification remain
   platform responsibilities.
 
+- Added deterministic, bounded `FTR1` trust snapshots for platform-owned
+  secure-storage adapters; snapshots contain no private key material and are
+  not encrypted or authenticated by the core.
+
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary

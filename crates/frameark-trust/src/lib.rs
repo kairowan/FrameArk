@@ -14,6 +14,9 @@ pub const MAX_TRUSTED_DEVICES: usize = 128;
 pub const MAX_TRUST_LABEL_BYTES: usize = 128;
 /// Length of a lowercase colon-separated SHA-256 fingerprint.
 pub const SHA256_FINGERPRINT_BYTES: usize = 95;
+/// Maximum serialized trust snapshot accepted by the bounded codec.
+pub const MAX_SERIALIZED_TRUST_BYTES: usize = 64 * 1024;
+const SERIALIZED_MAGIC: &[u8; 4] = b"FTR1";
 
 /// Errors returned when an identity or trust mutation violates policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +31,10 @@ pub enum TrustError {
     IdentityChanged,
     /// A requested trust record does not exist.
     UnknownDevice,
+    /// A serialized trust snapshot is malformed or has trailing bytes.
+    InvalidEncoding,
+    /// A serialized trust snapshot exceeds its explicit bound.
+    TooLarge,
 }
 
 impl Display for TrustError {
@@ -38,6 +45,8 @@ impl Display for TrustError {
             Self::Capacity => "trusted-device capacity exhausted",
             Self::IdentityChanged => "trusted-device identity changed",
             Self::UnknownDevice => "trusted device is unknown",
+            Self::InvalidEncoding => "invalid trust snapshot encoding",
+            Self::TooLarge => "trust snapshot exceeds its bound",
         })
     }
 }
@@ -197,6 +206,105 @@ impl TrustRegistry {
             .remove(device_id)
             .ok_or(TrustError::UnknownDevice)
     }
+
+    /// Encodes trusted records for a platform-owned secure storage adapter.
+    ///
+    /// The versioned `FTR1` snapshot contains no private key material. Records
+    /// are sorted by `DeviceId` for deterministic output and the result is
+    /// rejected if it exceeds the bounded snapshot size.
+    pub fn encode(&self) -> Result<Vec<u8>, TrustError> {
+        let count = u16::try_from(self.records.len()).map_err(|_| TrustError::TooLarge)?;
+        let capacity = u16::try_from(self.capacity).map_err(|_| TrustError::TooLarge)?;
+        let mut output = Vec::with_capacity(8 + self.records.len() * 128);
+        output.extend_from_slice(SERIALIZED_MAGIC);
+        output.extend_from_slice(&count.to_be_bytes());
+        output.extend_from_slice(&capacity.to_be_bytes());
+        for record in self.records.values() {
+            write_field(&mut output, record.device_id.as_str().as_bytes())?;
+            output.extend_from_slice(record.fingerprint.as_str().as_bytes());
+            write_field(&mut output, record.label.as_bytes())?;
+        }
+        if output.len() > MAX_SERIALIZED_TRUST_BYTES {
+            return Err(TrustError::TooLarge);
+        }
+        Ok(output)
+    }
+
+    /// Decodes a bounded `FTR1` snapshot produced by [`Self::encode`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, TrustError> {
+        if bytes.len() > MAX_SERIALIZED_TRUST_BYTES {
+            return Err(TrustError::TooLarge);
+        }
+        if bytes.len() < SERIALIZED_MAGIC.len() + 4
+            || &bytes[..SERIALIZED_MAGIC.len()] != SERIALIZED_MAGIC
+        {
+            return Err(TrustError::InvalidEncoding);
+        }
+        let mut cursor = SERIALIZED_MAGIC.len();
+        let count = read_u16(bytes, &mut cursor)? as usize;
+        let capacity = usize::from(read_u16(bytes, &mut cursor)?);
+        if capacity == 0 || capacity > MAX_TRUSTED_DEVICES || count > capacity {
+            return Err(TrustError::InvalidEncoding);
+        }
+        if count > MAX_TRUSTED_DEVICES {
+            return Err(TrustError::TooLarge);
+        }
+        let mut registry = Self::new(capacity)?;
+        for _ in 0..count {
+            let device_id = DeviceId::try_from(read_text(bytes, &mut cursor)?)
+                .map_err(|_| TrustError::InvalidEncoding)?;
+            let fingerprint = DeviceFingerprint::new(read_exact_text(
+                bytes,
+                &mut cursor,
+                SHA256_FINGERPRINT_BYTES,
+            )?)?;
+            let label = read_text(bytes, &mut cursor)?;
+            if registry.records.contains_key(&device_id) {
+                return Err(TrustError::InvalidEncoding);
+            }
+            registry.trust(device_id, fingerprint, label)?;
+        }
+        if cursor != bytes.len() {
+            return Err(TrustError::InvalidEncoding);
+        }
+        Ok(registry)
+    }
+}
+
+fn write_field(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), TrustError> {
+    let length = u16::try_from(bytes.len()).map_err(|_| TrustError::TooLarge)?;
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(bytes);
+    if output.len() > MAX_SERIALIZED_TRUST_BYTES {
+        return Err(TrustError::TooLarge);
+    }
+    Ok(())
+}
+
+fn read_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, TrustError> {
+    let end = cursor.checked_add(2).ok_or(TrustError::InvalidEncoding)?;
+    let value = bytes.get(*cursor..end).ok_or(TrustError::InvalidEncoding)?;
+    *cursor = end;
+    Ok(u16::from_be_bytes([value[0], value[1]]))
+}
+
+fn read_text(bytes: &[u8], cursor: &mut usize) -> Result<String, TrustError> {
+    let length = usize::from(read_u16(bytes, cursor)?);
+    let end = cursor
+        .checked_add(length)
+        .ok_or(TrustError::InvalidEncoding)?;
+    let value = bytes.get(*cursor..end).ok_or(TrustError::InvalidEncoding)?;
+    *cursor = end;
+    String::from_utf8(value.to_vec()).map_err(|_| TrustError::InvalidEncoding)
+}
+
+fn read_exact_text(bytes: &[u8], cursor: &mut usize, length: usize) -> Result<String, TrustError> {
+    let end = cursor
+        .checked_add(length)
+        .ok_or(TrustError::InvalidEncoding)?;
+    let value = bytes.get(*cursor..end).ok_or(TrustError::InvalidEncoding)?;
+    *cursor = end;
+    String::from_utf8(value.to_vec()).map_err(|_| TrustError::InvalidEncoding)
 }
 
 fn validate_label(label: String) -> Result<String, TrustError> {
@@ -291,5 +399,50 @@ mod tests {
             Err(TrustError::InvalidLabel)
         );
         assert_eq!(TrustRegistry::new(0), Err(TrustError::Capacity));
+    }
+
+    #[test]
+    fn trust_snapshots_round_trip_deterministically() {
+        let mut registry = TrustRegistry::new(2).unwrap();
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        registry
+            .trust(device("phone-2"), fingerprint.clone(), "Phone")
+            .unwrap();
+        registry
+            .trust(device("phone-1"), fingerprint, "Tablet")
+            .unwrap();
+        let encoded = registry.encode().unwrap();
+        assert_eq!(&encoded[..4], b"FTR1");
+        assert_eq!(TrustRegistry::decode(&encoded).unwrap(), registry);
+        assert_eq!(
+            TrustRegistry::decode(&encoded).unwrap().encode().unwrap(),
+            encoded
+        );
+    }
+
+    #[test]
+    fn trust_snapshot_rejects_truncation_duplicates_and_trailing_bytes() {
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        let mut registry = TrustRegistry::default();
+        registry
+            .trust(device("phone-1"), fingerprint, "Phone")
+            .unwrap();
+        let encoded = registry.encode().unwrap();
+        assert_eq!(
+            TrustRegistry::decode(&encoded[..encoded.len() - 1]),
+            Err(TrustError::InvalidEncoding)
+        );
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            TrustRegistry::decode(&trailing),
+            Err(TrustError::InvalidEncoding)
+        );
+        let mut bad_magic = encoded;
+        bad_magic[0] = b'X';
+        assert_eq!(
+            TrustRegistry::decode(&bad_magic),
+            Err(TrustError::InvalidEncoding)
+        );
     }
 }
