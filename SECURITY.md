@@ -171,8 +171,9 @@ binary plists or a FairPlay key container; callers must keep pairing secrets out
 of diagnostics and only pass authenticated metadata into future crypto code.
 
 The mirror video contract caps access units and NAL counts, rejects forbidden
-H.264 headers, malformed length prefixes, unsupported orientation values, and
-unbounded A/V offsets before platform allocation. It does not authenticate,
+H.264/H.265 headers, malformed length prefixes, unsupported orientation values,
+and unbounded A/V offsets before platform allocation. Its H.265 RTP support is
+only a bounded single-NAL/AP/FU assembly boundary. It does not authenticate,
 decrypt, decode, or render incoming video; those network and platform layers
 must remain behind the receiver's authorization boundary.
 

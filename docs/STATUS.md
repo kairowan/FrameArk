@@ -12,7 +12,7 @@ Current compatibility labels remain in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 | M2 Android Receiver MVP | Foreground service, pairing display, multicast-lock lifecycle, Keystore identity gate, alias/fingerprint JNI identity bridge, JNI queue/package gate, Kotlin bounded config dispatch, explicit recovery seam, ConnectivityManager observer with coalesced recovery dispatch | Android settings/trust UI, Android/Desktop sender, physical 1080p60 one-hour stability and short-disconnect evidence | Partial |
 | M3 DLNA/media push | SSDP, bounded HTTP/SOAP, AVTransport/RenderingControl/ConnectionManager, GENA leases/NOTIFY, DIDL-Lite, Range/file resources, URI authority validation | Named Android/iOS/desktop controller matrix, two-hour Seek run, DNS-aware URL policy, HTTPS/TLS callback and format probing | Partial |
 | M4 RAOP/AirPlay media | Bounded RTSP/RTP, RAOP audio/session contracts, plist/SDP, jitter/loss policy, controls/metadata, HLS playlist safety boundary | Apple pairing/verification, encrypted/FairPlay media, decoder/output, long-run sync/reconnect and named Apple matrix | Partial |
-| M5 AirPlay screen mirror | Mirror RTSP lifecycle, UDP/RTP filtering, H.264 assembly, AAC/PCM audio, orientation, 90 kHz clock, loss/reconfiguration tests, explicit H.265 rejection | H.265 assembly, Apple pairing/encryption, decoder/output, iPhone/iPad/Mac Beta matrix and DRM/AWDL messaging | Partial |
+| M5 AirPlay screen mirror | Mirror RTSP lifecycle, UDP/RTP filtering, H.264 and conditional H.265 single-NAL/AP/FU assembly, AAC/PCM audio, orientation, 90 kHz clock, loss/reconfiguration tests | Apple pairing/encryption, decoder/output, iPhone/iPad/Mac Beta matrix and DRM/AWDL messaging | Partial |
 
 ## Current interpretation
 
