@@ -13,6 +13,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   coverage; malformed datagrams and OS errors remain explicit and no peer or
   authentication policy is implied.
 
+- Added atomic AirPlay mirror SETUP reconfiguration while Streaming; invalid
+  updates leave the active transport and video configuration unchanged.
+
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary
