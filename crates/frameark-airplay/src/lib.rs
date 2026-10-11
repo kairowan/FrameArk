@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 
 /// Maximum RTSP message size accepted before parsing.
 pub const MAX_RTSP_BYTES: usize = 64 * 1024;
@@ -1204,6 +1204,168 @@ impl MirrorVideoPipeline {
         }
         push_h264_nal(&mut assembly.nal_units, bytes)?;
         assembly.bytes = new_len;
+        Ok(())
+    }
+}
+
+/// Redaction-safe packet/output counters for one mirror media coordinator.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MirrorMediaReport {
+    /// RTP video packets accepted by the video pipeline.
+    pub video_packets: u64,
+    /// Completed video access units emitted by the coordinator.
+    pub video_units: u64,
+    /// RTP audio packets accepted by the audio pipeline.
+    pub audio_packets: u64,
+    /// Completed audio access units emitted by the coordinator.
+    pub audio_units: u64,
+}
+
+/// Bounded mirror media boundary joining peer/SSRC policy to both RTP pipelines.
+///
+/// The coordinator consumes packets parsed by [`RtpReceiverSocket`], checks
+/// the negotiated sender IP and per-track SSRC before touching jitter state,
+/// and exposes explicit loss recovery and reset operations. It does not own
+/// UDP sockets, authenticate Apple pairing, decrypt media, decode codecs, or
+/// conceal packet loss.
+#[derive(Debug)]
+pub struct MirrorMediaCoordinator {
+    peer_ip: IpAddr,
+    video_ssrc: u32,
+    audio_ssrc: u32,
+    video_payload_type: u8,
+    video_capacity: usize,
+    audio_format: MirrorAudioFormat,
+    audio_payload_type: u8,
+    audio_samples_per_packet: u32,
+    audio_capacity: usize,
+    orientation: MirrorOrientation,
+    video: MirrorVideoPipeline,
+    audio: MirrorAudioPipeline,
+    report: MirrorMediaReport,
+}
+
+impl MirrorMediaCoordinator {
+    /// Creates one coordinator from RTSP-negotiated track and peer bounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        peer_ip: IpAddr,
+        video_ssrc: u32,
+        audio_ssrc: u32,
+        orientation: MirrorOrientation,
+        video_payload_type: u8,
+        video_capacity: usize,
+        audio_format: MirrorAudioFormat,
+        audio_payload_type: u8,
+        audio_samples_per_packet: u32,
+        audio_capacity: usize,
+    ) -> Result<Self, AirplayError> {
+        let video = MirrorVideoPipeline::new(orientation, video_payload_type, video_capacity)?;
+        let audio = MirrorAudioPipeline::new(
+            audio_format,
+            audio_payload_type,
+            audio_samples_per_packet,
+            audio_capacity,
+        )?;
+        Ok(Self {
+            peer_ip,
+            video_ssrc,
+            audio_ssrc,
+            video_payload_type,
+            video_capacity,
+            audio_format,
+            audio_payload_type,
+            audio_samples_per_packet,
+            audio_capacity,
+            orientation,
+            video,
+            audio,
+            report: MirrorMediaReport::default(),
+        })
+    }
+
+    /// Returns counters without exposing peer addresses or payload bytes.
+    pub fn report(&self) -> MirrorMediaReport {
+        self.report
+    }
+
+    /// Applies a validated orientation to future completed video units.
+    pub fn set_orientation(&mut self, orientation: MirrorOrientation) {
+        self.orientation = orientation;
+        self.video.set_orientation(orientation);
+    }
+
+    /// Pushes one video RTP packet after peer and SSRC filtering.
+    pub fn push_video(
+        &mut self,
+        packet: RtpVideoPacket,
+        source: SocketAddr,
+    ) -> Result<Option<MirrorVideoAccessUnit>, AirplayError> {
+        self.validate_source(source, packet.ssrc, self.video_ssrc)?;
+        self.video.push(packet)?;
+        self.report.video_packets = self.report.video_packets.saturating_add(1);
+        let unit = self.video.pop_ready()?;
+        if unit.is_some() {
+            self.report.video_units = self.report.video_units.saturating_add(1);
+        }
+        Ok(unit)
+    }
+
+    /// Pushes one audio RTP packet after peer and SSRC filtering.
+    pub fn push_audio(
+        &mut self,
+        packet: RtpAudioPacket,
+        source: SocketAddr,
+    ) -> Result<Option<MirrorAudioAccessUnit>, AirplayError> {
+        self.validate_source(source, packet.ssrc, self.audio_ssrc)?;
+        self.audio.push(packet)?;
+        self.report.audio_packets = self.report.audio_packets.saturating_add(1);
+        let unit = self.audio.pop_ready()?;
+        if unit.is_some() {
+            self.report.audio_units = self.report.audio_units.saturating_add(1);
+        }
+        Ok(unit)
+    }
+
+    /// Declares a video sequence gap after its bounded receive deadline.
+    pub fn skip_video_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
+        self.video.skip_missing_to(sequence)
+    }
+
+    /// Declares an audio sequence gap after its bounded receive deadline.
+    pub fn skip_audio_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
+        self.audio.skip_missing_to(sequence)
+    }
+
+    /// Clears jitter/assembly state while retaining the negotiated bounds.
+    pub fn reset(&mut self) -> Result<(), AirplayError> {
+        self.video = MirrorVideoPipeline::new(
+            self.orientation,
+            self.video_payload_type,
+            self.video_capacity,
+        )?;
+        self.audio = MirrorAudioPipeline::new(
+            self.audio_format,
+            self.audio_payload_type,
+            self.audio_samples_per_packet,
+            self.audio_capacity,
+        )?;
+        self.report = MirrorMediaReport::default();
+        Ok(())
+    }
+
+    fn validate_source(
+        &self,
+        source: SocketAddr,
+        packet_ssrc: u32,
+        expected_ssrc: u32,
+    ) -> Result<(), AirplayError> {
+        if source.ip() != self.peer_ip {
+            return Err(AirplayError::Invalid("mirror RTP peer"));
+        }
+        if expected_ssrc == 0 || packet_ssrc != expected_ssrc {
+            return Err(AirplayError::Invalid("mirror RTP SSRC"));
+        }
         Ok(())
     }
 }
@@ -3078,5 +3240,85 @@ mod tests {
         );
         assert!(MirrorSession::new("", 7010).is_err());
         assert!(MirrorSession::new("mirror-session", 0).is_err());
+    }
+
+    #[test]
+    fn mirror_media_coordinator_filters_peer_tracks_and_resets_bounded_state() {
+        let format = MirrorAudioFormat::new(MirrorAudioCodec::Pcm16, 48_000, 2).unwrap();
+        let mut coordinator = MirrorMediaCoordinator::new(
+            "127.0.0.1".parse().unwrap(),
+            11,
+            22,
+            MirrorOrientation::Deg0,
+            98,
+            4,
+            format,
+            96,
+            1,
+            4,
+        )
+        .unwrap();
+        let source = "127.0.0.1:5000".parse().unwrap();
+        let video = RtpVideoPacket {
+            marker: true,
+            payload_type: 98,
+            sequence: 1,
+            timestamp: 90_000,
+            ssrc: 11,
+            payload: vec![0x65, 1, 2],
+        };
+        let audio = RtpAudioPacket {
+            marker: false,
+            payload_type: 96,
+            sequence: 1,
+            timestamp: 0,
+            ssrc: 22,
+            payload: vec![0, 1, 2, 3],
+        };
+        assert!(
+            coordinator
+                .push_video(video.clone(), source)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            coordinator
+                .push_audio(audio.clone(), source)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            coordinator.report(),
+            MirrorMediaReport {
+                video_packets: 1,
+                video_units: 1,
+                audio_packets: 1,
+                audio_units: 1,
+            }
+        );
+        assert_eq!(
+            coordinator.push_video(
+                RtpVideoPacket {
+                    ssrc: 99,
+                    sequence: 2,
+                    ..video
+                },
+                source,
+            ),
+            Err(AirplayError::Invalid("mirror RTP SSRC"))
+        );
+        assert_eq!(
+            coordinator.push_audio(
+                RtpAudioPacket {
+                    sequence: 2,
+                    ..audio
+                },
+                "192.0.2.1:5000".parse().unwrap(),
+            ),
+            Err(AirplayError::Invalid("mirror RTP peer"))
+        );
+        coordinator.set_orientation(MirrorOrientation::Deg90);
+        coordinator.reset().unwrap();
+        assert_eq!(coordinator.report(), MirrorMediaReport::default());
     }
 }

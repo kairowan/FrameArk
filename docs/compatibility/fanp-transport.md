@@ -82,6 +82,7 @@ RTP audio packet contracts, XML Property List metadata, plus an explicit ANNOUNC
 OPTIONS/ANNOUNCE/SETUP/RECORD/FLUSH/TEARDOWN RAOP session state machine. It
 also validates bounded H.264 mirror access units, orientation, and a 90 kHz
 clock policy.
-It does not implement Apple pairing, binary plist/FairPlay/AES-CTR decryption,
-audio decoding, timing/retransmission, or Apple-device
-compatibility.
+It does not implement Apple pairing, FairPlay/AES-CTR decryption, audio/video
+decoding, timing/retransmission, or Apple-device compatibility. The mirror
+media coordinator filters the negotiated peer IP/SSRC and resets its bounded
+pipelines, but socket ownership and RTSP authorization remain with the caller.
