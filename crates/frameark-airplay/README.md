@@ -37,7 +37,11 @@ AirPlay/RAOP interoperability.
   ALAC/AAC remain decoder-owned and unsupported here.
 - bounded HLS media-playlist parsing with target/sequence/end-list state,
   segment duration limits, and relative/HTTP(S) URI traversal/credential
-  checks; fetching, caching, and decoding remain caller-owned.
+  checks;
+- a caller-owned HTTP/HTTPS HLS playlist connector boundary with bounded
+  response headers/body, content-length checks, MIME validation, and explicit
+  no-redirect behavior; DNS, TLS, redirects, caching, and decoding remain
+  caller-owned.
 
 The RTSP session does not own a TCP socket, and the RTP socket adapter does not
 join multicast groups or enforce the negotiated peer, SSRC, payload type, or
