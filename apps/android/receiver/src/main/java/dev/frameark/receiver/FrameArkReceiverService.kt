@@ -6,9 +6,13 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 
 /**
@@ -23,6 +27,9 @@ class FrameArkReceiverService : Service() {
     private lateinit var playbackLoop: MediaPlaybackLoop
     private lateinit var coordinator: ReceiverSessionCoordinator
     private lateinit var networkCoordinator: ReceiverNetworkCoordinator
+    private lateinit var networkObserver: ReceiverNetworkObserver
+    private var connectivityNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var multicastLockCoordinator: ReceiverMulticastLockCoordinator
     private var multicastLock: WifiManager.MulticastLock? = null
     private lateinit var identityCoordinator: ReceiverIdentityCoordinator
@@ -45,6 +52,42 @@ class FrameArkReceiverService : Service() {
             },
         )
         networkCoordinator = ReceiverNetworkCoordinator(native)
+        val connectivityManager = getSystemService(ConnectivityManager::class.java)
+        networkObserver = ReceiverNetworkObserver(
+            register = { listener ->
+                val manager = connectivityManager ?: error("connectivity service is unavailable")
+                val callback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) = listener.onAvailable()
+
+                    override fun onLost(network: Network) = listener.onLost()
+
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        networkCapabilities: android.net.NetworkCapabilities,
+                    ) = listener.onCapabilitiesChanged()
+
+                    override fun onLinkPropertiesChanged(
+                        network: Network,
+                        linkProperties: android.net.LinkProperties,
+                    ) = listener.onLinkPropertiesChanged()
+                }
+                connectivityNetworkCallback = callback
+                manager.registerDefaultNetworkCallback(callback)
+            },
+            unregister = { _ ->
+                connectivityNetworkCallback?.let { callback ->
+                    connectivityManager?.unregisterNetworkCallback(callback)
+                    connectivityNetworkCallback = null
+                }
+            },
+            onNetworkChanged = {
+                mainHandler.post {
+                    val recovered = if (::coordinator.isInitialized) coordinator.recover() else false
+                    if (!recovered) Log.d(TAG, "network change observed outside running session")
+                    if (::networkObserver.isInitialized) networkObserver.markRecoveryComplete()
+                }
+            },
+        )
         val wifiManager = getSystemService(WifiManager::class.java)
         multicastLockCoordinator = ReceiverMulticastLockCoordinator(
             acquireLock = {
@@ -87,6 +130,7 @@ class FrameArkReceiverService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = ReceiverServicePolicy.normalize(intent?.action)
         if (ReceiverServicePolicy.isStop(action)) {
+            networkObserver.stop()
             coordinator.stop()
             multicastLockCoordinator.release()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -103,11 +147,16 @@ class FrameArkReceiverService : Service() {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
+        if (!networkObserver.start()) {
+            Log.w(TAG, "network observer unavailable; automatic recovery is disabled")
+        }
         startAsForeground()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        networkObserver.close()
+        mainHandler.removeCallbacksAndMessages(null)
         coordinator.close()
         multicastLockCoordinator.close()
         super.onDestroy()
