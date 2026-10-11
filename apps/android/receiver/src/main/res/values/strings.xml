@@ -5,6 +5,12 @@
     <string name="receiver_start">Start receiver service</string>
     <string name="receiver_stop">Stop receiver service</string>
     <string name="receiver_refresh">Refresh pairing info</string>
+    <string name="pairing_require_approval">Require approval for next pairing</string>
+    <string name="pairing_approve_next">Approve next pairing</string>
+    <string name="pairing_warning">Optional post-PIN confirmation only. This does not prove sender identity; approve only when an authenticated pairing flow identifies the peer.</string>
+    <string name="pairing_approval_required">Next pairing now requires manual approval</string>
+    <string name="pairing_approval_armed">One pairing approval armed</string>
+    <string name="pairing_approval_rejected">Pairing approval change rejected or receiver is not running</string>
     <string name="service_channel">FrameArk playback</string>
     <string name="service_title">FrameArk Receiver</string>
     <string name="service_text">Ready for a local-network media session</string>

@@ -29,6 +29,8 @@ class FrameArkNative(
     peerTrustedProvider: ((String, String) -> Int)? = null,
     trustSnapshotExportProvider: (() -> ByteArray?)? = null,
     trustSnapshotImportProvider: ((ByteArray) -> Int)? = null,
+    pairingApprovalRequiredProvider: ((Boolean) -> Int)? = null,
+    pairingApprovalProvider: (() -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
@@ -73,6 +75,10 @@ class FrameArkNative(
         trustSnapshotExportProvider ?: { nativeExportTrustSnapshot() }
     private val bridgeTrustSnapshotImportProvider: (ByteArray) -> Int =
         trustSnapshotImportProvider ?: { snapshot -> nativeImportTrustSnapshot(snapshot) }
+    private val bridgePairingApprovalRequiredProvider: (Boolean) -> Int =
+        pairingApprovalRequiredProvider ?: { required -> nativeSetPairingApprovalRequired(required) }
+    private val bridgePairingApprovalProvider: () -> Int =
+        pairingApprovalProvider ?: { nativeApproveNextPairing() }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -255,6 +261,19 @@ class FrameArkNative(
         return bridgeTrustSnapshotImportProvider(snapshot) == 0
     }
 
+    /** Enables or disables the optional one-shot post-PIN approval gate. */
+    fun setPairingApprovalRequired(required: Boolean): Boolean {
+        when (load()) {
+            is LoadResult.Loaded -> Unit
+            else -> return false
+        }
+        return bridgePairingApprovalRequiredProvider(required) == 0
+    }
+
+    /** Arms exactly one upcoming pairing when the optional gate is enabled. */
+    fun approveNextPairing(): Boolean =
+        isLoaded() && bridgePairingApprovalProvider() == 0
+
     /** Starts the Rust-owned lifecycle after verifying the ABI. */
     fun startReceiver(): ReceiverResult {
         when (val result = load()) {
@@ -421,6 +440,10 @@ class FrameArkNative(
     private external fun nativeExportTrustSnapshot(): ByteArray?
 
     private external fun nativeImportTrustSnapshot(snapshot: ByteArray): Int
+
+    private external fun nativeSetPairingApprovalRequired(required: Boolean): Int
+
+    private external fun nativeApproveNextPairing(): Int
 
     private external fun nativeStartReceiver(): Int
 
