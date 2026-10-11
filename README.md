@@ -79,7 +79,8 @@ JNI. FANP can also forward received encoded access units through
 `MediaPlaybackPump` provides a bounded poll/dispatch loop while platform
 consumers own the subsequent codec and render APIs. Neither component grants persistent
 trust, ships a real codec, or claims Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
-caller-owned HTTP/SOAP renderer contracts. GENA events can now be delivered by
+caller-owned HTTP/SOAP renderer contracts and one-shot IPv4 SSDP multicast
+announcements. GENA events can now be delivered by
 an explicitly plain-HTTP, bounded callback client; HTTPS/TLS, lease expiry,
 streaming media serving, and named-client interoperability remain future work.
 

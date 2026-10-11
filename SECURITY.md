@@ -67,6 +67,9 @@ multi-client scheduling. The GENA registry caps subscriptions, leases,
 callback schemes, XML property names/values, and pending events but does not
 own lease expiry or callback sockets; a daemon must add authorization policy,
 expiry, and event-queue limits at its socket boundary.
+The SSDP multicast helper sends only the bounded standard IPv4 announcement to
+the caller's selected UDP socket; it does not join interfaces, schedule bursts,
+authenticate discovery peers, or expose a trust boundary.
 `GenaEvent::encode_http_notify` validates the callback authority and target and
 caps the generated request. `GenaCallbackClient` adds bounded plain-HTTP
 connect/read/write timeouts and exact-length response parsing, rejects HTTPS

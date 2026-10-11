@@ -447,6 +447,20 @@ impl SsdpPublisher {
             .map_err(|error| DlnaError::Io(error.kind()))
     }
 
+    /// Sends one bounded announcement to the standard IPv4 SSDP multicast group.
+    ///
+    /// The method is intentionally one-shot. A daemon owns the advertisement
+    /// interval, interface selection, startup burst, and shutdown sequencing.
+    pub fn notify_multicast(&self, alive: bool) -> Result<usize, DlnaError> {
+        let target = SSDP_MULTICAST_ADDR
+            .parse::<SocketAddr>()
+            .map_err(|_| DlnaError::Invalid("SSDP multicast address"))?;
+        self.socket
+            .set_multicast_ttl_v4(2)
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        self.notify(target, alive)
+    }
+
     /// Responds to a valid M-SEARCH request when its ST matches this service.
     /// Returns `Ok(None)` for a valid but unrelated search target.
     pub fn respond_to_search(
@@ -2301,6 +2315,14 @@ mod tests {
         assert_eq!(sent, received);
         let message = SsdpMessage::parse(&buffer[..received]).unwrap();
         assert_eq!(message.headers.get("nts"), Some(&"ssdp:alive".to_string()));
+    }
+
+    #[test]
+    fn multicast_notify_emits_alive_and_byebye_packets() {
+        let publisher =
+            SsdpPublisher::bind("127.0.0.1:0".parse().unwrap(), advertisement()).unwrap();
+        assert!(publisher.notify_multicast(true).unwrap() > 0);
+        assert!(publisher.notify_multicast(false).unwrap() > 0);
     }
 
     #[test]
