@@ -31,6 +31,9 @@ AirPlay/RAOP interoperability.
   session state machine with caller-owned UDP ports.
 - bounded RAOP `SET_PARAMETER`/`GET_PARAMETER` text controls for volume,
   sample progress, and a small title/artist/album/genre/composer metadata set.
+- bounded ordered RAOP PCM16 conversion from network-byte-order RTP samples to
+  little-endian platform buffers, with negotiated payload/codec/channel checks;
+  ALAC/AAC remain decoder-owned and unsupported here.
 - bounded HLS media-playlist parsing with target/sequence/end-list state,
   segment duration limits, and relative/HTTP(S) URI traversal/credential
   checks; fetching, caching, and decoding remain caller-owned.

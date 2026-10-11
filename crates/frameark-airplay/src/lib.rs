@@ -452,6 +452,17 @@ impl RaopAudioCoordinator {
         Some(packet)
     }
 
+    /// Returns the next ordered PCM16 unit after bounded endian conversion.
+    pub fn pop_pcm16(
+        &mut self,
+        format: &RaopAudioFormat,
+    ) -> Result<Option<RaopPcm16AccessUnit>, AirplayError> {
+        let Some(packet) = self.pop_ready() else {
+            return Ok(None);
+        };
+        RaopPcm16AccessUnit::from_packet(&packet, format).map(Some)
+    }
+
     /// Skips a missing sequence after the caller's transport deadline.
     pub fn skip_missing_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
         let skipped = self.jitter.skip_missing_to(sequence)?;
@@ -815,6 +826,57 @@ impl RaopAudioFormat {
             bits_per_sample: if codec == RaopCodec::Pcm { 16 } else { 0 },
             payload_type: mapped_payload,
         })
+    }
+}
+
+/// One ordered, unencrypted RAOP PCM16 access unit ready for a platform sink.
+///
+/// RAOP `L16`/PCM payloads are network-byte-order samples. This boundary
+/// performs only the bounded endian conversion; it does not decrypt ALAC/AAC,
+/// conceal packet loss, or own an audio device.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RaopPcm16AccessUnit {
+    /// RTP sample timestamp of the first interleaved sample.
+    pub timestamp: u32,
+    /// Interleaved output channel count.
+    pub channels: u8,
+    /// Signed PCM16 samples encoded as little-endian bytes.
+    pub payload_le: Vec<u8>,
+}
+
+impl RaopPcm16AccessUnit {
+    /// Converts one negotiated PCM RTP packet into a bounded platform buffer.
+    pub fn from_packet(
+        packet: &RtpAudioPacket,
+        format: &RaopAudioFormat,
+    ) -> Result<Self, AirplayError> {
+        if format.codec != RaopCodec::Pcm || format.bits_per_sample != 16 {
+            return Err(AirplayError::Invalid("RAOP PCM format"));
+        }
+        if packet.payload_type != format.payload_type {
+            return Err(AirplayError::Invalid("RAOP payload type"));
+        }
+        let frame_bytes = usize::from(format.channels).saturating_mul(2);
+        if frame_bytes == 0
+            || packet.payload.is_empty()
+            || !packet.payload.len().is_multiple_of(frame_bytes)
+        {
+            return Err(AirplayError::Invalid("RAOP PCM payload"));
+        }
+        let mut payload_le = Vec::with_capacity(packet.payload.len());
+        for sample in packet.payload.chunks_exact(2) {
+            payload_le.extend_from_slice(&[sample[1], sample[0]]);
+        }
+        Ok(Self {
+            timestamp: packet.timestamp,
+            channels: format.channels,
+            payload_le,
+        })
+    }
+
+    /// Number of interleaved PCM frames represented by this access unit.
+    pub fn sample_frames(&self) -> usize {
+        self.payload_le.len() / (usize::from(self.channels) * 2)
     }
 }
 
@@ -3476,6 +3538,72 @@ mod tests {
         );
         coordinator.reset().unwrap();
         assert_eq!(coordinator.report(), RaopAudioReport::default());
+    }
+
+    #[test]
+    fn raop_pcm16_boundary_converts_ordered_network_samples() {
+        let format = RaopAudioFormat {
+            codec: RaopCodec::Pcm,
+            sample_rate: 44_100,
+            channels: 2,
+            bits_per_sample: 16,
+            payload_type: 96,
+        };
+        let packet = RtpAudioPacket {
+            marker: false,
+            payload_type: 96,
+            sequence: 10,
+            timestamp: 12_345,
+            ssrc: 7,
+            payload: vec![0x12, 0x34, 0xfe, 0xdc],
+        };
+        let unit = RaopPcm16AccessUnit::from_packet(&packet, &format).unwrap();
+        assert_eq!(unit.timestamp, 12_345);
+        assert_eq!(unit.channels, 2);
+        assert_eq!(unit.sample_frames(), 1);
+        assert_eq!(unit.payload_le, vec![0x34, 0x12, 0xdc, 0xfe]);
+
+        let mut coordinator =
+            RaopAudioCoordinator::new("127.0.0.1".parse().unwrap(), 7, 96, 2).unwrap();
+        coordinator
+            .push("127.0.0.1:5000".parse().unwrap(), packet)
+            .unwrap();
+        assert_eq!(coordinator.pop_pcm16(&format).unwrap().unwrap(), unit);
+        assert!(coordinator.pop_pcm16(&format).unwrap().is_none());
+    }
+
+    #[test]
+    fn raop_pcm16_boundary_rejects_non_pcm_and_misaligned_payloads() {
+        let pcm = RaopAudioFormat {
+            codec: RaopCodec::Pcm,
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 16,
+            payload_type: 96,
+        };
+        let packet = RtpAudioPacket {
+            payload_type: 96,
+            payload: vec![1, 2, 3],
+            ..rtp_packet(1)
+        };
+        assert_eq!(
+            RaopPcm16AccessUnit::from_packet(&packet, &pcm),
+            Err(AirplayError::Invalid("RAOP PCM payload"))
+        );
+        let alac = RaopAudioFormat {
+            codec: RaopCodec::Alac,
+            bits_per_sample: 0,
+            ..pcm
+        };
+        let aligned = RtpAudioPacket {
+            payload_type: 96,
+            payload: vec![1, 2, 3, 4],
+            ..rtp_packet(1)
+        };
+        assert_eq!(
+            RaopPcm16AccessUnit::from_packet(&aligned, &alac),
+            Err(AirplayError::Invalid("RAOP PCM format"))
+        );
     }
 
     #[test]
