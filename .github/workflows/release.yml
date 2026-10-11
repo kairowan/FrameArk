@@ -74,6 +74,29 @@ jobs:
             echo "No Rust or Android product manifest exists; refusing to publish a release." >&2
             exit 1
           fi
+      - name: Generate deterministic SPDX SBOM
+        shell: bash
+        run: |
+          if [[ ! -f Cargo.toml ]]; then
+            echo "Rust workspace is required for the release SBOM." >&2
+            exit 1
+          fi
+          cargo metadata --format-version 1 --locked > /tmp/frameark-cargo-metadata.json
+          python scripts/generate_sbom.py \
+            --repo . \
+            --tag "$RELEASE_TAG" \
+            --cargo-metadata /tmp/frameark-cargo-metadata.json \
+            --output "dist/FrameArk-$RELEASE_TAG-sbom.spdx.json"
+      - name: Collect verified Android release artifact
+        if: ${{ hashFiles('gradlew') != '' }}
+        shell: bash
+        run: |
+          apk="apps/android/receiver/build/outputs/apk/release/receiver-release.apk"
+          if [[ ! -f "$apk" ]]; then
+            echo "Android release APK was not produced: $apk" >&2
+            exit 1
+          fi
+          cp "$apk" "dist/FrameArk-$RELEASE_TAG-android-release.apk"
       - name: Package source and checksums
         shell: bash
         run: |
@@ -83,14 +106,13 @@ jobs:
             --prefix="FrameArk-$RELEASE_TAG/" \
             --output="dist/FrameArk-$RELEASE_TAG-source.zip" \
             "$RELEASE_TAG"
-          (cd dist && sha256sum *.zip > SHA256SUMS)
+          (cd dist && sha256sum * > SHA256SUMS)
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$RELEASE_TAG" \
-            dist/FrameArk-$RELEASE_TAG-source.zip \
-            dist/SHA256SUMS \
+            dist/* \
             --verify-tag \
             --generate-notes \
             --title "FrameArk $RELEASE_TAG"
