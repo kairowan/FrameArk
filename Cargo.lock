@@ -133,6 +133,13 @@ name = "frameark-core"
 version = "0.1.0"
 
 [[package]]
+name = "frameark-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "frameark-core",
+]
+
+[[package]]
 name = "frameark-discovery"
 version = "0.1.0"
 dependencies = [

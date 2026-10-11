@@ -177,6 +177,13 @@ The mirror audio contract caps access-unit bytes and duration, restricts sample
 rates/channels, and requires PCM16 payload alignment. It does not decrypt,
 decode, conceal loss, or provide an audio output authorization boundary.
 
+The `frameark-diagnostics` recorder keeps only bounded, caller-redacted
+summaries in memory. It strips control characters and omits session identifiers
+from transition records, but it cannot know whether a caller supplied a secret
+in a message. Integrations must avoid credentials, raw URLs, packet payloads,
+device identifiers, and user media, and must obtain consent before exporting a
+snapshot or persisting it outside the process.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
