@@ -39,9 +39,12 @@ The current experimental subset serves a device description and SCPD documents
 and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 `GetTransportInfo`, `GetPositionInfo`, `GetMediaInfo`, `SetVolume`,
 `GetVolume`, and the basic ConnectionManager queries. Media URLs are limited to
-`http://` and `https://`; FrameArk does not fetch URLs or bypass DRM.
+`http://` and `https://`; the bounded URI validator rejects credentials,
+control/whitespace characters, fragments, malformed hosts, invalid ports, and
+unbracketed IPv6 authorities. FrameArk does not fetch URLs or bypass DRM.
 
-HTTP chunked transfer, callback connection retries and HTTPS/TLS, full DIDL-Lite parsing,
+HTTP chunked transfer, callback connection retries and HTTPS/TLS, DNS-aware
+private-network policy, full DIDL-Lite parsing,
 multicast lease scheduling, network URL fetching, real decoder integration,
 and named client interoperability are not implemented yet. File streaming is
 opt-in: a daemon must explicitly register a regular file and still provide

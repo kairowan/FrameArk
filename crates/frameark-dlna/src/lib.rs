@@ -2510,16 +2510,78 @@ fn ensure_media_loaded(state: &MediaRendererState) -> Result<(), SoapFault> {
 }
 
 fn validate_media_uri(uri: &str) -> Result<(), SoapFault> {
-    if uri.len() > MAX_FIELD_BYTES || uri.contains(['\r', '\n']) {
+    if uri.len() > MAX_FIELD_BYTES
+        || uri
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || uri.contains('#')
+    {
         return Err(SoapFault::new(714, "Illegal MIME-type"));
     }
-    let Some((scheme, _)) = uri.split_once("://") else {
+    let Some((scheme, remainder)) = uri.split_once("://") else {
         return Err(SoapFault::new(714, "Illegal MIME-type"));
     };
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return Err(SoapFault::new(714, "Illegal MIME-type"));
     }
+    let authority_end = remainder.find(['/', '?']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if !validate_media_authority(authority) {
+        return Err(SoapFault::new(714, "Illegal MIME-type"));
+    }
     Ok(())
+}
+
+fn validate_media_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains(['@', '\\']) {
+        return false;
+    }
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some(close) = bracketed.find(']') else {
+            return false;
+        };
+        if close == 0 || bracketed[..close].parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        let suffix = &bracketed[close + 1..];
+        return suffix.is_empty() || validate_media_port(suffix);
+    }
+    if authority.matches(':').count() > 1 {
+        return false;
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    if let Some(port) = port
+        && !validate_media_port(port)
+    {
+        return false;
+    }
+    validate_media_host(host)
+}
+
+fn validate_media_port(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+fn validate_media_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    if let Ok(address) = host.parse::<std::net::Ipv4Addr>() {
+        return !address.is_unspecified() && !address.is_multicast();
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
 }
 
 fn parse_upnp_time(value: &str) -> Result<u64, SoapFault> {
@@ -3649,5 +3711,32 @@ mod tests {
         let response = service.handle(&seek);
         assert_eq!(response.status, 500);
         assert_eq!(service.state().position_seconds, 0);
+    }
+
+    #[test]
+    fn renderer_rejects_malformed_media_authorities_before_state_change() {
+        for uri in [
+            "https://user:password@media.example/video.mp4",
+            "https://media.example:0/video.mp4",
+            "https://media.example:bad/video.mp4",
+            "https://[2001:db8::1/video.mp4",
+            "https://2001:db8::1/video.mp4",
+            "https://media.example/video.mp4#fragment",
+            "https:///video.mp4",
+        ] {
+            let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+            let request = soap_request(
+                "/upnp/control/avtransport",
+                AVTRANSPORT_SERVICE,
+                "SetAVTransportURI",
+                &format!("<InstanceID>0</InstanceID><CurrentURI>{uri}</CurrentURI>"),
+            );
+            assert_eq!(
+                service.handle(&request).status,
+                500,
+                "URI should be rejected: {uri}"
+            );
+            assert!(service.state().current_uri.is_empty());
+        }
     }
 }
