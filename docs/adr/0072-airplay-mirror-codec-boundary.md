@@ -1,5 +1,8 @@
 # ADR 0072: AirPlay mirror codec boundary
 
+> Superseded by ADR-0076 for the H.265 assembly increment. The H.264
+> compatibility and explicit codec-enum decisions remain applicable.
+
 - Status: Accepted
 - Date: 2026-10-11
 - Scope: M5 AirPlay screen-mirroring SETUP
@@ -14,9 +17,9 @@ unsupported-codec error; unknown or non-string values fail as malformed
 configuration.
 
 The public configuration model carries a `MirrorVideoCodec` enum so callers
-cannot mistake an omitted field for a future H.265 implementation. No H.265
-NAL assembly, decoder, Apple pairing, FairPlay, or hardware compatibility is
-claimed by this change.
+cannot mistake an omitted field for a future H.265 implementation. At the time
+of this decision no H.265 NAL assembly, decoder, Apple pairing, FairPlay, or
+hardware compatibility was claimed.
 
 ## Verification
 

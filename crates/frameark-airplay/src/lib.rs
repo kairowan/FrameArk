@@ -1478,9 +1478,10 @@ pub enum MirrorOrientation {
 /// Video codec explicitly declared by a mirror SETUP property list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirrorVideoCodec {
-    /// H.264 is the only codec currently assembled by the mirror pipeline.
+    /// H.264 RTP mirror video.
     H264,
-    /// H.265 is recognized as a conditional capability but is not assembled.
+    /// H.265 RTP mirror video. Apple pairing/encryption and platform decode
+    /// remain outside this protocol boundary.
     H265,
 }
 
@@ -1499,10 +1500,10 @@ impl TryFrom<u16> for MirrorOrientation {
     }
 }
 
-/// One validated H.264 NAL unit in a mirror access unit.
+/// One validated H.264 or H.265 NAL unit in a mirror access unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct H264NalUnit {
-    /// H.264 nal_unit_type (1..=31).
+    /// Codec-specific NAL unit type.
     pub nal_type: u8,
     /// NAL header and RBSP bytes without an Annex-B start code.
     pub bytes: Vec<u8>,
@@ -1511,6 +1512,8 @@ pub struct H264NalUnit {
 /// A bounded H.264 video access unit with a 90 kHz presentation timestamp.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirrorVideoAccessUnit {
+    /// Codec used to interpret the NAL headers.
+    pub codec: MirrorVideoCodec,
     /// Presentation timestamp in `MIRROR_VIDEO_CLOCK_HZ` ticks.
     pub pts_90khz: u64,
     /// Orientation that applies to this access unit.
@@ -1553,6 +1556,7 @@ impl MirrorVideoAccessUnit {
         }
         let keyframe = units.iter().any(|unit| unit.nal_type == 5);
         Ok(Self {
+            codec: MirrorVideoCodec::H264,
             pts_90khz,
             orientation,
             keyframe,
@@ -1594,6 +1598,45 @@ impl MirrorVideoAccessUnit {
         }
         let keyframe = units.iter().any(|unit| unit.nal_type == 5);
         Ok(Self {
+            codec: MirrorVideoCodec::H264,
+            pts_90khz,
+            orientation,
+            keyframe,
+            nal_units: units,
+        })
+    }
+
+    /// Parses an H.265 Annex-B access unit using the same bounded output type.
+    pub fn from_h265_annex_b(
+        pts_90khz: u64,
+        orientation: MirrorOrientation,
+        bytes: &[u8],
+    ) -> Result<Self, AirplayError> {
+        if bytes.is_empty() || bytes.len() > MAX_MIRROR_ACCESS_UNIT_BYTES {
+            return Err(AirplayError::TooLarge("mirror access unit"));
+        }
+        let mut units = Vec::new();
+        let Some((first, first_len)) = find_start_code(bytes, 0) else {
+            return Err(AirplayError::Invalid("H265 Annex-B start code"));
+        };
+        if bytes[..first].iter().any(|byte| *byte != 0) {
+            return Err(AirplayError::Invalid("H265 Annex-B prefix"));
+        }
+        let mut cursor = first + first_len;
+        while cursor < bytes.len() {
+            let next = find_start_code(bytes, cursor);
+            let end = next.map(|(index, _)| index).unwrap_or(bytes.len());
+            push_h265_nal(&mut units, &bytes[cursor..end])?;
+            cursor = next
+                .map(|(index, length)| index + length)
+                .unwrap_or(bytes.len());
+        }
+        if units.is_empty() {
+            return Err(AirplayError::Invalid("H265 NAL units"));
+        }
+        let keyframe = units.iter().any(|unit| is_h265_keyframe(unit.nal_type));
+        Ok(Self {
+            codec: MirrorVideoCodec::H265,
             pts_90khz,
             orientation,
             keyframe,
@@ -1647,6 +1690,7 @@ struct MirrorVideoFragment {
 /// unit rather than silently manufacturing a decodable frame.
 #[derive(Debug)]
 pub struct MirrorVideoPipeline {
+    codec: MirrorVideoCodec,
     orientation: MirrorOrientation,
     payload_type: u8,
     jitter: RtpJitterBuffer,
@@ -1662,10 +1706,21 @@ impl MirrorVideoPipeline {
         payload_type: u8,
         capacity: usize,
     ) -> Result<Self, AirplayError> {
+        Self::new_with_codec(MirrorVideoCodec::H264, orientation, payload_type, capacity)
+    }
+
+    /// Creates a pipeline for an explicitly negotiated H.264 or H.265 codec.
+    pub fn new_with_codec(
+        codec: MirrorVideoCodec,
+        orientation: MirrorOrientation,
+        payload_type: u8,
+        capacity: usize,
+    ) -> Result<Self, AirplayError> {
         if payload_type > 127 {
             return Err(AirplayError::Invalid("mirror video payload type"));
         }
         Ok(Self {
+            codec,
             orientation,
             payload_type,
             jitter: RtpJitterBuffer::new(capacity)?,
@@ -1687,7 +1742,7 @@ impl MirrorVideoPipeline {
         self.jitter.push(packet)
     }
 
-    /// Returns the next complete marker-delimited H.264 access unit.
+    /// Returns the next complete marker-delimited H.264/H.265 access unit.
     pub fn pop_ready(&mut self) -> Result<Option<MirrorVideoAccessUnit>, AirplayError> {
         loop {
             let Some(packet) = self.jitter.pop_ready() else {
@@ -1707,8 +1762,15 @@ impl MirrorVideoPipeline {
             if assembly.nal_units.is_empty() {
                 return Err(AirplayError::Invalid("mirror video NAL units"));
             }
-            let keyframe = assembly.nal_units.iter().any(|unit| unit.nal_type == 5);
+            let keyframe = match self.codec {
+                MirrorVideoCodec::H264 => assembly.nal_units.iter().any(|unit| unit.nal_type == 5),
+                MirrorVideoCodec::H265 => assembly
+                    .nal_units
+                    .iter()
+                    .any(|unit| is_h265_keyframe(unit.nal_type)),
+            };
             return Ok(Some(MirrorVideoAccessUnit {
+                codec: self.codec,
                 pts_90khz: u64::from(assembly.timestamp),
                 orientation: self.orientation,
                 keyframe,
@@ -1753,11 +1815,25 @@ impl MirrorVideoPipeline {
         if payload.is_empty() {
             return Err(AirplayError::Invalid("mirror video RTP payload"));
         }
-        match payload[0] & 0x1f {
-            1..=23 => self.append_nal(payload),
-            24 => self.consume_stap_a(payload),
-            28 => self.consume_fu_a(packet.timestamp, payload),
-            _ => Err(AirplayError::Invalid("mirror video RTP NAL type")),
+        match self.codec {
+            MirrorVideoCodec::H264 => match payload[0] & 0x1f {
+                1..=23 => self.append_nal(payload),
+                24 => self.consume_stap_a(payload),
+                28 => self.consume_fu_a(packet.timestamp, payload),
+                _ => Err(AirplayError::Invalid("mirror video RTP NAL type")),
+            },
+            MirrorVideoCodec::H265 => {
+                if payload.len() < 2 {
+                    return Err(AirplayError::Invalid("mirror H265 RTP header"));
+                }
+                let nal_type = (u16::from_be_bytes([payload[0], payload[1]]) >> 9) & 0x3f;
+                match nal_type {
+                    0..=47 => self.append_nal(payload),
+                    48 => self.consume_ap_h265(payload),
+                    49 => self.consume_fu_h265(packet.timestamp, payload),
+                    _ => Err(AirplayError::Invalid("mirror H265 RTP NAL type")),
+                }
+            }
         }
     }
 
@@ -1841,6 +1917,87 @@ impl MirrorVideoPipeline {
         Ok(())
     }
 
+    fn consume_ap_h265(&mut self, payload: &[u8]) -> Result<(), AirplayError> {
+        let mut cursor = 2usize;
+        let mut count = 0usize;
+        while cursor < payload.len() {
+            let end = cursor
+                .checked_add(2)
+                .ok_or(AirplayError::Invalid("mirror H265 AP length"))?;
+            if end > payload.len() {
+                return Err(AirplayError::Invalid("mirror H265 AP length"));
+            }
+            let length = usize::from(u16::from_be_bytes([payload[cursor], payload[cursor + 1]]));
+            cursor = end;
+            let nal_end = cursor
+                .checked_add(length)
+                .ok_or(AirplayError::Invalid("mirror H265 AP length"))?;
+            if length < 2 || nal_end > payload.len() {
+                return Err(AirplayError::Invalid("mirror H265 AP NAL"));
+            }
+            self.append_nal(&payload[cursor..nal_end])?;
+            count = count.saturating_add(1);
+            cursor = nal_end;
+        }
+        if count == 0 {
+            return Err(AirplayError::Invalid("mirror H265 AP NAL"));
+        }
+        Ok(())
+    }
+
+    fn consume_fu_h265(&mut self, timestamp: u32, payload: &[u8]) -> Result<(), AirplayError> {
+        if payload.len() < 4 {
+            return Err(AirplayError::Invalid("mirror H265 FU header"));
+        }
+        let indicator = u16::from_be_bytes([payload[0], payload[1]]);
+        let header = payload[2];
+        let start = header & 0x80 != 0;
+        let end = header & 0x40 != 0;
+        let nal_type = header & 0x3f;
+        if nal_type > 47 || payload[3..].is_empty() || (start && end) {
+            return Err(AirplayError::Invalid("mirror H265 FU header"));
+        }
+        if start {
+            if self.fragment.is_some() {
+                return Err(AirplayError::Invalid("mirror H265 FU overlap"));
+            }
+            let reconstructed = (indicator & 0x81ff) | (u16::from(nal_type) << 9);
+            let mut bytes = Vec::with_capacity(payload.len() - 1);
+            bytes.extend_from_slice(&reconstructed.to_be_bytes());
+            bytes.extend_from_slice(&payload[3..]);
+            if bytes.len() > MAX_MIRROR_VIDEO_ASSEMBLY_BYTES {
+                return Err(AirplayError::TooLarge("mirror H265 FU"));
+            }
+            self.fragment = Some(MirrorVideoFragment { timestamp, bytes });
+            return Ok(());
+        }
+        let fragment = self
+            .fragment
+            .as_mut()
+            .ok_or(AirplayError::Invalid("mirror H265 FU start"))?;
+        if fragment.timestamp != timestamp {
+            return Err(AirplayError::Invalid("mirror H265 FU timestamp"));
+        }
+        let new_len = fragment
+            .bytes
+            .len()
+            .checked_add(payload.len() - 3)
+            .ok_or(AirplayError::TooLarge("mirror H265 FU"))?;
+        if new_len > MAX_MIRROR_VIDEO_ASSEMBLY_BYTES {
+            return Err(AirplayError::TooLarge("mirror H265 FU"));
+        }
+        fragment.bytes.extend_from_slice(&payload[3..]);
+        if end {
+            let bytes = self
+                .fragment
+                .take()
+                .ok_or(AirplayError::Invalid("mirror H265 FU end"))?
+                .bytes;
+            self.append_nal(&bytes)?;
+        }
+        Ok(())
+    }
+
     fn append_nal(&mut self, bytes: &[u8]) -> Result<(), AirplayError> {
         let Some(assembly) = self.assembly.as_mut() else {
             return Err(AirplayError::Invalid("mirror video access unit"));
@@ -1852,7 +2009,10 @@ impl MirrorVideoPipeline {
         if new_len > MAX_MIRROR_VIDEO_ASSEMBLY_BYTES {
             return Err(AirplayError::TooLarge("mirror video access unit"));
         }
-        push_h264_nal(&mut assembly.nal_units, bytes)?;
+        match self.codec {
+            MirrorVideoCodec::H264 => push_h264_nal(&mut assembly.nal_units, bytes)?,
+            MirrorVideoCodec::H265 => push_h265_nal(&mut assembly.nal_units, bytes)?,
+        }
         assembly.bytes = new_len;
         Ok(())
     }
@@ -1889,6 +2049,7 @@ pub struct MirrorMediaCoordinator {
     audio_payload_type: u8,
     audio_samples_per_packet: u32,
     audio_capacity: usize,
+    video_codec: MirrorVideoCodec,
     orientation: MirrorOrientation,
     video: MirrorVideoPipeline,
     audio: MirrorAudioPipeline,
@@ -1910,7 +2071,42 @@ impl MirrorMediaCoordinator {
         audio_samples_per_packet: u32,
         audio_capacity: usize,
     ) -> Result<Self, AirplayError> {
-        let video = MirrorVideoPipeline::new(orientation, video_payload_type, video_capacity)?;
+        Self::new_with_codec(
+            MirrorVideoCodec::H264,
+            peer_ip,
+            video_ssrc,
+            audio_ssrc,
+            orientation,
+            video_payload_type,
+            video_capacity,
+            audio_format,
+            audio_payload_type,
+            audio_samples_per_packet,
+            audio_capacity,
+        )
+    }
+
+    /// Creates a coordinator for an explicitly negotiated H.264/H.265 track.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_codec(
+        video_codec: MirrorVideoCodec,
+        peer_ip: IpAddr,
+        video_ssrc: u32,
+        audio_ssrc: u32,
+        orientation: MirrorOrientation,
+        video_payload_type: u8,
+        video_capacity: usize,
+        audio_format: MirrorAudioFormat,
+        audio_payload_type: u8,
+        audio_samples_per_packet: u32,
+        audio_capacity: usize,
+    ) -> Result<Self, AirplayError> {
+        let video = MirrorVideoPipeline::new_with_codec(
+            video_codec,
+            orientation,
+            video_payload_type,
+            video_capacity,
+        )?;
         let audio = MirrorAudioPipeline::new(
             audio_format,
             audio_payload_type,
@@ -1927,6 +2123,7 @@ impl MirrorMediaCoordinator {
             audio_payload_type,
             audio_samples_per_packet,
             audio_capacity,
+            video_codec,
             orientation,
             video,
             audio,
@@ -1989,7 +2186,8 @@ impl MirrorMediaCoordinator {
 
     /// Clears jitter/assembly state while retaining the negotiated bounds.
     pub fn reset(&mut self) -> Result<(), AirplayError> {
-        self.video = MirrorVideoPipeline::new(
+        self.video = MirrorVideoPipeline::new_with_codec(
+            self.video_codec,
             self.orientation,
             self.video_payload_type,
             self.video_capacity,
@@ -2050,6 +2248,32 @@ fn push_h264_nal(units: &mut Vec<H264NalUnit>, bytes: &[u8]) -> Result<(), Airpl
         bytes: bytes.to_vec(),
     });
     Ok(())
+}
+
+fn push_h265_nal(units: &mut Vec<H264NalUnit>, bytes: &[u8]) -> Result<(), AirplayError> {
+    if units.len() >= MAX_MIRROR_NAL_UNITS {
+        return Err(AirplayError::TooLarge("H265 NAL units"));
+    }
+    if bytes.len() < 2 {
+        return Err(AirplayError::Invalid("H265 NAL header"));
+    }
+    let header = u16::from_be_bytes([bytes[0], bytes[1]]);
+    if header & 0x8000 != 0 {
+        return Err(AirplayError::Invalid("H265 NAL header"));
+    }
+    let nal_type = ((header >> 9) & 0x3f) as u8;
+    if nal_type > 47 {
+        return Err(AirplayError::Invalid("H265 NAL type"));
+    }
+    units.push(H264NalUnit {
+        nal_type,
+        bytes: bytes.to_vec(),
+    });
+    Ok(())
+}
+
+fn is_h265_keyframe(nal_type: u8) -> bool {
+    matches!(nal_type, 19..=21)
 }
 
 /// Bounded video/audio clock conversion policy for mirror synchronization.
@@ -2241,7 +2465,7 @@ impl MirrorVideoConfig {
                     "h265" | "h.265" | "hevc"
                 ) =>
             {
-                return Err(AirplayError::Invalid("unsupported mirror video codec"));
+                MirrorVideoCodec::H265
             }
             Some(_) => return Err(AirplayError::Invalid("mirror video codec")),
         };
@@ -4336,7 +4560,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_setup_rejects_conditional_h265_without_mutating_session() {
+    fn mirror_setup_accepts_h265_as_a_conditional_codec() {
         let mut config = BTreeMap::new();
         config.insert("codec".to_string(), PlistValue::String("hevc".to_string()));
         config.insert("width".to_string(), PlistValue::Integer(1920));
@@ -4346,21 +4570,108 @@ mod tests {
         let body = encode_xml_plist(&PlistValue::Dictionary(config)).unwrap();
         let mut session = MirrorSession::new("mirror-session", 7010).unwrap();
 
-        assert_eq!(
-            session.handle(&request(
+        session
+            .handle(&request(
                 "SETUP",
                 1,
                 &[(
                     "transport",
-                    "RTP/AVP/UDP;unicast;mode=record;control_port=7011"
+                    "RTP/AVP/UDP;unicast;mode=record;control_port=7011",
                 )],
                 &body,
-            )),
-            Err(AirplayError::Invalid("unsupported mirror video codec"))
+            ))
+            .unwrap();
+        assert_eq!(session.state(), MirrorSessionState::Setup);
+        assert_eq!(session.config().unwrap().codec, MirrorVideoCodec::H265);
+        assert_eq!(session.transport().unwrap().control_port, 7011);
+    }
+
+    #[test]
+    fn mirror_h265_pipeline_reassembles_fu_and_marks_idr_keyframe() {
+        let mut pipeline = MirrorVideoPipeline::new_with_codec(
+            MirrorVideoCodec::H265,
+            MirrorOrientation::Deg0,
+            98,
+            8,
+        )
+        .unwrap();
+        let packet = |sequence: u16, marker: bool, payload: Vec<u8>| RtpVideoPacket {
+            marker,
+            payload_type: 98,
+            sequence,
+            timestamp: 360_000,
+            ssrc: 19,
+            payload,
+        };
+        // FU indicator type 49, reconstructed NAL type 19 (IDR_W_RADL).
+        pipeline
+            .push(packet(20, false, vec![0x62, 0x01, 0x93, 0x11]))
+            .unwrap();
+        pipeline
+            .push(packet(22, true, vec![0x62, 0x01, 0x53, 0x33]))
+            .unwrap();
+        pipeline
+            .push(packet(21, false, vec![0x62, 0x01, 0x13, 0x22]))
+            .unwrap();
+
+        let unit = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(unit.codec, MirrorVideoCodec::H265);
+        assert!(unit.keyframe);
+        assert_eq!(unit.nal_units[0].nal_type, 19);
+        assert_eq!(unit.nal_units[0].bytes, vec![0x26, 0x01, 0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn mirror_h265_pipeline_reassembles_aggregation_packets_and_rejects_bad_headers() {
+        let mut pipeline = MirrorVideoPipeline::new_with_codec(
+            MirrorVideoCodec::H265,
+            MirrorOrientation::Deg90,
+            98,
+            8,
+        )
+        .unwrap();
+        let payload = vec![
+            0x60, 0x01, // AP indicator, type 48
+            0, 4, 0x40, 0x01, 0xaa, 0xbb, // VPS
+            0, 4, 0x26, 0x01, 0xcc, 0xdd, // IDR
+        ];
+        pipeline
+            .push(RtpVideoPacket {
+                marker: true,
+                payload_type: 98,
+                sequence: 1,
+                timestamp: 1,
+                ssrc: 1,
+                payload,
+            })
+            .unwrap();
+        let unit = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(unit.orientation, MirrorOrientation::Deg90);
+        assert_eq!(unit.nal_units.len(), 2);
+        assert!(unit.keyframe);
+
+        let mut malformed = MirrorVideoPipeline::new_with_codec(
+            MirrorVideoCodec::H265,
+            MirrorOrientation::Deg0,
+            98,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            malformed.push(RtpVideoPacket {
+                marker: true,
+                payload_type: 98,
+                sequence: 1,
+                timestamp: 1,
+                ssrc: 1,
+                payload: vec![0x60, 0x01, 0, 1, 0x40],
+            }),
+            Ok(RtpPushResult::Buffered)
         );
-        assert_eq!(session.state(), MirrorSessionState::Idle);
-        assert!(session.config().is_none());
-        assert!(session.transport().is_none());
+        assert_eq!(
+            malformed.pop_ready(),
+            Err(AirplayError::Invalid("mirror H265 AP NAL"))
+        );
     }
 
     #[test]
