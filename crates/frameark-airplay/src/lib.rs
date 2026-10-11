@@ -67,6 +67,12 @@ pub const MAX_RAOP_PARAMETER_BYTES: usize = 4 * 1024;
 pub const MAX_RAOP_METADATA_FIELDS: usize = 8;
 /// Maximum bytes retained for one RAOP metadata value.
 pub const MAX_RAOP_METADATA_VALUE_BYTES: usize = 512;
+/// Maximum UTF-8 HLS media-playlist size accepted by the AirPlay URL boundary.
+pub const MAX_HLS_PLAYLIST_BYTES: usize = 64 * 1024;
+/// Maximum media segments retained by one HLS playlist.
+pub const MAX_HLS_SEGMENTS: usize = 512;
+/// Maximum segment URI length accepted by the HLS playlist boundary.
+pub const MAX_HLS_URI_BYTES: usize = 2 * 1024;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -966,6 +972,142 @@ impl RaopControlState {
         }
         Ok(response.into_bytes())
     }
+}
+
+/// One validated media segment from a bounded HLS playlist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HlsSegment {
+    /// Segment URI retained exactly as supplied after validation.
+    pub uri: String,
+    /// Rounded segment duration in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// A bounded HLS media playlist used by a future AirPlay URL fetcher.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HlsMediaPlaylist {
+    /// Target duration advertised by the playlist in milliseconds.
+    pub target_duration_ms: u64,
+    /// Media sequence base, defaulting to zero when omitted.
+    pub media_sequence: u64,
+    /// Whether the playlist is explicitly complete.
+    pub end_list: bool,
+    /// Validated segment entries in playlist order.
+    pub segments: Vec<HlsSegment>,
+}
+
+impl HlsMediaPlaylist {
+    /// Parses a bounded HLS media playlist without performing network I/O.
+    pub fn parse(bytes: &[u8]) -> Result<Self, AirplayError> {
+        if bytes.is_empty() || bytes.len() > MAX_HLS_PLAYLIST_BYTES {
+            return Err(AirplayError::TooLarge("HLS playlist"));
+        }
+        let text =
+            std::str::from_utf8(bytes).map_err(|_| AirplayError::Invalid("HLS playlist UTF-8"))?;
+        let mut header_seen = false;
+        let mut target_duration_ms = None;
+        let mut media_sequence = 0;
+        let mut end_list = false;
+        let mut pending_duration_ms = None;
+        let mut segments = Vec::new();
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if !header_seen {
+                if line != "#EXTM3U" {
+                    return Err(AirplayError::Invalid("HLS playlist header"));
+                }
+                header_seen = true;
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+                let seconds = value
+                    .parse::<u64>()
+                    .map_err(|_| AirplayError::Invalid("HLS target duration"))?;
+                if seconds == 0 || seconds > 3_600 {
+                    return Err(AirplayError::Invalid("HLS target duration"));
+                }
+                target_duration_ms = Some(seconds * 1_000);
+            } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+                media_sequence = value
+                    .parse::<u64>()
+                    .map_err(|_| AirplayError::Invalid("HLS media sequence"))?;
+            } else if let Some(value) = line.strip_prefix("#EXTINF:") {
+                let duration = value
+                    .split_once(',')
+                    .map(|(duration, _)| duration)
+                    .unwrap_or(value)
+                    .parse::<f64>()
+                    .map_err(|_| AirplayError::Invalid("HLS segment duration"))?;
+                if !duration.is_finite() || duration <= 0.0 || duration > 7_200.0 {
+                    return Err(AirplayError::Invalid("HLS segment duration"));
+                }
+                pending_duration_ms = Some((duration * 1_000.0).round() as u64);
+            } else if line == "#EXT-X-ENDLIST" {
+                end_list = true;
+            } else if line.starts_with('#') {
+                continue;
+            } else {
+                let duration_ms = pending_duration_ms
+                    .take()
+                    .ok_or(AirplayError::Invalid("HLS segment duration"))?;
+                validate_hls_uri(line)?;
+                if segments.len() >= MAX_HLS_SEGMENTS {
+                    return Err(AirplayError::TooLarge("HLS segments"));
+                }
+                segments.push(HlsSegment {
+                    uri: line.to_string(),
+                    duration_ms,
+                });
+            }
+        }
+        if !header_seen {
+            return Err(AirplayError::Invalid("HLS playlist header"));
+        }
+        if pending_duration_ms.is_some() {
+            return Err(AirplayError::Invalid("HLS segment URI"));
+        }
+        let Some(target_duration_ms) = target_duration_ms else {
+            return Err(AirplayError::Invalid("HLS target duration"));
+        };
+        if segments.is_empty() {
+            return Err(AirplayError::Invalid("HLS segments"));
+        }
+        Ok(Self {
+            target_duration_ms,
+            media_sequence,
+            end_list,
+            segments,
+        })
+    }
+}
+
+fn validate_hls_uri(uri: &str) -> Result<(), AirplayError> {
+    if uri.is_empty() || uri.len() > MAX_HLS_URI_BYTES || uri.contains(['\r', '\n']) {
+        return Err(AirplayError::Invalid("HLS segment URI"));
+    }
+    if uri
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(AirplayError::Invalid("HLS segment URI"));
+    }
+    if uri.starts_with("//") || uri.starts_with('/') || uri.contains("\\") {
+        return Err(AirplayError::Invalid("HLS segment URI"));
+    }
+    if uri.split('/').any(|part| part == "..") {
+        return Err(AirplayError::Invalid("HLS segment URI"));
+    }
+    if let Some((scheme, remainder)) = uri.split_once("://") {
+        if !matches!(scheme, "http" | "https") || remainder.is_empty() || remainder.contains('@') {
+            return Err(AirplayError::Invalid("HLS segment URI"));
+        }
+    } else if uri.contains(':') {
+        return Err(AirplayError::Invalid("HLS segment URI"));
+    }
+    Ok(())
 }
 
 /// Bounded RAOP RTSP state machine. It does not own a TCP or UDP socket.
@@ -3671,6 +3813,34 @@ mod tests {
                 b"volume: 1\r\n",
             )),
             Err(AirplayError::Invalid("RAOP volume"))
+        );
+    }
+
+    #[test]
+    fn hls_playlist_parses_bounded_segments_and_rejects_unsafe_uris() {
+        let playlist = HlsMediaPlaylist::parse(
+            b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:42\n#EXTINF:5.5,\nsegment-42.ts\n#EXTINF:6,\nnews.ts?token=bounded\n#EXT-X-ENDLIST\n",
+        )
+        .unwrap();
+        assert_eq!(playlist.target_duration_ms, 6_000);
+        assert_eq!(playlist.media_sequence, 42);
+        assert!(playlist.end_list);
+        assert_eq!(playlist.segments.len(), 2);
+        assert_eq!(playlist.segments[0].duration_ms, 5_500);
+        assert_eq!(playlist.segments[1].uri, "news.ts?token=bounded");
+        assert_eq!(
+            HlsMediaPlaylist::parse(b"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:1,\nhttps://user:pass@example.test/a.ts\n"),
+            Err(AirplayError::Invalid("HLS segment URI"))
+        );
+        assert_eq!(
+            HlsMediaPlaylist::parse(
+                b"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:1,\n../escape.ts\n"
+            ),
+            Err(AirplayError::Invalid("HLS segment URI"))
+        );
+        assert_eq!(
+            HlsMediaPlaylist::parse(b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n"),
+            Err(AirplayError::Invalid("HLS target duration"))
         );
     }
 
