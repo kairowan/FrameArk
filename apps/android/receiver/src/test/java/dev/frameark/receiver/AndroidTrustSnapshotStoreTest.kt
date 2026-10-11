@@ -26,8 +26,11 @@ class AndroidTrustSnapshotStoreTest {
         val file = Files.createTempFile("frameark-trust", ".bin").toFile().also { it.delete() }
         try {
             assertTrue(AndroidTrustSnapshotStore(file, exporting, keyProvider = { key }).persist())
-            assertTrue(file.readBytes().isNotEmpty())
-            assertFalse(file.readBytes().contains('F'.code.toByte()) && file.readBytes().contains('T'.code.toByte()) && file.readBytes().contains('R'.code.toByte()) && file.readBytes().contains('1'.code.toByte()))
+            val stored = file.readBytes()
+            assertTrue(stored.isNotEmpty())
+            assertFalse(
+                stored.toList().windowed(snapshot.size).any { it == snapshot.toList() },
+            )
             assertTrue(AndroidTrustSnapshotStore(file, importing, keyProvider = { key }).restore())
             assertTrue(snapshot.contentEquals(restored))
         } finally {
