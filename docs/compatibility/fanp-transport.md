@@ -66,13 +66,14 @@ The experimental `frameark-dlna` crate provides bounded SSDP parsing,
 escaped UPnP device-description generation, a unicast-testable UDP publisher,
 and a caller-owned HTTP/SOAP MediaRenderer handler. The handler serves device
 and SCPD XML and exercises a bounded AVTransport, RenderingControl, and
-ConnectionManager subset on explicit Rust state; it also has a bounded
-single-range media fixture response, DIDL-Lite metadata generator, and GENA
-subscription/event policy.
+ConnectionManager subset on explicit Rust state; it also has bounded
+single-range in-memory and caller-registered file responses, DIDL-Lite
+metadata generation, GENA subscription/event policy, callback notification,
+and a sequential request-batch accept loop.
 
-It does not yet join multicast groups, expire leases on a clock, perform
-callback HTTP, validate full DIDL-Lite metadata, provide a streaming file
-backend, fetch URLs, or claim named-client DLNA interoperability. Chunked HTTP,
+It does not yet join multicast groups, run a concurrent production scheduler,
+provide HTTPS/TLS, validate full DIDL-Lite metadata, fetch URLs, or claim
+named-client DLNA interoperability. Chunked HTTP,
 multiple or unsatisfiable ranges, and unsupported URL schemes are rejected
 before state mutation.
 
