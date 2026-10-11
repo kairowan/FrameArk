@@ -11,6 +11,7 @@ rust-version.workspace = true
 frameark-core.workspace = true
 quinn.workspace = true
 rand.workspace = true
+ring.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tokio.workspace = true

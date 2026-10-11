@@ -12,18 +12,21 @@ stable public wire-compatibility promise yet.
 - Scope: local network or test loopback only.
 - Authorization: one six-digit decimal pairing code, valid only for the
   caller-owned process/session.
+- Optional sender identity: Ed25519 challenge/proof, supplied by a caller-owned
+  platform signer and verified in Rust before capability negotiation.
 
 The client must receive the server certificate through an in-scope channel
 and pin those exact DER bytes. mDNS metadata is discovery only and is not a
 certificate authority.
 
-After the code is accepted, a receiver may run a caller-owned asynchronous
-approval policy before sending `PairAccepted`. The policy receives the peer
-address and may reject the connection before capability negotiation. This is
-only an authorization seam: the address and pairing code are not sender
-identity proof. A production trust UI must bind the decision to an
-independently authenticated key-possession transcript; typed fingerprints are
-not sufficient.
+After the code is accepted, a receiver may run either the caller-owned
+address approval seam or the optional Ed25519 peer-proof flow before capability
+negotiation. The address and pairing code alone are not sender identity proof.
+The proof flow binds a fresh server challenge to a bounded device identifier
+and public key; a caller-owned policy then decides whether the verified sender
+may proceed. Verification is temporary and does not persist trust. A
+production trust UI must still connect this proof to its Rust-owned registry
+and platform keystore; typed fingerprints are not sufficient.
 
 ## Control frame
 
@@ -56,6 +59,29 @@ streams are not part of M0.
 
 The payload is empty. The client reports a pairing rejection separately from a
 QUIC/TLS failure, then closes the connection.
+
+### Optional peer proof (`types = 7, 8, 9`)
+
+When the receiver uses the proof-enabled API, it opens a bounded challenge
+stream with `type = 7` and a fresh 32-byte nonce. The sender opens a separate
+proof stream with `type = 8` and sends:
+
+| Offset | Size | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 1 | Proof version | `1` |
+| 1 | 1 | Device ID length | `1..=64` |
+| 2 | N | Device ID | ASCII `[A-Za-z0-9_.-]` |
+| 2 + N | 32 | Ed25519 public key | Raw bytes |
+| 34 + N | 64 | Signature | Raw bytes |
+
+The signature covers `"FrameArk FANP peer authentication v1\\0"`, the device
+ID length and bytes, and the fresh challenge. The normal `ClientHello` then
+uses a new stream and the receiver returns `ServerHello` as usual. Legacy
+pairing uses the original `ClientHello` stream and remains compatible. A proof
+failure is rejected before capability negotiation and does not create a
+persistent trust record. A successful proof receives an empty `type = 9`
+acknowledgement on the proof stream; a rejected proof receives the bounded
+`NegotiationRejected` response and no `ClientHello` is accepted.
 
 ## Capability negotiation
 
