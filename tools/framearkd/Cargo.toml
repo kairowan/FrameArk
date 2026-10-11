@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 frameark-api = { path = "../../crates/frameark-api" }
 frameark-core.workspace = true
+frameark-diagnostics.workspace = true
 frameark-native = { path = "../../crates/frameark-native" }
 frameark-transport = { path = "../../crates/frameark-transport" }
 tokio.workspace = true
