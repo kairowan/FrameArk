@@ -76,13 +76,14 @@ Offer → Start → media → Stop loopback with fake renderers, and the Android
 shell forwards its foreground lifecycle to a protected Rust session through
 JNI. FANP can also forward received encoded access units through
 `NativeEncodedMediaReceiver` to the bounded `JniMediaQueueSink`; Android's
-`MediaPlaybackPump` provides a bounded poll/dispatch loop while platform
-consumers own the subsequent codec and render APIs. Neither component grants persistent
-trust, ships a real codec, or claims Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
+`MediaPlaybackPump` and `MediaPlaybackLoop` provide bounded polling and
+fixed-rate lifecycle scheduling while platform consumers own the subsequent
+codec and render APIs. Neither component grants persistent trust, ships a real
+codec, or claims Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
 caller-owned HTTP/SOAP renderer contracts and one-shot IPv4 SSDP multicast
 announcements. GENA events can now be delivered by
-an explicitly plain-HTTP, bounded callback client; HTTPS/TLS, lease expiry,
-streaming media serving, and named-client interoperability remain future work.
+an explicitly plain-HTTP, bounded callback client; HTTPS/TLS, streaming media
+serving, and named-client interoperability remain future work.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current

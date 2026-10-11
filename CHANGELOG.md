@@ -49,6 +49,9 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental Android `MediaPlaybackPump` with ABI-aware start/stop, bounded
   per-tick polling, video/audio routing, and unavailable-native handling;
   platform codec consumers and real-device playback remain pending.
+- Experimental Android `MediaPlaybackLoop` with a bounded fixed-rate scheduler,
+  consumer-failure cancellation, and foreground-service lifecycle ownership;
+  platform codec consumers and real-device playback remain pending.
 - Experimental `frameark-dlna` foundation with bounded SSDP parsing and
   escaped UPnP device-description generation; network/SOAP interoperability
   remains unimplemented.
