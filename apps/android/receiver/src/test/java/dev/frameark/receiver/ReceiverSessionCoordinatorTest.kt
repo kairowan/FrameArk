@@ -46,6 +46,36 @@ class ReceiverSessionCoordinatorTest {
     }
 
     @Test
+    fun recover_restarts_the_bounded_native_and_playback_owners() {
+        val calls = Calls()
+        val coordinator = ReceiverSessionCoordinator(
+            fakeNative(calls),
+            FakePlayback(calls, startResult = true),
+        )
+
+        assertTrue(coordinator.start())
+        assertTrue(coordinator.recover())
+        assertEquals(ReceiverSessionCoordinator.State.Running, coordinator.state())
+        assertEquals(
+            listOf("native-start", "loop-start", "loop-stop", "native-stop", "native-start", "loop-start"),
+            calls.events,
+        )
+    }
+
+    @Test
+    fun recover_is_ignored_outside_running_state() {
+        val calls = Calls()
+        val coordinator = ReceiverSessionCoordinator(
+            fakeNative(calls),
+            FakePlayback(calls, startResult = true),
+        )
+
+        assertFalse(coordinator.recover())
+        assertEquals(ReceiverSessionCoordinator.State.Stopped, coordinator.state())
+        assertEquals(emptyList<String>(), calls.events)
+    }
+
+    @Test
     fun network_endpoint_failure_stops_native_before_playback() {
         val calls = Calls()
         val native = fakeNativeWithNetwork(
