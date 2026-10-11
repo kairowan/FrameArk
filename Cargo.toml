@@ -9,6 +9,7 @@ members = [
     "crates/frameark-media",
     "crates/frameark-native",
     "crates/frameark-transport",
+    "crates/frameark-trust",
     "tools/frameark-cli",
 ]
 resolver = "3"
