@@ -105,6 +105,12 @@ unbounded A/V offsets before platform allocation. It does not authenticate,
 decrypt, decode, or render incoming video; those network and platform layers
 must remain behind the receiver's authorization boundary.
 
+The mirror RTSP session validates CSeq, session transitions, UDP ports,
+dimensions, orientation, audio sample rate, and bounded XML/binary plist
+configuration before entering Streaming. It owns no socket or authorization;
+callers must authenticate the sender and enforce connection deadlines before
+exposing it to an untrusted network.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.

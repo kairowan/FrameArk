@@ -79,6 +79,11 @@ All notable FrameArk changes will be documented in this file. The project follow
   with keyframe detection, orientation validation, and 90 kHz A/V clock bounds;
   transport, decoder, mirror audio, loss recovery, and device compatibility
   remain pending.
+- Experimental bounded AirPlay mirror RTSP session state machine with
+  OPTIONS/SETUP/RECORD/GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport
+  validation, and XML/binary plist dimension/orientation/audio-rate checks;
+  sockets, Apple pairing, decoder, mirror audio, and device compatibility
+  remain pending.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/

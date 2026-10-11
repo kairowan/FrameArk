@@ -39,6 +39,8 @@ pub const MAX_MIRROR_NAL_UNITS: usize = 256;
 pub const MAX_MIRROR_DIMENSION: u16 = 8192;
 /// Video clock rate used by the mirror timing contract.
 pub const MIRROR_VIDEO_CLOCK_HZ: u32 = 90_000;
+/// Maximum mirror RTSP session identifier length.
+pub const MAX_MIRROR_SESSION_ID_BYTES: usize = 128;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -883,6 +885,242 @@ impl MirrorClock {
         }
         i64::try_from(offset).map_err(|_| AirplayError::Invalid("mirror A/V offset"))
     }
+}
+
+/// States in the bounded AirPlay screen-mirroring RTSP contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorSessionState {
+    /// No SETUP has been accepted.
+    Idle,
+    /// UDP transport and mirror configuration are negotiated.
+    Setup,
+    /// RECORD has started the mirror media flow.
+    Streaming,
+    /// TEARDOWN permanently closes the session.
+    Closed,
+}
+
+/// UDP ports negotiated for a mirror session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorTransport {
+    /// Receiver port for encoded mirror media.
+    pub server_port: u16,
+    /// Sender control port.
+    pub control_port: u16,
+    /// Optional sender timing port.
+    pub timing_port: Option<u16>,
+}
+
+/// Bounded video/audio parameters carried by a mirror setup Property List.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorVideoConfig {
+    /// Coded video width in pixels.
+    pub width: u16,
+    /// Coded video height in pixels.
+    pub height: u16,
+    /// Orientation applied before platform rendering.
+    pub orientation: MirrorOrientation,
+    /// Audio sample rate used for the A/V clock policy.
+    pub audio_sample_rate: u32,
+}
+
+impl MirrorVideoConfig {
+    /// Extracts the required bounded fields from an XML or binary plist value.
+    pub fn from_plist(value: &PlistValue) -> Result<Self, AirplayError> {
+        let PlistValue::Dictionary(dictionary) = value else {
+            return Err(AirplayError::Invalid("mirror configuration"));
+        };
+        let width = plist_unsigned(dictionary, "width")?;
+        let height = plist_unsigned(dictionary, "height")?;
+        let orientation_value = plist_unsigned(dictionary, "orientation")?;
+        if orientation_value > u64::from(u16::MAX) {
+            return Err(AirplayError::Invalid("mirror orientation"));
+        }
+        let orientation = MirrorOrientation::try_from(orientation_value as u16)?;
+        let audio_sample_rate = u32::try_from(plist_unsigned(dictionary, "audio_sample_rate")?)
+            .map_err(|_| AirplayError::Invalid("mirror audio sample rate"))?;
+        if width == 0
+            || height == 0
+            || width > u64::from(MAX_MIRROR_DIMENSION)
+            || height > u64::from(MAX_MIRROR_DIMENSION)
+        {
+            return Err(AirplayError::Invalid("mirror dimensions"));
+        }
+        MirrorClock::new(audio_sample_rate)?;
+        Ok(Self {
+            width: width as u16,
+            height: height as u16,
+            orientation,
+            audio_sample_rate,
+        })
+    }
+}
+
+fn plist_unsigned(
+    dictionary: &BTreeMap<String, PlistValue>,
+    key: &str,
+) -> Result<u64, AirplayError> {
+    let Some(PlistValue::Integer(value)) = dictionary.get(key) else {
+        return Err(AirplayError::Invalid("mirror configuration field"));
+    };
+    u64::try_from(*value).map_err(|_| AirplayError::Invalid("mirror configuration field"))
+}
+
+/// Bounded RTSP state machine for one AirPlay screen-mirroring session.
+///
+/// The session owns protocol state only. It does not open UDP sockets, decode
+/// H.264, decrypt audio, or render to a platform surface.
+pub struct MirrorSession {
+    session_id: String,
+    server_port: u16,
+    state: MirrorSessionState,
+    transport: Option<MirrorTransport>,
+    config: Option<MirrorVideoConfig>,
+}
+
+impl MirrorSession {
+    /// Creates an idle session with a caller-selected receiver media port.
+    pub fn new(session_id: impl Into<String>, server_port: u16) -> Result<Self, AirplayError> {
+        let session_id = session_id.into();
+        if session_id.is_empty() || session_id.len() > MAX_MIRROR_SESSION_ID_BYTES {
+            return Err(AirplayError::InvalidField("mirror session ID"));
+        }
+        if server_port == 0 {
+            return Err(AirplayError::InvalidField("mirror server port"));
+        }
+        validate_text(&session_id, "mirror session ID")?;
+        Ok(Self {
+            session_id,
+            server_port,
+            state: MirrorSessionState::Idle,
+            transport: None,
+            config: None,
+        })
+    }
+
+    /// Returns the current RTSP state.
+    pub fn state(&self) -> MirrorSessionState {
+        self.state
+    }
+
+    /// Returns the negotiated transport after SETUP.
+    pub fn transport(&self) -> Option<MirrorTransport> {
+        self.transport
+    }
+
+    /// Returns the validated mirror configuration after SETUP.
+    pub fn config(&self) -> Option<MirrorVideoConfig> {
+        self.config
+    }
+
+    /// Applies one RTSP request and returns a deterministic response.
+    pub fn handle(&mut self, request: &RtspMessage) -> Result<RtspMessage, AirplayError> {
+        let cseq = request.cseq()?;
+        let RtspStartLine::Request { method, .. } = &request.start_line else {
+            return Err(AirplayError::Invalid("mirror RTSP request"));
+        };
+        let method = method.to_ascii_uppercase();
+        let mut response_headers = BTreeMap::new();
+        response_headers.insert("cseq".to_string(), cseq.to_string());
+        response_headers.insert("session".to_string(), self.session_id.clone());
+        let body = match method.as_str() {
+            "OPTIONS" if self.state != MirrorSessionState::Closed => {
+                response_headers.insert(
+                    "public".to_string(),
+                    "OPTIONS, SETUP, RECORD, GET_PARAMETER, FLUSH, TEARDOWN".to_string(),
+                );
+                Vec::new()
+            }
+            "SETUP" if self.state == MirrorSessionState::Idle => {
+                let transport = request
+                    .headers
+                    .get("transport")
+                    .ok_or(AirplayError::Invalid("mirror transport"))?;
+                let transport = parse_mirror_transport(transport, self.server_port)?;
+                let plist = if request.body.starts_with(b"bplist00") {
+                    parse_binary_plist(&request.body)?
+                } else {
+                    parse_xml_plist(&request.body)?
+                };
+                let config = MirrorVideoConfig::from_plist(&plist)?;
+                self.transport = Some(transport);
+                self.config = Some(config);
+                self.state = MirrorSessionState::Setup;
+                response_headers.insert(
+                    "transport".to_string(),
+                    format!(
+                        "RTP/AVP/UDP;unicast;mode=record;server_port={};control_port={}",
+                        transport.server_port, transport.control_port
+                    ),
+                );
+                Vec::new()
+            }
+            "RECORD" if self.state == MirrorSessionState::Setup => {
+                self.state = MirrorSessionState::Streaming;
+                Vec::new()
+            }
+            "GET_PARAMETER" if self.state != MirrorSessionState::Closed => request.body.clone(),
+            "FLUSH" if self.state == MirrorSessionState::Streaming => Vec::new(),
+            "TEARDOWN" if self.state != MirrorSessionState::Closed => {
+                self.state = MirrorSessionState::Closed;
+                Vec::new()
+            }
+            _ => return Err(AirplayError::Invalid("mirror RTSP transition")),
+        };
+        Ok(RtspMessage {
+            start_line: RtspStartLine::Response {
+                status: 200,
+                reason: "OK".to_string(),
+            },
+            headers: response_headers,
+            body,
+        })
+    }
+}
+
+fn parse_mirror_transport(value: &str, server_port: u16) -> Result<MirrorTransport, AirplayError> {
+    validate_text(value, "mirror transport")?;
+    let mut control_port = None;
+    let mut timing_port = None;
+    let mut valid_base = false;
+    for part in value.split(';') {
+        let part = part.trim();
+        if part == "RTP/AVP/UDP" {
+            valid_base = true;
+        } else if part == "unicast" || part == "mode=record" {
+            continue;
+        } else if let Some(port) = part.strip_prefix("control_port=") {
+            if control_port.is_some() {
+                return Err(AirplayError::Invalid("mirror transport"));
+            }
+            control_port = Some(parse_udp_port(port)?);
+        } else if let Some(port) = part.strip_prefix("timing_port=") {
+            if timing_port.is_some() {
+                return Err(AirplayError::Invalid("mirror transport"));
+            }
+            timing_port = Some(parse_udp_port(port)?);
+        } else {
+            return Err(AirplayError::Invalid("mirror transport"));
+        }
+    }
+    if !valid_base {
+        return Err(AirplayError::Invalid("mirror transport"));
+    }
+    Ok(MirrorTransport {
+        server_port,
+        control_port: control_port.ok_or(AirplayError::Invalid("mirror transport"))?,
+        timing_port,
+    })
+}
+
+fn parse_udp_port(value: &str) -> Result<u16, AirplayError> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| AirplayError::Invalid("mirror UDP port"))?;
+    if port == 0 {
+        return Err(AirplayError::Invalid("mirror UDP port"));
+    }
+    Ok(port)
 }
 
 /// Parses the bounded XML Property List subset into a Rust value.
@@ -1984,5 +2222,71 @@ mod tests {
         assert_eq!(clock.offset_90khz(90_000, 48_000).unwrap(), 0);
         assert!(clock.offset_90khz(90_000 + 90_001, 48_000).is_err());
         assert!(MirrorClock::new(1_000).is_err());
+    }
+
+    #[test]
+    fn mirror_session_negotiates_config_transport_and_lifecycle() {
+        let mut config = BTreeMap::new();
+        config.insert("width".to_string(), PlistValue::Integer(1920));
+        config.insert("height".to_string(), PlistValue::Integer(1080));
+        config.insert("orientation".to_string(), PlistValue::Integer(90));
+        config.insert("audio_sample_rate".to_string(), PlistValue::Integer(48_000));
+        let body = encode_xml_plist(&PlistValue::Dictionary(config)).unwrap();
+        let mut session = MirrorSession::new("mirror-session", 7010).unwrap();
+        assert_eq!(session.state(), MirrorSessionState::Idle);
+        session.handle(&request("OPTIONS", 1, &[], &[])).unwrap();
+        let setup = request(
+            "SETUP",
+            2,
+            &[(
+                "transport",
+                "RTP/AVP/UDP;unicast;mode=record;control_port=7011;timing_port=7012",
+            )],
+            &body,
+        );
+        let setup_response = session.handle(&setup).unwrap();
+        assert_eq!(session.state(), MirrorSessionState::Setup);
+        assert_eq!(session.transport().unwrap().control_port, 7011);
+        assert_eq!(session.transport().unwrap().timing_port, Some(7012));
+        assert_eq!(session.config().unwrap().width, 1920);
+        assert_eq!(
+            setup_response.headers.get("transport"),
+            Some(&"RTP/AVP/UDP;unicast;mode=record;server_port=7010;control_port=7011".to_string())
+        );
+        session.handle(&request("RECORD", 3, &[], &[])).unwrap();
+        assert_eq!(session.state(), MirrorSessionState::Streaming);
+        let parameter = session
+            .handle(&request("GET_PARAMETER", 4, &[], b"volume\r\n"))
+            .unwrap();
+        assert_eq!(parameter.body, b"volume\r\n");
+        session.handle(&request("FLUSH", 5, &[], &[])).unwrap();
+        session.handle(&request("TEARDOWN", 6, &[], &[])).unwrap();
+        assert_eq!(session.state(), MirrorSessionState::Closed);
+    }
+
+    #[test]
+    fn mirror_session_rejects_invalid_config_transport_and_order() {
+        let mut session = MirrorSession::new("mirror-session", 7010).unwrap();
+        assert_eq!(
+            session.handle(&request("RECORD", 1, &[], &[])),
+            Err(AirplayError::Invalid("mirror RTSP transition"))
+        );
+        let mut config = BTreeMap::new();
+        config.insert("width".to_string(), PlistValue::Integer(0));
+        config.insert("height".to_string(), PlistValue::Integer(1080));
+        config.insert("orientation".to_string(), PlistValue::Integer(0));
+        config.insert("audio_sample_rate".to_string(), PlistValue::Integer(48_000));
+        let body = encode_xml_plist(&PlistValue::Dictionary(config)).unwrap();
+        assert_eq!(
+            session.handle(&request(
+                "SETUP",
+                2,
+                &[("transport", "RTP/AVP/TCP;interleaved=0-1")],
+                &body,
+            )),
+            Err(AirplayError::Invalid("mirror transport"))
+        );
+        assert!(MirrorSession::new("", 7010).is_err());
+        assert!(MirrorSession::new("mirror-session", 0).is_err());
     }
 }

@@ -16,6 +16,9 @@ AirPlay/RAOP interoperability.
   including cycle, reference, object-count, and nesting guards;
 - bounded H.264 Annex-B/AVCC mirror access-unit parsing with keyframe and
   orientation metadata plus a 90 kHz A/V clock policy;
+- bounded mirror RTSP session state with OPTIONS/SETUP/RECORD,
+  GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, and
+  XML/binary plist video configuration checks;
 - an explicit OPTIONS → ANNOUNCE → SETUP → RECORD → FLUSH/TEARDOWN RTSP
   session state machine with caller-owned UDP ports.
 
