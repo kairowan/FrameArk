@@ -6,6 +6,9 @@ All notable FrameArk changes will be documented in this file. The project follow
 
 ### Added
 
+- DLNA GENA subscriptions now use monotonic lease deadlines, refresh on renew,
+  and are reaped before publishing events or handling renderer requests.
+
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary
