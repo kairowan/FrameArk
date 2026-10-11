@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,8 @@ pub const MAX_TCP_RUNTIME_DURATION: Duration = Duration::from_secs(60);
 pub const DEFAULT_GENA_TIMEOUT_SECONDS: u32 = 1800;
 /// Maximum GENA lease accepted from an untrusted subscriber.
 pub const MAX_GENA_TIMEOUT_SECONDS: u32 = 86_400;
+/// Maximum DNS addresses a caller may hand to the media URI policy check.
+pub const MAX_MEDIA_RESOLVED_ADDRESSES: usize = 16;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -59,6 +61,69 @@ pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:
 pub const RENDERING_CONTROL_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
 /// Standard UPnP service type used by connection negotiation.
 pub const CONNECTION_MANAGER_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
+
+/// Network class a caller may require after resolving a DLNA media hostname.
+///
+/// The protocol crate never performs DNS itself. A caller supplies a bounded
+/// resolver closure so it can apply platform DNS, interface, and timeout
+/// policy without making URL validation open a socket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaUriNetworkPolicy {
+    /// Permit any usable resolved address, including loopback, only when the
+    /// caller explicitly accepts that risk.
+    AllowAny,
+    /// Require every resolved address to be RFC1918/unique-local/link-local;
+    /// loopback, multicast, and unspecified addresses are rejected.
+    LocalNetworkOnly,
+    /// Require every resolved address to be publicly routable; private,
+    /// loopback, link-local, multicast, and unspecified addresses are rejected.
+    PublicNetworkOnly,
+}
+
+/// Validates a media URL and applies a caller-owned DNS-aware network policy.
+///
+/// Literal IP authorities are checked without invoking `resolve`. Hostnames
+/// are passed to the resolver exactly once. The resolver must cap its result
+/// to [`MAX_MEDIA_RESOLVED_ADDRESSES`], use bounded DNS timeouts, and avoid
+/// following redirects; this function rejects empty, oversized, unusable, or
+/// mixed-policy address sets to make DNS rebinding harder for future fetchers.
+pub fn validate_media_uri_network<F>(
+    uri: &str,
+    policy: MediaUriNetworkPolicy,
+    resolve: F,
+) -> Result<(), DlnaError>
+where
+    F: FnOnce(&str) -> Result<Vec<IpAddr>, DlnaError>,
+{
+    let host = media_uri_host(uri)?;
+    let addresses = match host.parse::<IpAddr>() {
+        Ok(address) => vec![address],
+        Err(_) => resolve(host)?,
+    };
+    if addresses.is_empty() || addresses.len() > MAX_MEDIA_RESOLVED_ADDRESSES {
+        return Err(DlnaError::Invalid("media URI DNS result"));
+    }
+    if addresses
+        .iter()
+        .any(|address| !usable_media_address(*address))
+    {
+        return Err(DlnaError::Invalid("media URI address"));
+    }
+    let permitted = match policy {
+        MediaUriNetworkPolicy::AllowAny => true,
+        MediaUriNetworkPolicy::LocalNetworkOnly => addresses
+            .iter()
+            .all(|address| local_media_address(*address)),
+        MediaUriNetworkPolicy::PublicNetworkOnly => addresses
+            .iter()
+            .all(|address| public_media_address(*address)),
+    };
+    if permitted {
+        Ok(())
+    } else {
+        Err(DlnaError::Invalid("media URI network policy"))
+    }
+}
 
 /// Errors raised before untrusted SSDP/XML data is exposed to callers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2510,26 +2575,38 @@ fn ensure_media_loaded(state: &MediaRendererState) -> Result<(), SoapFault> {
 }
 
 fn validate_media_uri(uri: &str) -> Result<(), SoapFault> {
+    media_uri_host(uri)
+        .map(|_| ())
+        .map_err(|_| SoapFault::new(714, "Illegal MIME-type"))
+}
+
+fn media_uri_host(uri: &str) -> Result<&str, DlnaError> {
     if uri.len() > MAX_FIELD_BYTES
         || uri
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
         || uri.contains('#')
     {
-        return Err(SoapFault::new(714, "Illegal MIME-type"));
+        return Err(DlnaError::Invalid("media URI"));
     }
     let Some((scheme, remainder)) = uri.split_once("://") else {
-        return Err(SoapFault::new(714, "Illegal MIME-type"));
+        return Err(DlnaError::Invalid("media URI"));
     };
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-        return Err(SoapFault::new(714, "Illegal MIME-type"));
+        return Err(DlnaError::Invalid("media URI"));
     }
     let authority_end = remainder.find(['/', '?']).unwrap_or(remainder.len());
     let authority = &remainder[..authority_end];
     if !validate_media_authority(authority) {
-        return Err(SoapFault::new(714, "Illegal MIME-type"));
+        return Err(DlnaError::Invalid("media URI"));
     }
-    Ok(())
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let close = bracketed.find(']').ok_or(DlnaError::Invalid("media URI"))?;
+        return Ok(&bracketed[..close]);
+    }
+    Ok(authority
+        .split_once(':')
+        .map_or(authority, |(host, _)| host))
 }
 
 fn validate_media_authority(authority: &str) -> bool {
@@ -2544,7 +2621,7 @@ fn validate_media_authority(authority: &str) -> bool {
             return false;
         }
         let suffix = &bracketed[close + 1..];
-        return suffix.is_empty() || validate_media_port(suffix);
+        return suffix.is_empty() || suffix.strip_prefix(':').is_some_and(validate_media_port);
     }
     if authority.matches(':').count() > 1 {
         return false;
@@ -2582,6 +2659,21 @@ fn validate_media_host(host: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     })
+}
+
+fn usable_media_address(address: IpAddr) -> bool {
+    !address.is_unspecified() && !address.is_multicast()
+}
+
+fn local_media_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_private() || address.is_link_local(),
+        IpAddr::V6(address) => address.is_unique_local() || address.is_unicast_link_local(),
+    }
+}
+
+fn public_media_address(address: IpAddr) -> bool {
+    usable_media_address(address) && !address.is_loopback() && !local_media_address(address)
 }
 
 fn parse_upnp_time(value: &str) -> Result<u64, SoapFault> {
@@ -3738,5 +3830,95 @@ mod tests {
             );
             assert!(service.state().current_uri.is_empty());
         }
+    }
+
+    #[test]
+    fn dns_aware_media_policy_checks_all_resolved_addresses() {
+        let mut resolved_host = String::new();
+        assert!(
+            validate_media_uri_network(
+                "https://media.example/video.mp4",
+                MediaUriNetworkPolicy::PublicNetworkOnly,
+                |host| {
+                    resolved_host = host.to_string();
+                    Ok(vec!["8.8.8.8".parse().unwrap()])
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(resolved_host, "media.example");
+
+        assert_eq!(
+            validate_media_uri_network(
+                "https://media.example/video.mp4",
+                MediaUriNetworkPolicy::PublicNetworkOnly,
+                |_| Ok(vec![
+                    "8.8.8.8".parse().unwrap(),
+                    "192.168.1.5".parse().unwrap()
+                ]),
+            ),
+            Err(DlnaError::Invalid("media URI network policy"))
+        );
+        assert!(
+            validate_media_uri_network(
+                "https://media.example/video.mp4",
+                MediaUriNetworkPolicy::LocalNetworkOnly,
+                |_| Ok(vec![
+                    "192.168.1.5".parse().unwrap(),
+                    "10.0.0.8".parse().unwrap()
+                ]),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dns_aware_media_policy_rejects_loopback_multicast_and_unbounded_results() {
+        assert_eq!(
+            validate_media_uri_network(
+                "https://127.0.0.1/video.mp4",
+                MediaUriNetworkPolicy::PublicNetworkOnly,
+                |_| panic!("literal IP must not resolve"),
+            ),
+            Err(DlnaError::Invalid("media URI network policy"))
+        );
+        assert_eq!(
+            validate_media_uri_network(
+                "https://media.example/video.mp4",
+                MediaUriNetworkPolicy::AllowAny,
+                |_| Ok(vec!["224.0.0.1".parse().unwrap()]),
+            ),
+            Err(DlnaError::Invalid("media URI address"))
+        );
+        assert_eq!(
+            validate_media_uri_network(
+                "https://media.example/video.mp4",
+                MediaUriNetworkPolicy::AllowAny,
+                |_| Ok((0..=MAX_MEDIA_RESOLVED_ADDRESSES)
+                    .map(|_| "8.8.8.8".parse().unwrap())
+                    .collect()),
+            ),
+            Err(DlnaError::Invalid("media URI DNS result"))
+        );
+    }
+
+    #[test]
+    fn dns_aware_media_policy_handles_ipv6_authorities_without_resolution() {
+        assert!(
+            validate_media_uri_network(
+                "https://[2001:4860:4860::8888]:443/video.mp4",
+                MediaUriNetworkPolicy::PublicNetworkOnly,
+                |_| panic!("literal IPv6 must not resolve"),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_media_uri_network(
+                "https://[fd00::8]/video.mp4",
+                MediaUriNetworkPolicy::PublicNetworkOnly,
+                |_| panic!("literal IPv6 must not resolve"),
+            ),
+            Err(DlnaError::Invalid("media URI network policy"))
+        );
     }
 }

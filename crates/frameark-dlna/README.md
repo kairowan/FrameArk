@@ -26,6 +26,9 @@ DLNA/UPnP MediaRenderer work.
 - a bounded synchronous plain-HTTP callback client with explicit HTTPS rejection;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
+- a caller-injected, bounded DNS-aware media URI policy for public-only or
+  local-network-only fetchers; the protocol crate never performs DNS or URL
+  fetching itself;
 
 `MediaRendererTcpServer` is a deliberately small socket boundary: it serves
 one complete request per call, closes the connection after the response, and
@@ -43,14 +46,19 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 control/whitespace characters, fragments, malformed hosts, invalid ports, and
 unbracketed IPv6 authorities. FrameArk does not fetch URLs or bypass DRM.
 
-HTTP chunked transfer, callback connection retries and HTTPS/TLS, DNS-aware
-private-network policy, full DIDL-Lite parsing,
+HTTP chunked transfer, callback connection retries and HTTPS/TLS, full
+DIDL-Lite parsing,
 multicast lease scheduling, network URL fetching, real decoder integration,
 and named client interoperability are not implemented yet. File streaming is
 opt-in: a daemon must explicitly register a regular file and still provide
 authorization, lifecycle, and media format policy. The TCP adapter is
 single-request and synchronous, so it is not a production multi-client daemon.
-`GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
+`validate_media_uri_network` requires callers to resolve a hostname with a
+bounded resolver and checks every returned address, rejecting empty/oversized
+sets, multicast/unspecified addresses, private addresses for
+`PublicNetworkOnly`, and public addresses for `LocalNetworkOnly`. It is a
+preflight policy boundary rather than a fetcher and cannot by itself prevent a
+later redirect or DNS change. `GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
 client but does not open callback sockets or retry failures.
 `GenaCallbackClient` supplies plain-HTTP socket I/O. Subscriptions expire on
 monotonic deadlines; subscribe, renew, publish, request handling, and event

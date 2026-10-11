@@ -104,6 +104,13 @@ unless a caller-owned TLS adapter is supplied, and does not provide callback
 authentication, retries, or SSRF policy beyond URL/authority
 validation.
 
+`validate_media_uri_network` is the caller-injected DNS-aware preflight for
+future URL fetchers: it resolves a hostname once through a bounded resolver,
+caps addresses, rejects multicast/unspecified results, and requires every
+address to satisfy a public-only or local-network-only policy. It does not
+open sockets, follow redirects, or prevent a later DNS change; fetchers must
+pin the validated result or repeat the policy at connection time.
+
 The DLNA `MediaFormatCapabilities` report is validated and bounded before it is
 advertised through `ConnectionManager`; it is not a decoder probe or a promise
 that a remote URL is safe to fetch. Integrations must derive entries from the
