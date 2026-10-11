@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 
 /// Maximum RTSP message size accepted before parsing.
@@ -51,6 +52,8 @@ pub const MAX_MIRROR_AUDIO_DURATION_SAMPLES: u32 = 192_000;
 pub const MIRROR_VIDEO_CLOCK_HZ: u32 = 90_000;
 /// Maximum mirror RTSP session identifier length.
 pub const MAX_MIRROR_SESSION_ID_BYTES: usize = 128;
+/// Maximum requests served by one bounded mirror RTSP accept loop.
+pub const MAX_MIRROR_RTSP_REQUESTS_PER_RUN: usize = 128;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1730,6 +1733,123 @@ impl MirrorSession {
     }
 }
 
+/// Bounded synchronous RTSP adapter for one mirror session.
+///
+/// Each connection carries one complete RTSP request and one response. The
+/// adapter owns neither authentication nor RTP sockets; it only feeds the
+/// caller-owned [`MirrorSession`] and applies read/request bounds.
+pub struct MirrorRtspTcpServer {
+    listener: std::net::TcpListener,
+    session: MirrorSession,
+    read_timeout: std::time::Duration,
+}
+
+impl MirrorRtspTcpServer {
+    /// Binds a listener with a non-zero bounded read timeout.
+    pub fn bind(
+        address: SocketAddr,
+        session: MirrorSession,
+        read_timeout: std::time::Duration,
+    ) -> Result<Self, AirplayError> {
+        if read_timeout.is_zero() {
+            return Err(AirplayError::Invalid("mirror RTSP read timeout"));
+        }
+        let listener =
+            std::net::TcpListener::bind(address).map_err(|error| AirplayError::Io(error.kind()))?;
+        Ok(Self {
+            listener,
+            session,
+            read_timeout,
+        })
+    }
+
+    /// Returns the OS-selected listener address.
+    pub fn local_addr(&self) -> Result<SocketAddr, AirplayError> {
+        self.listener
+            .local_addr()
+            .map_err(|error| AirplayError::Io(error.kind()))
+    }
+
+    /// Returns the current shared RTSP lifecycle state.
+    pub fn state(&self) -> MirrorSessionState {
+        self.session.state()
+    }
+
+    /// Accepts one request, applies the state machine, writes one response,
+    /// and closes the connection.
+    pub fn serve_once(&mut self) -> Result<SocketAddr, AirplayError> {
+        let (mut stream, peer) = self
+            .listener
+            .accept()
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        stream
+            .set_read_timeout(Some(self.read_timeout))
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        let request = read_rtsp_request(&mut stream)?;
+        let response = self.session.handle(&request)?;
+        let encoded = response.encode()?;
+        stream
+            .write_all(&encoded)
+            .and_then(|_| stream.flush())
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        Ok(peer)
+    }
+
+    /// Serves a bounded sequential request batch.
+    pub fn serve_requests(&mut self, max_requests: usize) -> Result<Vec<SocketAddr>, AirplayError> {
+        if max_requests == 0 || max_requests > MAX_MIRROR_RTSP_REQUESTS_PER_RUN {
+            return Err(AirplayError::Invalid("mirror RTSP request batch size"));
+        }
+        let mut peers = Vec::with_capacity(max_requests);
+        for _ in 0..max_requests {
+            peers.push(self.serve_once()?);
+        }
+        Ok(peers)
+    }
+}
+
+fn read_rtsp_request(stream: &mut std::net::TcpStream) -> Result<RtspMessage, AirplayError> {
+    let mut bytes = Vec::with_capacity(4096);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if bytes.len() >= MAX_RTSP_BYTES {
+            return Err(AirplayError::TooLarge("RTSP request"));
+        }
+        if rtsp_request_complete(&bytes) {
+            return RtspMessage::parse(&bytes);
+        }
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        if read == 0 {
+            return Err(AirplayError::Invalid("RTSP request"));
+        }
+        let remaining = MAX_RTSP_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+}
+
+fn rtsp_request_complete(bytes: &[u8]) -> bool {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let header = &bytes[..header_end];
+    let Some(length_line) = header
+        .split(|byte| *byte == b'\n')
+        .find(|line| line.len() >= 15 && line[..15].eq_ignore_ascii_case(b"content-length:"))
+    else {
+        return true;
+    };
+    let Ok(length) = std::str::from_utf8(&length_line[15..])
+        .unwrap_or_default()
+        .trim()
+        .parse::<usize>()
+    else {
+        return true;
+    };
+    bytes.len() >= header_end + 4 + length
+}
+
 fn parse_mirror_transport(value: &str, server_port: u16) -> Result<MirrorTransport, AirplayError> {
     validate_text(value, "mirror transport")?;
     let mut control_port = None;
@@ -3320,5 +3440,35 @@ mod tests {
         coordinator.set_orientation(MirrorOrientation::Deg90);
         coordinator.reset().unwrap();
         assert_eq!(coordinator.report(), MirrorMediaReport::default());
+    }
+
+    #[test]
+    fn mirror_rtsp_tcp_server_applies_one_bounded_request() {
+        let session = MirrorSession::new("mirror-session", 7010).unwrap();
+        let mut server = MirrorRtspTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            session,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            server.serve_requests(0),
+            Err(AirplayError::Invalid("mirror RTSP request batch size"))
+        );
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            stream
+                .write_all(b"OPTIONS rtsp://receiver/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        });
+        let peer = server.serve_once().unwrap();
+        let response = client.join().unwrap();
+        assert!(peer.ip().is_loopback());
+        assert!(response.starts_with(b"RTSP/1.0 200 OK\r\n"));
+        assert_eq!(server.state(), MirrorSessionState::Idle);
     }
 }

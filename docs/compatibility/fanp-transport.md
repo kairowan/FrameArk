@@ -81,7 +81,9 @@ The experimental `frameark-airplay` crate provides bounded RTSP/1.0 and strict
 RTP audio packet contracts, XML Property List metadata, plus an explicit ANNOUNCE SDP and
 OPTIONS/ANNOUNCE/SETUP/RECORD/FLUSH/TEARDOWN RAOP session state machine. It
 also validates bounded H.264 mirror access units, orientation, and a 90 kHz
-clock policy.
+clock policy. `MirrorRtspTcpServer` supplies a one-request-per-connection,
+read-deadline and request-budget bounded TCP adapter for the mirror session;
+socket admission and authorization remain caller-owned.
 It does not implement Apple pairing, FairPlay/AES-CTR decryption, audio/video
 decoding, timing/retransmission, or Apple-device compatibility. The mirror
 media coordinator filters the negotiated peer IP/SSRC and resets its bounded
