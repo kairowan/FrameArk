@@ -28,6 +28,8 @@ AirPlay/RAOP interoperability.
   timestamps, duration, channel, and payload-size validation;
 - an explicit OPTIONS → ANNOUNCE → SETUP → RECORD → FLUSH/TEARDOWN RTSP
   session state machine with caller-owned UDP ports.
+- bounded RAOP `SET_PARAMETER`/`GET_PARAMETER` text controls for volume,
+  sample progress, and a small title/artist/album/genre/composer metadata set.
 
 The RTSP session does not own a TCP socket, and the RTP socket adapter does not
 join multicast groups or enforce the negotiated peer, SSRC, payload type, or
@@ -35,8 +37,8 @@ encryption policy. These remain caller-owned decisions. The crate does not
 decode audio or perform Apple pairing; it is a deterministic protocol contract
 that a future daemon can connect to platform audio and timing adapters.
 
-FairPlay, AES-CTR decryption, pairing, AirPlay 2, H.265, and Apple device
-compatibility are not implemented or implied. The
+FairPlay, AES-CTR decryption, pairing, DMAP metadata, AirPlay 2, H.265, and
+Apple device compatibility are not implemented or implied. The
 compatibility label is **Experimental**.
 
 ```powershell

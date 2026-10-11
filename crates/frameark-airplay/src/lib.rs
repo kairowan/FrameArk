@@ -61,6 +61,12 @@ pub const MAX_MIRROR_RTSP_RUNTIME_DURATION: Duration = Duration::from_secs(60);
 pub const MAX_RAOP_RTSP_REQUESTS_PER_RUN: usize = 128;
 /// Maximum wall-clock budget accepted by the RAOP RTSP runtime helper.
 pub const MAX_RAOP_RTSP_RUNTIME_DURATION: Duration = Duration::from_secs(60);
+/// Maximum UTF-8 `text/parameters` payload accepted by RAOP control methods.
+pub const MAX_RAOP_PARAMETER_BYTES: usize = 4 * 1024;
+/// Maximum metadata fields retained for one RAOP session.
+pub const MAX_RAOP_METADATA_FIELDS: usize = 8;
+/// Maximum bytes retained for one RAOP metadata value.
+pub const MAX_RAOP_METADATA_VALUE_BYTES: usize = 512;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -821,10 +827,152 @@ pub enum RaopSessionState {
     Closed,
 }
 
+/// Sample positions reported by a bounded RAOP progress parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RaopProgress {
+    /// First sample in the progress interval.
+    pub start: u64,
+    /// Current sample position.
+    pub current: u64,
+    /// Last sample in the progress interval.
+    pub end: u64,
+}
+
+/// Text metadata and remote-control state accepted by one RAOP session.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RaopControlState {
+    volume_db: Option<f32>,
+    progress: Option<RaopProgress>,
+    metadata: BTreeMap<String, String>,
+}
+
+impl RaopControlState {
+    /// Returns the most recently accepted volume in dB, if supplied.
+    pub fn volume_db(&self) -> Option<f32> {
+        self.volume_db
+    }
+
+    /// Returns the most recently accepted sample progress, if supplied.
+    pub fn progress(&self) -> Option<RaopProgress> {
+        self.progress
+    }
+
+    /// Returns a retained metadata value by its normalized key.
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+
+    fn apply_text_parameters(&mut self, body: &[u8]) -> Result<(), AirplayError> {
+        if body.len() > MAX_RAOP_PARAMETER_BYTES {
+            return Err(AirplayError::TooLarge("RAOP parameter body"));
+        }
+        let text =
+            std::str::from_utf8(body).map_err(|_| AirplayError::Invalid("RAOP parameter UTF-8"))?;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (raw_key, raw_value) = line
+                .split_once(':')
+                .ok_or(AirplayError::Invalid("RAOP parameter line"))?;
+            let key = raw_key.trim().to_ascii_lowercase();
+            let value = raw_value.trim();
+            if key.is_empty() || value.is_empty() {
+                return Err(AirplayError::Invalid("RAOP parameter line"));
+            }
+            match key.as_str() {
+                "volume" => {
+                    let volume = value
+                        .parse::<f32>()
+                        .map_err(|_| AirplayError::Invalid("RAOP volume"))?;
+                    if !volume.is_finite() || !(-144.0..=0.0).contains(&volume) {
+                        return Err(AirplayError::Invalid("RAOP volume"));
+                    }
+                    self.volume_db = Some(volume);
+                }
+                "progress" => {
+                    let values = value.split('/').collect::<Vec<_>>();
+                    if values.len() != 3 {
+                        return Err(AirplayError::Invalid("RAOP progress"));
+                    }
+                    let progress = RaopProgress {
+                        start: values[0]
+                            .parse()
+                            .map_err(|_| AirplayError::Invalid("RAOP progress"))?,
+                        current: values[1]
+                            .parse()
+                            .map_err(|_| AirplayError::Invalid("RAOP progress"))?,
+                        end: values[2]
+                            .parse()
+                            .map_err(|_| AirplayError::Invalid("RAOP progress"))?,
+                    };
+                    if progress.start > progress.current || progress.current > progress.end {
+                        return Err(AirplayError::Invalid("RAOP progress"));
+                    }
+                    self.progress = Some(progress);
+                }
+                "title" | "artist" | "album" | "genre" | "composer" => {
+                    if value.len() > MAX_RAOP_METADATA_VALUE_BYTES
+                        || self.metadata.len() >= MAX_RAOP_METADATA_FIELDS
+                            && !self.metadata.contains_key(&key)
+                    {
+                        return Err(AirplayError::TooLarge("RAOP metadata"));
+                    }
+                    self.metadata.insert(key, value.to_string());
+                }
+                _ => return Err(AirplayError::Invalid("RAOP parameter name")),
+            }
+        }
+        Ok(())
+    }
+
+    fn requested_parameters(&self, body: &[u8]) -> Result<Vec<u8>, AirplayError> {
+        if body.len() > MAX_RAOP_PARAMETER_BYTES {
+            return Err(AirplayError::TooLarge("RAOP parameter body"));
+        }
+        let text =
+            std::str::from_utf8(body).map_err(|_| AirplayError::Invalid("RAOP parameter UTF-8"))?;
+        let mut response = String::new();
+        for line in text.lines() {
+            let key = line.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            match key.as_str() {
+                "volume" => {
+                    if let Some(volume) = self.volume_db {
+                        response.push_str(&format!("volume: {volume:.6}\r\n"));
+                    }
+                }
+                "progress" => {
+                    if let Some(progress) = self.progress {
+                        response.push_str(&format!(
+                            "progress: {}/{}/{}\r\n",
+                            progress.start, progress.current, progress.end
+                        ));
+                    }
+                }
+                "title" | "artist" | "album" | "genre" | "composer" => {
+                    if let Some(value) = self.metadata.get(&key) {
+                        response.push_str(&key);
+                        response.push_str(": ");
+                        response.push_str(value);
+                        response.push_str("\r\n");
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(response.into_bytes())
+    }
+}
+
 /// Bounded RAOP RTSP state machine. It does not own a TCP or UDP socket.
 pub struct RaopSession {
     state: RaopSessionState,
     audio_format: Option<RaopAudioFormat>,
+    control: RaopControlState,
     server_port: u16,
     session_id: String,
 }
@@ -838,6 +986,7 @@ impl RaopSession {
         Ok(Self {
             state: RaopSessionState::Idle,
             audio_format: None,
+            control: RaopControlState::default(),
             server_port,
             session_id: "frameark-raop-1".to_string(),
         })
@@ -851,6 +1000,11 @@ impl RaopSession {
     /// Returns the negotiated audio format after ANNOUNCE.
     pub fn audio_format(&self) -> Option<&RaopAudioFormat> {
         self.audio_format.as_ref()
+    }
+
+    /// Returns the current text metadata and remote-control state.
+    pub fn control(&self) -> &RaopControlState {
+        &self.control
     }
 
     /// Applies one RTSP request and returns a bounded response.
@@ -908,7 +1062,23 @@ impl RaopSession {
             {
                 Vec::new()
             }
-            "GET_PARAMETER" if self.state != RaopSessionState::Closed => request.body.clone(),
+            "SET_PARAMETER"
+                if matches!(
+                    self.state,
+                    RaopSessionState::Setup | RaopSessionState::Recording
+                ) =>
+            {
+                if request.headers.get("content-type").map(String::as_str)
+                    != Some("text/parameters")
+                {
+                    return Err(AirplayError::Invalid("RAOP parameter content type"));
+                }
+                self.control.apply_text_parameters(&request.body)?;
+                Vec::new()
+            }
+            "GET_PARAMETER" if self.state != RaopSessionState::Closed => {
+                self.control.requested_parameters(&request.body)?
+            }
             "TEARDOWN" if self.state != RaopSessionState::Closed => {
                 self.state = RaopSessionState::Closed;
                 self.audio_format = None;
@@ -3437,6 +3607,71 @@ mod tests {
         assert_eq!(server.serve_for(Duration::from_secs(1), 1).unwrap(), 1);
         assert!(client.join().unwrap().starts_with(b"RTSP/1.0 200 OK\r\n"));
         assert_eq!(server.state(), RaopSessionState::Idle);
+    }
+
+    #[test]
+    fn raop_set_parameter_tracks_bounded_control_and_metadata() {
+        let mut session = RaopSession::new(6000).unwrap();
+        session.handle(&announce()).unwrap();
+        session
+            .handle(&request(
+                "SETUP",
+                3,
+                &[(
+                    "transport",
+                    "RTP/AVP/UDP;unicast;mode=record;control_port=6001",
+                )],
+                &[],
+            ))
+            .unwrap();
+        session.handle(&request("RECORD", 4, &[], &[])).unwrap();
+
+        let parameters = b"volume: -10.5\r\nprogress: 0/44100/88200\r\ntitle: FrameArk Demo\r\nartist: FrameArk\r\n";
+        session
+            .handle(&request(
+                "SET_PARAMETER",
+                5,
+                &[("content-type", "text/parameters")],
+                parameters,
+            ))
+            .unwrap();
+        assert_eq!(session.control().volume_db(), Some(-10.5));
+        assert_eq!(
+            session.control().progress(),
+            Some(RaopProgress {
+                start: 0,
+                current: 44_100,
+                end: 88_200,
+            })
+        );
+        assert_eq!(session.control().metadata("title"), Some("FrameArk Demo"));
+        assert_eq!(session.control().metadata("artist"), Some("FrameArk"));
+
+        let response = session
+            .handle(&request(
+                "GET_PARAMETER",
+                6,
+                &[],
+                b"volume\r\nprogress\r\ntitle\r\n",
+            ))
+            .unwrap();
+        assert_eq!(
+            response.body,
+            b"volume: -10.500000\r\nprogress: 0/44100/88200\r\ntitle: FrameArk Demo\r\n"
+        );
+        assert_eq!(
+            session.handle(&request("SET_PARAMETER", 7, &[], b"volume: -1\r\n")),
+            Err(AirplayError::Invalid("RAOP parameter content type"))
+        );
+        assert_eq!(
+            session.handle(&request(
+                "SET_PARAMETER",
+                8,
+                &[("content-type", "text/parameters")],
+                b"volume: 1\r\n",
+            )),
+            Err(AirplayError::Invalid("RAOP volume"))
+        );
     }
 
     #[test]
