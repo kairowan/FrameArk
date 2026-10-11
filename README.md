@@ -75,8 +75,9 @@ and carries bounded FAM1 access units. Rust can now exercise one complete
 Offer → Start → media → Stop loopback with fake renderers, and the Android
 shell forwards its foreground lifecycle to a protected Rust session through
 JNI. FANP can also forward received encoded access units through
-`NativeEncodedMediaReceiver` to the bounded `JniMediaQueueSink`; Android owns
-the subsequent codec and render loop. Neither component grants persistent
+`NativeEncodedMediaReceiver` to the bounded `JniMediaQueueSink`; Android's
+`MediaPlaybackPump` provides a bounded poll/dispatch loop while platform
+consumers own the subsequent codec and render APIs. Neither component grants persistent
 trust, ships a real codec, or claims Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
 caller-owned HTTP/SOAP renderer contracts. GENA events can now be delivered by
 an explicitly plain-HTTP, bounded callback client; HTTPS/TLS, lease expiry,

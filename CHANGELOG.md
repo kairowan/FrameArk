@@ -39,6 +39,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   QUIC/FAM1-to-sink receiver orchestration, and `JniMediaQueueSink` wiring;
   Android service attachment, physical-device loading, and codec/render-loop
   integration remain pending.
+- Experimental Android `MediaPlaybackPump` with ABI-aware start/stop, bounded
+  per-tick polling, video/audio routing, and unavailable-native handling;
+  platform codec consumers and real-device playback remain pending.
 - Experimental `frameark-dlna` foundation with bounded SSDP parsing and
   escaped UPnP device-description generation; network/SOAP interoperability
   remains unimplemented.
