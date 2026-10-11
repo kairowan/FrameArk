@@ -84,6 +84,10 @@ All notable FrameArk changes will be documented in this file. The project follow
   validation, and XML/binary plist dimension/orientation/audio-rate checks;
   sockets, Apple pairing, decoder, mirror audio, and device compatibility
   remain pending.
+- Experimental bounded AirPlay mirror AAC/PCM16 audio format and access-unit
+  contracts with sample-clock timestamps, duration/channel validation, PCM
+  alignment checks, and payload limits; mirror audio transport and decoding
+  remain pending.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
