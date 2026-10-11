@@ -160,6 +160,7 @@ dependencies = [
  "frameark-media",
  "frameark-native",
  "frameark-transport",
+ "frameark-trust",
  "jni",
  "tokio",
 ]

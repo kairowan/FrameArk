@@ -17,6 +17,7 @@ frameark-discovery = { path = "../frameark-discovery" }
 frameark-media = { path = "../frameark-media" }
 frameark-native = { path = "../frameark-native" }
 frameark-transport = { path = "../frameark-transport" }
+frameark-trust = { path = "../frameark-trust" }
 jni.workspace = true
 tokio.workspace = true
 

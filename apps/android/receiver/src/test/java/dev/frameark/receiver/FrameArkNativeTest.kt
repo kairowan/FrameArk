@@ -63,6 +63,52 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun forwards_explicit_peer_trust_and_revoke_to_rust() {
+        val fingerprint = List(32) { "cd" }.joinToString(":")
+        val calls = mutableListOf<String>()
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            trustPeerProvider = { id, value, label ->
+                calls += "trust:$id:$value:$label"
+                0
+            },
+            revokePeerProvider = { id -> calls += "revoke:$id"; 0 },
+            peerTrustedProvider = { id, value ->
+                calls += "check:$id:$value"
+                1
+            },
+        )
+        val peer = FrameArkNative.TrustedPeer("sender-1", fingerprint, "Living room")
+
+        assertTrue(bridge.trustPeer(peer))
+        assertTrue(bridge.isPeerTrusted(peer.deviceId, peer.fingerprint))
+        assertTrue(bridge.revokePeer(peer.deviceId))
+        assertEquals(
+            listOf(
+                "trust:sender-1:$fingerprint:Living room",
+                "check:sender-1:$fingerprint",
+                "revoke:sender-1",
+            ),
+            calls,
+        )
+    }
+
+    @Test
+    fun rejects_malformed_peer_trust_before_crossing_jni() {
+        var trustCalls = 0
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            trustPeerProvider = { _, _, _ -> trustCalls += 1; 0 },
+        )
+
+        assertFalse(bridge.trustPeer(FrameArkNative.TrustedPeer("sender-1", "00", "Sender")))
+        assertFalse(bridge.trustPeer(FrameArkNative.TrustedPeer("sender-1", List(32) { "aa" }.joinToString(":"), "\n")))
+        assertEquals(0, trustCalls)
+    }
+
+    @Test
     fun reports_a_loaded_matching_abi() {
         var requestedLibrary = ""
         val bridge = FrameArkNative(

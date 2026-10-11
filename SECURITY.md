@@ -237,6 +237,14 @@ Rust, logs, notifications, or diagnostics; only a validated public-key
 fingerprint is retained in the identity state. This is an identity-availability
 gate, not sender authorization or a substitute for Rust trust approval.
 
+The Android JNI trust calls delegate peer add/refresh, explicit revoke, and
+fingerprint matching to the bounded Rust `TrustRegistry`. A changed fingerprint
+is rejected until revocation; capacity and labels remain bounded. The bridge
+does not authenticate a sender, persist the registry, encrypt a snapshot, or
+decide whether a user approved a request. UI and platform secure-storage
+integration must remain outside the JNI parser and be added before remembered
+trust is advertised.
+
 The JNI lifecycle requires that public identity before opening its network
 listener. Rust validates the bounded ASCII alias and SHA-256 fingerprint, uses
 a fingerprint-derived device ID (not the shared Keystore alias), and rejects

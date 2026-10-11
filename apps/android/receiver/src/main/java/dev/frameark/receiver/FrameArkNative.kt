@@ -24,6 +24,9 @@ class FrameArkNative(
     videoConfigProvider: (() -> ByteArray?)? = null,
     audioConfigProvider: (() -> ByteArray?)? = null,
     identityProvider: ((String, String) -> Int)? = null,
+    trustPeerProvider: ((String, String, String) -> Int)? = null,
+    revokePeerProvider: ((String) -> Int)? = null,
+    peerTrustedProvider: ((String, String) -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
@@ -57,6 +60,12 @@ class FrameArkNative(
         audioConfigProvider ?: { nativePollAudioConfig() }
     private val bridgeIdentityProvider: (String, String) -> Int =
         identityProvider ?: { alias, fingerprint -> nativeSetDeviceIdentity(alias, fingerprint) }
+    private val bridgeTrustPeerProvider: (String, String, String) -> Int =
+        trustPeerProvider ?: { deviceId, fingerprint, label -> nativeTrustPeer(deviceId, fingerprint, label) }
+    private val bridgeRevokePeerProvider: (String) -> Int =
+        revokePeerProvider ?: { deviceId -> nativeRevokePeer(deviceId) }
+    private val bridgePeerTrustedProvider: (String, String) -> Int =
+        peerTrustedProvider ?: { deviceId, fingerprint -> nativeIsPeerTrusted(deviceId, fingerprint) }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -122,6 +131,13 @@ class FrameArkNative(
         val channels: Int,
     )
 
+    /** Public identity presented by a sender for explicit user approval. */
+    data class TrustedPeer(
+        val deviceId: String,
+        val fingerprint: String,
+        val label: String,
+    )
+
     /** One bounded encoded frame delivered from Rust to an Android renderer. */
     data class MediaFrame(
         val kind: MediaKind,
@@ -182,6 +198,34 @@ class FrameArkNative(
             DeviceIdentityPolicy.validateAlias(identity.alias)
             DeviceIdentityPolicy.validateFingerprint(identity.publicKeyFingerprint)
             bridgeIdentityProvider(identity.alias, identity.publicKeyFingerprint) == 0
+        }.getOrDefault(false)
+    }
+
+    /** Adds or refreshes an explicitly approved peer in Rust's trust registry. */
+    fun trustPeer(peer: TrustedPeer): Boolean {
+        when (load()) {
+            is LoadResult.Loaded -> Unit
+            else -> return false
+        }
+        return runCatching {
+            DeviceIdentityPolicy.validateFingerprint(peer.fingerprint)
+            require(peer.label.isNotBlank() && peer.label.length <= 128) {
+                "trusted peer label is invalid"
+            }
+            bridgeTrustPeerProvider(peer.deviceId, peer.fingerprint, peer.label) == 0
+        }.getOrDefault(false)
+    }
+
+    /** Explicitly revokes a peer; Rust rejects unknown records. */
+    fun revokePeer(deviceId: String): Boolean =
+        isLoaded() && deviceId.isNotBlank() && bridgeRevokePeerProvider(deviceId) == 0
+
+    /** Checks the Rust-owned trust record without exposing registry contents. */
+    fun isPeerTrusted(deviceId: String, fingerprint: String): Boolean {
+        if (!isLoaded()) return false
+        return runCatching {
+            DeviceIdentityPolicy.validateFingerprint(fingerprint)
+            bridgePeerTrustedProvider(deviceId, fingerprint) == 1
         }.getOrDefault(false)
     }
 
@@ -341,6 +385,12 @@ class FrameArkNative(
     private external fun nativeVersion(): Int
 
     private external fun nativeSetDeviceIdentity(alias: String, fingerprint: String): Int
+
+    private external fun nativeTrustPeer(deviceId: String, fingerprint: String, label: String): Int
+
+    private external fun nativeRevokePeer(deviceId: String): Int
+
+    private external fun nativeIsPeerTrusted(deviceId: String, fingerprint: String): Int
 
     private external fun nativeStartReceiver(): Int
 
