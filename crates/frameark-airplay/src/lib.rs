@@ -1629,10 +1629,29 @@ impl RaopRtspTcpServer {
 
     /// Accepts one bounded request, writes one response, and closes the stream.
     pub fn serve_once(&mut self) -> Result<SocketAddr, AirplayError> {
+        self.serve_once_with_peer_policy(|_| true)
+    }
+
+    /// Accepts one request only when the caller-owned peer policy approves it.
+    ///
+    /// The policy runs immediately after `accept`, before any RTSP bytes enter
+    /// the session state machine. Callers should bind it to the authenticated
+    /// RTSP/pairing context; returning `false` drops the stream and leaves the
+    /// session unchanged.
+    pub fn serve_once_with_peer_policy<F>(
+        &mut self,
+        authorize: F,
+    ) -> Result<SocketAddr, AirplayError>
+    where
+        F: FnOnce(SocketAddr) -> bool,
+    {
         let (stream, peer) = self
             .listener
             .accept()
             .map_err(|error| AirplayError::Io(error.kind()))?;
+        if !authorize(peer) {
+            return Err(AirplayError::Invalid("RAOP RTSP peer"));
+        }
         self.serve_connection(stream, peer, self.read_timeout)
     }
 
@@ -2954,10 +2973,28 @@ impl MirrorRtspTcpServer {
     /// Accepts one request, applies the state machine, writes one response,
     /// and closes the connection.
     pub fn serve_once(&mut self) -> Result<SocketAddr, AirplayError> {
+        self.serve_once_with_peer_policy(|_| true)
+    }
+
+    /// Accepts one request only when the caller-owned peer policy approves it.
+    ///
+    /// The policy runs immediately after `accept`, before any RTSP bytes enter
+    /// the mirror state machine. Returning `false` drops the stream and leaves
+    /// the negotiated transport/configuration unchanged.
+    pub fn serve_once_with_peer_policy<F>(
+        &mut self,
+        authorize: F,
+    ) -> Result<SocketAddr, AirplayError>
+    where
+        F: FnOnce(SocketAddr) -> bool,
+    {
         let (stream, peer) = self
             .listener
             .accept()
             .map_err(|error| AirplayError::Io(error.kind()))?;
+        if !authorize(peer) {
+            return Err(AirplayError::Invalid("mirror RTSP peer"));
+        }
         self.serve_connection(stream, peer, self.read_timeout)
     }
 
@@ -4418,6 +4455,25 @@ mod tests {
     }
 
     #[test]
+    fn raop_peer_policy_rejects_before_request_parsing() {
+        let session = RaopSession::new(6000).unwrap();
+        let mut server = RaopRtspTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            session,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || std::net::TcpStream::connect(address));
+        assert_eq!(
+            server.serve_once_with_peer_policy(|peer| peer.ip().is_unspecified()),
+            Err(AirplayError::Invalid("RAOP RTSP peer"))
+        );
+        assert!(client.join().unwrap().is_ok());
+        assert_eq!(server.state(), RaopSessionState::Idle);
+    }
+
+    #[test]
     fn raop_set_parameter_tracks_bounded_control_and_metadata() {
         let mut session = RaopSession::new(6000).unwrap();
         session.handle(&announce()).unwrap();
@@ -5189,6 +5245,25 @@ mod tests {
         let response = client.join().unwrap();
         assert!(peer.ip().is_loopback());
         assert!(response.starts_with(b"RTSP/1.0 200 OK\r\n"));
+        assert_eq!(server.state(), MirrorSessionState::Idle);
+    }
+
+    #[test]
+    fn mirror_peer_policy_rejects_before_request_parsing() {
+        let session = MirrorSession::new("mirror", 7000).unwrap();
+        let mut server = MirrorRtspTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            session,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || std::net::TcpStream::connect(address));
+        assert_eq!(
+            server.serve_once_with_peer_policy(|peer| peer.ip().is_unspecified()),
+            Err(AirplayError::Invalid("mirror RTSP peer"))
+        );
+        assert!(client.join().unwrap().is_ok());
         assert_eq!(server.state(), MirrorSessionState::Idle);
     }
 

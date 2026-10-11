@@ -42,6 +42,8 @@ AirPlay/RAOP interoperability.
   response headers/body, content-length checks, MIME validation, and explicit
   no-redirect behavior; DNS, TLS, redirects, caching, and decoding remain
   caller-owned.
+- caller-owned peer authorization hooks on the RAOP and mirror RTSP TCP
+  adapters, evaluated before request bytes enter the session state machine.
 
 The RTSP session does not own a TCP socket, and the RTP socket adapter does not
 join multicast groups or enforce the negotiated peer, SSRC, payload type, or
