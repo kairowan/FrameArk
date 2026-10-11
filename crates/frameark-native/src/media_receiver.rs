@@ -13,7 +13,7 @@ use frameark_transport::{MediaReceiver, TransportError};
 
 use crate::media_session::MediaSession;
 use crate::media_wire;
-use frameark_api::{AudioRenderer, VideoRenderer};
+use frameark_api::{AudioFrame, AudioRenderer, EncodedMediaSink, VideoFrame, VideoRenderer};
 
 /// Bounded counters for one received media stream.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -47,12 +47,84 @@ pub struct NativeMediaReceiver<V: VideoRenderer, A: AudioRenderer> {
     session: MediaSession<V, A>,
 }
 
+/// Receives negotiated FAM1 access units and forwards them to a platform-owned
+/// encoded-media queue without decoding them in Rust.
+pub struct NativeEncodedMediaReceiver<S: EncodedMediaSink> {
+    stream: MediaReceiver,
+    sink: S,
+}
+
+impl<S> NativeEncodedMediaReceiver<S>
+where
+    S: EncodedMediaSink,
+{
+    /// Creates an encoded receiver for a started FANP media stream.
+    pub fn new(stream: MediaReceiver, sink: S) -> Self {
+        Self { stream, sink }
+    }
+
+    /// Receives until the sender finishes or a bounded transport/sink error occurs.
+    pub async fn serve(mut self, budget: Duration) -> Result<MediaStreamReport> {
+        let mut report = MediaStreamReport::default();
+        loop {
+            let bytes = match self.stream.receive_frame(budget).await {
+                Ok(bytes) => bytes,
+                Err(TransportError::ConnectionClosed) => return Ok(report),
+                Err(error) => return Err(transport_error(error)),
+            };
+            let packet = media_wire::decode(&bytes)?;
+            let payload_bytes = packet.payload_len() as u64;
+            match &packet {
+                frameark_media::MediaPacket::Video(frame) => self
+                    .sink
+                    .push_video(VideoFrame {
+                        track_id: frame.track_id(),
+                        data: frame.payload(),
+                        timestamp: frame.presentation().value(),
+                        keyframe: frame.is_keyframe(),
+                    })
+                    .map_err(|_| {
+                        FrameArkError::new(
+                            ErrorKind::Media,
+                            "fanp.encoded_media_sink",
+                            "encoded video sink rejected a frame",
+                        )
+                    })?,
+                frameark_media::MediaPacket::Audio(packet) => self
+                    .sink
+                    .push_audio(AudioFrame {
+                        track_id: packet.track_id(),
+                        data: packet.payload(),
+                        timestamp: packet.timestamp().value(),
+                    })
+                    .map_err(|_| {
+                        FrameArkError::new(
+                            ErrorKind::Media,
+                            "fanp.encoded_media_sink",
+                            "encoded audio sink rejected a frame",
+                        )
+                    })?,
+            }
+            report.frames = report.frames.saturating_add(1);
+            report.payload_bytes = report.payload_bytes.saturating_add(payload_bytes);
+            match packet {
+                frameark_media::MediaPacket::Video(_) => {
+                    report.video_frames = report.video_frames.saturating_add(1)
+                }
+                frameark_media::MediaPacket::Audio(_) => {
+                    report.audio_frames = report.audio_frames.saturating_add(1)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::{SessionOffer, media_wire};
-    use frameark_api::{AudioFrame, VideoFrame};
+    use frameark_api::{AudioFrame, EncodedMediaSink, VideoFrame};
     use frameark_core::{AudioConfig, MediaCodec, TimeBase, TrackId, VideoConfig};
     use frameark_media::{
         AudioPacket, MediaPacket, MediaTimestamp, VideoFrame as EncodedVideoFrame,
@@ -104,6 +176,31 @@ mod tests {
 
         fn reset(&mut self) -> std::result::Result<(), Self::Error> {
             self.0.lock().unwrap().resets += 1;
+            Ok(())
+        }
+    }
+
+    type Received = Vec<(u8, i64, Vec<u8>)>;
+
+    #[derive(Clone)]
+    struct CollectSink(Arc<Mutex<Received>>);
+
+    impl EncodedMediaSink for CollectSink {
+        type Error = ();
+
+        fn push_video(&mut self, frame: VideoFrame<'_>) -> std::result::Result<(), Self::Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((1, frame.timestamp, frame.data.to_vec()));
+            Ok(())
+        }
+
+        fn push_audio(&mut self, frame: AudioFrame<'_>) -> std::result::Result<(), Self::Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((2, frame.timestamp, frame.data.to_vec()));
             Ok(())
         }
     }
@@ -228,6 +325,94 @@ mod tests {
         assert_eq!(counts.video, 1);
         assert_eq!(counts.audio, 1);
         assert_eq!(counts.resets, 2);
+        transport.close();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quic_media_stream_reaches_encoded_platform_sink() {
+        let server = Arc::new(
+            PairingServer::bind(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("123456").unwrap(),
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let accepting = Arc::clone(&server);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let receiver_received = Arc::clone(&received);
+        let receiver_task = tokio::spawn(async move {
+            let transport = accepting
+                .accept_pairing(Duration::from_secs(5))
+                .await
+                .unwrap();
+            let stream = transport
+                .accept_media_stream(Duration::from_secs(5))
+                .await
+                .unwrap();
+            NativeEncodedMediaReceiver::new(stream, CollectSink(receiver_received))
+                .serve(Duration::from_secs(5))
+                .await
+                .unwrap()
+        });
+
+        let transport = PairingClient::connect(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("123456").unwrap(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let mut sender = transport.open_media_stream().await.unwrap();
+        let video = MediaPacket::Video(
+            EncodedVideoFrame::new(
+                TrackId::new("video-0").unwrap(),
+                1,
+                timestamp(0),
+                None,
+                true,
+                vec![1, 2, 3],
+            )
+            .unwrap(),
+        );
+        let audio = MediaPacket::Audio(
+            AudioPacket::new(
+                TrackId::new("audio-0").unwrap(),
+                1,
+                timestamp(960),
+                960,
+                vec![4, 5],
+            )
+            .unwrap(),
+        );
+        sender
+            .send_frame(&media_wire::encode(&video).unwrap(), Duration::from_secs(2))
+            .await
+            .unwrap();
+        sender
+            .send_frame(&media_wire::encode(&audio).unwrap(), Duration::from_secs(2))
+            .await
+            .unwrap();
+        sender.finish().unwrap();
+
+        assert_eq!(
+            receiver_task.await.unwrap(),
+            MediaStreamReport {
+                frames: 2,
+                video_frames: 1,
+                audio_frames: 1,
+                payload_bytes: 5,
+            }
+        );
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![(1, 0, vec![1, 2, 3]), (2, 960, vec![4, 5])]
+        );
         transport.close();
         server.close();
     }

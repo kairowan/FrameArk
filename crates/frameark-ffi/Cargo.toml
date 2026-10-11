@@ -11,6 +11,7 @@ rust-version.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+frameark-api = { path = "../frameark-api" }
 frameark-core.workspace = true
 jni.workspace = true
 

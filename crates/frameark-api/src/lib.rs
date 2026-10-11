@@ -60,6 +60,23 @@ pub trait AudioRenderer {
     fn reset(&mut self) -> std::result::Result<(), Self::Error>;
 }
 
+/// A platform-facing sink for encoded access units received from FANP.
+///
+/// This boundary is useful when the platform owns decoding asynchronously,
+/// such as Android's JNI queue. Rust still owns protocol framing and session
+/// state; the implementation only copies or queues the bounded sample for the
+/// platform codec pipeline.
+pub trait EncodedMediaSink {
+    /// Platform-specific queueing error type.
+    type Error;
+
+    /// Accepts one encoded video sample.
+    fn push_video(&mut self, frame: VideoFrame<'_>) -> std::result::Result<(), Self::Error>;
+
+    /// Accepts one encoded audio sample.
+    fn push_audio(&mut self, frame: AudioFrame<'_>) -> std::result::Result<(), Self::Error>;
+}
+
 /// A monotonic clock supplied by a platform adapter.
 pub trait MonotonicClock {
     /// Returns elapsed microseconds from a monotonic, non-wall-clock source.
