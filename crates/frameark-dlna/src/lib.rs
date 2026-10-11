@@ -54,6 +54,8 @@ pub const DEFAULT_GENA_TIMEOUT_SECONDS: u32 = 1800;
 pub const MAX_GENA_TIMEOUT_SECONDS: u32 = 86_400;
 /// Maximum DNS addresses a caller may hand to the media URI policy check.
 pub const MAX_MEDIA_RESOLVED_ADDRESSES: usize = 16;
+/// Maximum bytes accepted for a probed media content type or DLNA profile.
+pub const MAX_MEDIA_FORMAT_FIELD_BYTES: usize = 256;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -1244,6 +1246,48 @@ pub struct GenaCallbackResponse {
     pub body: Vec<u8>,
 }
 
+/// Sends one GENA callback through a caller-owned HTTP or TLS stream.
+///
+/// The connector receives a validated scheme, authority, and timeout. It is
+/// responsible for DNS policy, socket setup, certificate validation, and
+/// returning a stream that has those guarantees. The protocol crate only
+/// writes one bounded request and parses one bounded response.
+pub fn send_gena_callback_with_connector<F, S>(
+    event: &GenaEvent,
+    timeout: Duration,
+    connector: F,
+) -> Result<GenaCallbackResponse, DlnaError>
+where
+    F: FnOnce(&str, &str, Duration) -> Result<S, DlnaError>,
+    S: Read + Write,
+{
+    if timeout.is_zero() {
+        return Err(DlnaError::Invalid("GENA callback timeout"));
+    }
+    let request = event.encode_http_notify()?;
+    let (scheme, _) = event
+        .callback_url
+        .split_once("://")
+        .ok_or(DlnaError::Invalid("GENA callback URL"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return Err(DlnaError::Invalid("GENA callback URL"));
+    }
+    let (authority, _) = callback_authority_and_target(&event.callback_url)?;
+    let mut stream = connector(&scheme, &authority, timeout)?;
+    stream
+        .write_all(&request)
+        .and_then(|_| stream.flush())
+        .map_err(|error| DlnaError::Io(error.kind()))?;
+    let response = read_http_response(&mut stream)?;
+    Ok(GenaCallbackResponse {
+        status: response.status,
+        reason: response.reason,
+        headers: response.headers,
+        body: response.body,
+    })
+}
+
 /// A caller-owned, synchronous GENA callback client.
 ///
 /// This client intentionally supports plain HTTP only. HTTPS callbacks are
@@ -1266,7 +1310,6 @@ impl GenaCallbackClient {
 
     /// Sends one encoded event to its validated callback and parses one HTTP response.
     pub fn send(&self, event: &GenaEvent) -> Result<GenaCallbackResponse, DlnaError> {
-        let request = event.encode_http_notify()?;
         let (scheme, _rest) = event
             .callback_url
             .split_once("://")
@@ -1276,21 +1319,13 @@ impl GenaCallbackClient {
         }
         let (authority, _) = callback_authority_and_target(&event.callback_url)?;
         let address = callback_socket_address(&authority)?;
-        let mut stream = connect_callback(address, self.timeout)?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .and_then(|_| stream.set_write_timeout(Some(self.timeout)))
-            .map_err(|error| DlnaError::Io(error.kind()))?;
-        stream
-            .write_all(&request)
-            .and_then(|_| stream.flush())
-            .map_err(|error| DlnaError::Io(error.kind()))?;
-        let response = read_http_response(&mut stream)?;
-        Ok(GenaCallbackResponse {
-            status: response.status,
-            reason: response.reason,
-            headers: response.headers,
-            body: response.body,
+        send_gena_callback_with_connector(event, self.timeout, |_scheme, _authority, timeout| {
+            let stream = connect_callback(address, timeout)?;
+            stream
+                .set_read_timeout(Some(timeout))
+                .and_then(|_| stream.set_write_timeout(Some(timeout)))
+                .map_err(|error| DlnaError::Io(error.kind()))?;
+            Ok(stream)
         })
     }
 }
@@ -1503,6 +1538,107 @@ impl MediaFormatCapabilities {
     fn sink_protocol_info(&self) -> String {
         self.sink.join(",")
     }
+}
+
+/// Bounded media metadata obtained from a caller-owned HEAD/GET response.
+///
+/// This is deliberately a response probe, not a URL fetcher. A daemon or
+/// platform adapter must perform the request, apply DNS/redirect/auth policy,
+/// and pass the bounded response here. The probe extracts only fields needed
+/// to compare a remote resource with the renderer's advertised capabilities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaFormatProbe {
+    /// MIME type without optional parameters, for example `video/mp4`.
+    pub mime_type: String,
+    /// Optional `DLNA.ORG_PN` profile from `content-features`.
+    pub dlna_profile: Option<String>,
+    /// Optional declared resource length.
+    pub content_length: Option<u64>,
+}
+
+impl MediaFormatProbe {
+    /// Extracts and validates media format fields from one bounded response.
+    pub fn from_response(response: &HttpResponse) -> Result<Self, DlnaError> {
+        if !(200..300).contains(&response.status) {
+            return Err(DlnaError::Invalid("media probe status"));
+        }
+        let raw_content_type = response
+            .headers
+            .get("content-type")
+            .ok_or(DlnaError::Invalid("media probe content type"))?;
+        let mime_type = raw_content_type
+            .split(';')
+            .next()
+            .map(str::trim)
+            .ok_or(DlnaError::Invalid("media probe content type"))?;
+        validate_media_mime(mime_type)?;
+        let content_length = response
+            .headers
+            .get("content-length")
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| DlnaError::Invalid("media probe content length"))
+            })
+            .transpose()?;
+        let dlna_profile = response
+            .headers
+            .get("contentfeatures.dlna.org")
+            .or_else(|| response.headers.get("content-features"))
+            .and_then(|value| parse_dlna_profile(value))
+            .map(str::to_string);
+        Ok(Self {
+            mime_type: mime_type.to_ascii_lowercase(),
+            dlna_profile,
+            content_length,
+        })
+    }
+
+    /// Returns whether the probe matches at least one advertised Sink entry.
+    pub fn is_supported_by(&self, capabilities: &MediaFormatCapabilities) -> bool {
+        capabilities.sink.iter().any(|entry| {
+            let mut fields = entry.splitn(4, ':');
+            let protocol = fields.next();
+            let network = fields.next();
+            let mime = fields.next();
+            protocol == Some("http-get")
+                && network == Some("*")
+                && mime.is_some_and(|value| {
+                    value == "*" || value.eq_ignore_ascii_case(&self.mime_type)
+                })
+        })
+    }
+}
+
+fn validate_media_mime(value: &str) -> Result<(), DlnaError> {
+    if value.is_empty()
+        || value.len() > MAX_MEDIA_FORMAT_FIELD_BYTES
+        || !value.contains('/')
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(DlnaError::Invalid("media probe content type"));
+    }
+    Ok(())
+}
+
+fn parse_dlna_profile(value: &str) -> Option<&str> {
+    value.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        if name.eq_ignore_ascii_case("DLNA.ORG_PN") {
+            let value = value.trim_matches('"');
+            if !value.is_empty()
+                && value.len() <= MAX_MEDIA_FORMAT_FIELD_BYTES
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Some(value);
+            }
+        }
+        None
+    })
 }
 
 /// A bounded synchronous TCP adapter for one MediaRenderer service.
@@ -1761,7 +1897,7 @@ fn connect_callback(address: SocketAddr, timeout: Duration) -> Result<TcpStream,
     TcpStream::connect_timeout(&address, timeout).map_err(|error| DlnaError::Io(error.kind()))
 }
 
-fn read_http_response(stream: &mut TcpStream) -> Result<HttpResponse, DlnaError> {
+fn read_http_response<R: Read>(stream: &mut R) -> Result<HttpResponse, DlnaError> {
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0_u8; 4096];
     loop {
@@ -3695,6 +3831,40 @@ mod tests {
     }
 
     #[test]
+    fn gena_callback_connector_keeps_https_transport_caller_owned() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream).unwrap();
+            assert_eq!(request.method, "NOTIFY");
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let event = GenaEvent {
+            sid: "uuid:frameark-sub-1".to_string(),
+            callback_url: format!("https://{address}/events"),
+            service_type: AVTRANSPORT_SERVICE.to_string(),
+            sequence: 2,
+            body: "<event/>".to_string(),
+        };
+        let mut observed = None;
+        let response = send_gena_callback_with_connector(
+            &event,
+            Duration::from_secs(1),
+            |scheme, authority, timeout| {
+                observed = Some((scheme.to_string(), authority.to_string(), timeout));
+                TcpStream::connect(address).map_err(|error| DlnaError::Io(error.kind()))
+            },
+        )
+        .unwrap();
+        assert_eq!(response.status, 204);
+        assert_eq!(observed.unwrap().0, "https");
+        server.join().unwrap();
+    }
+
+    #[test]
     fn http_response_parser_rejects_chunked_and_preserves_headers() {
         let response = HttpResponse::parse(
             b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-FrameArk: yes\r\n\r\nack",
@@ -3757,6 +3927,74 @@ mod tests {
         );
         assert_eq!(service.handle(&stop).status, 200);
         assert_eq!(service.state().transport_state, TransportState::Stopped);
+    }
+
+    #[test]
+    fn media_format_probe_extracts_bounded_response_metadata() {
+        let response = HttpResponse {
+            status: 200,
+            reason: "OK".to_string(),
+            headers: BTreeMap::from([
+                (
+                    "content-type".to_string(),
+                    "video/mp4; charset=binary".to_string(),
+                ),
+                ("content-length".to_string(), "1234".to_string()),
+                (
+                    "content-features".to_string(),
+                    "DLNA.ORG_PN=AVC_MP4_MP_HD_720p_AAC;DLNA.ORG_OP=01".to_string(),
+                ),
+            ]),
+            body: Vec::new(),
+        };
+        let probe = MediaFormatProbe::from_response(&response).unwrap();
+        assert_eq!(probe.mime_type, "video/mp4");
+        assert_eq!(
+            probe.dlna_profile.as_deref(),
+            Some("AVC_MP4_MP_HD_720p_AAC")
+        );
+        assert_eq!(probe.content_length, Some(1234));
+        let capabilities = MediaFormatCapabilities::new(vec![
+            "http-get:*:video/mp4:*".to_string(),
+            "http-get:*:audio/ogg:*".to_string(),
+        ])
+        .unwrap();
+        assert!(probe.is_supported_by(&capabilities));
+    }
+
+    #[test]
+    fn media_format_probe_rejects_unsafe_or_unsupported_metadata() {
+        let invalid = HttpResponse {
+            status: 302,
+            reason: "Found".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            MediaFormatProbe::from_response(&invalid),
+            Err(DlnaError::Invalid("media probe status"))
+        );
+        let invalid_type = HttpResponse {
+            status: 200,
+            reason: "OK".to_string(),
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "video/mp4\r\nX-Injected: yes".to_string(),
+            )]),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            MediaFormatProbe::from_response(&invalid_type),
+            Err(DlnaError::Invalid("media probe content type"))
+        );
+        let unknown_type = HttpResponse {
+            status: 200,
+            reason: "OK".to_string(),
+            headers: BTreeMap::from([("content-type".to_string(), "video/x-unknown".to_string())]),
+            body: Vec::new(),
+        };
+        let probe = MediaFormatProbe::from_response(&unknown_type).unwrap();
+        assert!(!probe.is_supported_by(&MediaFormatCapabilities::default()));
     }
 
     #[test]

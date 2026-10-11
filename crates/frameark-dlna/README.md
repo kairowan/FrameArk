@@ -24,6 +24,11 @@ DLNA/UPnP MediaRenderer work.
   callback HTTP;
 - deterministic bounded HTTP `NOTIFY` request encoding for queued GENA events;
 - a bounded synchronous plain-HTTP callback client with explicit HTTPS rejection;
+- a caller-injected GENA callback connector for HTTP or HTTPS/TLS streams; the
+  connector owns DNS, certificate validation, socket timeouts, and retries;
+- a bounded media-format probe that extracts MIME type, optional DLNA profile,
+  and content length from a caller-owned HTTP response and matches it against
+  the renderer capability report;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 - a caller-injected, bounded DNS-aware media URI policy for public-only or
@@ -46,7 +51,7 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 control/whitespace characters, fragments, malformed hosts, invalid ports, and
 unbracketed IPv6 authorities. FrameArk does not fetch URLs or bypass DRM.
 
-HTTP chunked transfer, callback connection retries and HTTPS/TLS, full
+HTTP chunked transfer, callback connection retries and built-in HTTPS/TLS, full
 DIDL-Lite parsing,
 multicast lease scheduling, network URL fetching, real decoder integration,
 and named client interoperability are not implemented yet. File streaming is
@@ -60,6 +65,10 @@ sets, multicast/unspecified addresses, private addresses for
 preflight policy boundary rather than a fetcher and cannot by itself prevent a
 later redirect or DNS change. `GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
 client but does not open callback sockets or retry failures.
+`send_gena_callback_with_connector` reuses the bounded request and response
+parser with a vetted TLS stream, but does not implement TLS or prove peer
+authentication. `MediaFormatProbe` is metadata-only: it does not fetch a URL,
+follow redirects, inspect a decoder, or override authorization and DNS policy.
 `GenaCallbackClient` supplies plain-HTTP socket I/O. Subscriptions expire on
 monotonic deadlines; subscribe, renew, publish, request handling, and event
 draining reap stale records. An optional host timer can call
