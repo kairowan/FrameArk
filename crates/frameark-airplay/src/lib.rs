@@ -4,7 +4,7 @@
 //! audio/video packets. It intentionally does not implement Apple pairing, FairPlay,
 //! AES-CTR audio decryption, ALAC/AAC decoding, or device interoperability.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::io::{Read, Write};
@@ -79,6 +79,10 @@ pub const MAX_HLS_SEGMENT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_HLS_SEGMENTS: usize = 512;
 /// Maximum segment URI length accepted by the HLS playlist boundary.
 pub const MAX_HLS_URI_BYTES: usize = 2 * 1024;
+/// Maximum aggregate encoded bytes retained by the optional HLS segment cache.
+pub const MAX_HLS_CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum entries retained by the optional HLS segment cache.
+pub const MAX_HLS_CACHE_ENTRIES: usize = 32;
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1180,6 +1184,109 @@ pub struct HlsSegmentResponse {
     pub headers: BTreeMap<String, String>,
     /// Bounded encoded segment bytes.
     pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HlsCacheEntry {
+    uri: String,
+    body: Vec<u8>,
+}
+
+/// A bounded FIFO cache for caller-owned HLS segment playback.
+///
+/// The cache stores only validated encoded bytes. It has no decoder, disk
+/// persistence, authentication, or redirect behavior; callers remain
+/// responsible for deciding which fetched responses are eligible to insert.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HlsSegmentCache {
+    max_bytes: usize,
+    bytes: usize,
+    entries: VecDeque<HlsCacheEntry>,
+}
+
+impl HlsSegmentCache {
+    /// Creates a cache with an aggregate byte budget.
+    pub fn new(max_bytes: usize) -> Result<Self, AirplayError> {
+        if max_bytes == 0 || max_bytes > MAX_HLS_CACHE_BYTES {
+            return Err(AirplayError::Invalid("HLS cache capacity"));
+        }
+        Ok(Self {
+            max_bytes,
+            bytes: 0,
+            entries: VecDeque::new(),
+        })
+    }
+
+    /// Returns the number of cached segments.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether no segments are cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns the aggregate encoded bytes currently retained.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Looks up one validated URI without changing FIFO order.
+    pub fn get(&self, uri: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.uri == uri)
+            .map(|entry| entry.body.as_slice())
+    }
+
+    /// Inserts one successful segment and evicts oldest entries to stay within
+    /// both the byte and entry bounds. Re-inserting a URI replaces its old
+    /// bytes before eviction.
+    pub fn insert(&mut self, uri: impl Into<String>, body: Vec<u8>) -> Result<(), AirplayError> {
+        let uri = uri.into();
+        validate_hls_uri(&uri)?;
+        if body.is_empty() {
+            return Err(AirplayError::Invalid("HLS cache segment"));
+        }
+        if body.len() > MAX_HLS_SEGMENT_BYTES || body.len() > self.max_bytes {
+            return Err(AirplayError::TooLarge("HLS cache segment"));
+        }
+        if let Some(index) = self.entries.iter().position(|entry| entry.uri == uri)
+            && let Some(previous) = self.entries.remove(index)
+        {
+            self.bytes = self.bytes.saturating_sub(previous.body.len());
+        }
+        while self.entries.len() >= MAX_HLS_CACHE_ENTRIES
+            || self.bytes.saturating_add(body.len()) > self.max_bytes
+        {
+            let Some(oldest) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(oldest.body.len());
+        }
+        self.bytes = self.bytes.saturating_add(body.len());
+        self.entries.push_back(HlsCacheEntry { uri, body });
+        Ok(())
+    }
+
+    /// Inserts a fetched 2xx segment response after its bounded status check.
+    pub fn insert_response(
+        &mut self,
+        uri: impl Into<String>,
+        response: &HlsSegmentResponse,
+    ) -> Result<(), AirplayError> {
+        if !(200..300).contains(&response.status) {
+            return Err(AirplayError::Invalid("HLS cache response status"));
+        }
+        self.insert(uri, response.body.clone())
+    }
+
+    /// Evicts all retained encoded bytes.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
 }
 
 /// Fetches and parses one HLS media playlist through a caller-owned stream.
@@ -4644,6 +4751,51 @@ mod tests {
             HlsMediaPlaylist::parse(b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n"),
             Err(AirplayError::Invalid("HLS target duration"))
         );
+    }
+
+    #[test]
+    fn hls_segment_cache_replaces_and_evicts_with_bounded_fifo_policy() {
+        let mut cache = HlsSegmentCache::new(6).unwrap();
+        cache.insert("one.ts", vec![1, 2, 3]).unwrap();
+        cache.insert("two.ts", vec![4, 5, 6]).unwrap();
+        assert_eq!(cache.bytes(), 6);
+        assert_eq!(cache.get("one.ts"), Some(&[1, 2, 3][..]));
+        cache.insert("three.ts", vec![7, 8, 9, 10]).unwrap();
+        assert_eq!(cache.get("one.ts"), None);
+        assert_eq!(cache.get("two.ts"), None);
+        assert_eq!(cache.get("three.ts"), Some(&[7, 8, 9, 10][..]));
+        assert_eq!(cache.bytes(), 4);
+
+        cache.insert("three.ts", vec![11, 12]).unwrap();
+        assert_eq!(cache.get("three.ts"), Some(&[11, 12][..]));
+        assert_eq!(cache.bytes(), 2);
+        assert_eq!(
+            cache.insert("../escape.ts", vec![1]),
+            Err(AirplayError::Invalid("HLS segment URI"))
+        );
+        assert_eq!(
+            HlsSegmentCache::new(0),
+            Err(AirplayError::Invalid("HLS cache capacity"))
+        );
+    }
+
+    #[test]
+    fn hls_segment_cache_rejects_oversized_or_non_success_responses() {
+        let mut cache = HlsSegmentCache::new(4).unwrap();
+        assert_eq!(
+            cache.insert("large.ts", vec![0; 5]),
+            Err(AirplayError::TooLarge("HLS cache segment"))
+        );
+        let response = HlsSegmentResponse {
+            status: 302,
+            headers: BTreeMap::new(),
+            body: vec![1],
+        };
+        assert_eq!(
+            cache.insert_response("redirect.ts", &response),
+            Err(AirplayError::Invalid("HLS cache response status"))
+        );
+        assert!(cache.is_empty());
     }
 
     #[derive(Debug)]
