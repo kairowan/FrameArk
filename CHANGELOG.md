@@ -93,6 +93,10 @@ All notable FrameArk changes will be documented in this file. The project follow
   contracts with sample-clock timestamps, duration/channel validation, PCM
   alignment checks, and payload limits; mirror audio transport and decoding
   remain pending.
+- Experimental bounded AirPlay mirror-audio RTP pipeline combining negotiated
+  AAC/PCM16 format validation, sequence reordering, explicit missing-packet
+  skips, sample-clock timestamps, and packet bounds; sockets, encryption,
+  decoding, reconfiguration recovery, and device compatibility remain pending.
 - Bounded authenticated control request/response streams with cancellation
   cleanup, transport-acknowledged responses, and deterministic lifecycle tests.
 - Experimental `frameark-native` control adapter with bounded Offer/Start/Stop/
