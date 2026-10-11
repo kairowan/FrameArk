@@ -22,7 +22,7 @@ class MediaPlaybackLoop(
         }
     },
     private val onError: (Throwable) -> Unit = {},
-) : AutoCloseable {
+) : AutoCloseable, PlaybackController {
     companion object {
         const val DEFAULT_TICK_INTERVAL_MS = 16L
         const val MIN_TICK_INTERVAL_MS = 1L
@@ -42,7 +42,7 @@ class MediaPlaybackLoop(
     private var running = false
 
     /** Starts one fixed-rate drain loop, or returns false if the native ABI is unavailable. */
-    fun start(): Boolean = synchronized(lock) {
+    override fun start(): Boolean = synchronized(lock) {
         if (running) return true
         if (!pump.start()) return false
         val executor = executor ?: executorFactory().also { this.executor = it }
@@ -63,7 +63,7 @@ class MediaPlaybackLoop(
     }
 
     /** Stops future ticks and leaves native session ownership to the caller. */
-    fun stop() {
+    override fun stop() {
         synchronized(lock) {
             running = false
             scheduled?.cancel(false)
