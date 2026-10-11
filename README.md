@@ -86,7 +86,8 @@ codec and render APIs. Neither component grants persistent trust, ships a real
 codec, or claims Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
 caller-owned HTTP/SOAP renderer contracts and one-shot IPv4 SSDP multicast
 announcements. GENA events can now be delivered by
-an explicitly plain-HTTP, bounded callback client; HTTPS/TLS, streaming media
+an explicitly plain-HTTP, bounded callback client plus a caller-injected
+HTTP/HTTPS stream boundary; built-in TLS, URL fetching, streaming media
 serving, and named-client interoperability remain future work.
 
 The executable FANP profile is documented in
@@ -112,6 +113,15 @@ python .codex/skills/frameark-development/scripts/guard_branch.py --repo .
 Every completed template, feature, protocol increment, or independent fix must pass its relevant checks and receive an atomic [Conventional Commit](https://www.conventionalcommits.org/). Changes reach `main` only through reviewed pull requests and required CI/security checks.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before starting. Repository-specific agent guidance is in [AGENTS.md](AGENTS.md), and the reusable development Skill is in [.codex/skills/frameark-development](.codex/skills/frameark-development).
+
+### Release artifacts / 发布产物
+
+Reviewed release tags publish a source archive, the verified Android release
+APK when the Android product is present, a deterministic SPDX 2.3 SBOM, and
+`SHA256SUMS` covering every published file. The SBOM describes the locked Rust
+workspace; platform SDKs, optional codecs, signatures, and provenance still
+require their own release review. Pre-alpha artifacts must not be treated as a
+Stable compatibility claim.
 
 ## Security and privacy / 安全与隐私
 
