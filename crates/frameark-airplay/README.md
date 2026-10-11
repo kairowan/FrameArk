@@ -16,6 +16,8 @@ AirPlay/RAOP interoperability.
   including cycle, reference, object-count, and nesting guards;
 - bounded H.264 Annex-B/AVCC mirror access-unit parsing with keyframe and
   orientation metadata plus a 90 kHz A/V clock policy;
+- bounded mirror video RTP pipeline for single-NAL, STAP-A, and FU-A payloads,
+  marker-delimited access units, sequence recovery, and orientation metadata;
 - bounded mirror RTSP session state with OPTIONS/SETUP/RECORD,
   GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, and
   XML/binary plist video configuration checks;
@@ -29,7 +31,7 @@ pairing. It is a deterministic protocol contract that a future daemon can
 connect to platform audio and timing adapters.
 
 FairPlay, AES-CTR decryption, pairing, AirPlay 2,
-H.265, mirror audio transport, and Apple device compatibility are not
+H.265, mirror audio socket transport, and Apple device compatibility are not
 implemented or implied. The
 compatibility label is **Experimental**.
 

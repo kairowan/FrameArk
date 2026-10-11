@@ -90,8 +90,8 @@ The executable FANP profile is documented in
 limits in [docs/compatibility/fanp-transport.md](docs/compatibility/fanp-transport.md).
 
 The AirPlay mirror contracts include bounded RTSP setup, H.264 video and
-AAC/PCM16 audio access units, plus a sequence-aware mirror-audio RTP pipeline
-that exposes explicit loss recovery to the caller. Pairing, encryption,
+AAC/PCM16 audio access units, plus sequence-aware mirror video/audio RTP
+pipelines that expose explicit loss recovery to the caller. Pairing, encryption,
 decoder/output integration, socket ownership, and Apple-device compatibility
 remain Experimental.
 

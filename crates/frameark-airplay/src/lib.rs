@@ -1,7 +1,7 @@
 //! Bounded AirPlay/RAOP protocol contracts.
 //!
-//! This M4 foundation parses RTSP control messages and unencrypted RTP audio
-//! packets. It intentionally does not implement Apple pairing, FairPlay,
+//! This M4/M5 foundation parses RTSP control messages and unencrypted RTP
+//! audio/video packets. It intentionally does not implement Apple pairing, FairPlay,
 //! AES-CTR audio decryption, ALAC/AAC decoding, or device interoperability.
 
 use std::collections::BTreeMap;
@@ -35,6 +35,8 @@ pub const MAX_BINARY_PLIST_OBJECTS: usize = MAX_PLIST_ENTRIES * 2 + 1;
 pub const MAX_MIRROR_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum H.264 NAL units in one mirror access unit.
 pub const MAX_MIRROR_NAL_UNITS: usize = 256;
+/// Maximum bytes retained while assembling one RTP mirror video access unit.
+pub const MAX_MIRROR_VIDEO_ASSEMBLY_BYTES: usize = MAX_MIRROR_ACCESS_UNIT_BYTES;
 /// Maximum mirror dimension accepted before platform allocation.
 pub const MAX_MIRROR_DIMENSION: u16 = 8192;
 /// Maximum encoded mirror audio access-unit payload.
@@ -251,6 +253,12 @@ pub struct RtpAudioPacket {
     pub payload: Vec<u8>,
 }
 
+/// RTP packet envelope reused by the mirror video pipeline.
+///
+/// The wire header is identical to the audio envelope; the alias keeps the
+/// bounded parser and jitter ordering policy shared without claiming a codec.
+pub type RtpVideoPacket = RtpAudioPacket;
+
 /// Result of inserting one packet into the bounded RTP jitter buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RtpPushResult {
@@ -325,6 +333,8 @@ impl RtpJitterBuffer {
             return Err(AirplayError::Invalid("RTP sequence recovery"));
         }
         let missing = sequence.wrapping_sub(next);
+        self.packets
+            .retain(|packet_sequence, _| !sequence_before(*packet_sequence, sequence));
         self.next_sequence = Some(sequence);
         Ok(missing)
     }
@@ -905,6 +915,239 @@ impl MirrorVideoAccessUnit {
             output.extend_from_slice(&unit.bytes);
         }
         Ok(output)
+    }
+}
+
+#[derive(Debug)]
+struct MirrorVideoAssembly {
+    timestamp: u32,
+    bytes: usize,
+    nal_units: Vec<H264NalUnit>,
+}
+
+#[derive(Debug)]
+struct MirrorVideoFragment {
+    timestamp: u32,
+    bytes: Vec<u8>,
+}
+
+/// Bounded H.264-over-RTP mirror video adapter.
+///
+/// The pipeline accepts single-NAL, STAP-A, and FU-A payloads from a caller-
+/// parsed RTP stream. Packets are reordered through the shared jitter buffer;
+/// the RTP marker closes one access unit. A missing packet must be declared by
+/// the caller with [`Self::skip_missing_to`], which discards any partial access
+/// unit rather than silently manufacturing a decodable frame.
+#[derive(Debug)]
+pub struct MirrorVideoPipeline {
+    orientation: MirrorOrientation,
+    payload_type: u8,
+    jitter: RtpJitterBuffer,
+    assembly: Option<MirrorVideoAssembly>,
+    fragment: Option<MirrorVideoFragment>,
+}
+
+impl MirrorVideoPipeline {
+    /// Creates a pipeline for one negotiated mirror payload type and jitter
+    /// capacity.
+    pub fn new(
+        orientation: MirrorOrientation,
+        payload_type: u8,
+        capacity: usize,
+    ) -> Result<Self, AirplayError> {
+        if payload_type > 127 {
+            return Err(AirplayError::Invalid("mirror video payload type"));
+        }
+        Ok(Self {
+            orientation,
+            payload_type,
+            jitter: RtpJitterBuffer::new(capacity)?,
+            assembly: None,
+            fragment: None,
+        })
+    }
+
+    /// Updates the orientation applied to the next completed access unit.
+    pub fn set_orientation(&mut self, orientation: MirrorOrientation) {
+        self.orientation = orientation;
+    }
+
+    /// Inserts one parsed RTP packet after validating the negotiated payload.
+    pub fn push(&mut self, packet: RtpVideoPacket) -> Result<RtpPushResult, AirplayError> {
+        if packet.payload_type != self.payload_type {
+            return Err(AirplayError::Invalid("mirror video payload type"));
+        }
+        self.jitter.push(packet)
+    }
+
+    /// Returns the next complete marker-delimited H.264 access unit.
+    pub fn pop_ready(&mut self) -> Result<Option<MirrorVideoAccessUnit>, AirplayError> {
+        loop {
+            let Some(packet) = self.jitter.pop_ready() else {
+                return Ok(None);
+            };
+            self.consume_packet(&packet)?;
+            if !packet.marker {
+                continue;
+            }
+            if self.fragment.is_some() {
+                return Err(AirplayError::Invalid("mirror video FU-A marker"));
+            }
+            let assembly = self
+                .assembly
+                .take()
+                .ok_or(AirplayError::Invalid("mirror video access unit"))?;
+            if assembly.nal_units.is_empty() {
+                return Err(AirplayError::Invalid("mirror video NAL units"));
+            }
+            let keyframe = assembly.nal_units.iter().any(|unit| unit.nal_type == 5);
+            return Ok(Some(MirrorVideoAccessUnit {
+                pts_90khz: u64::from(assembly.timestamp),
+                orientation: self.orientation,
+                keyframe,
+                nal_units: assembly.nal_units,
+            }));
+        }
+    }
+
+    /// Advances over a missing sequence and discards any partial video unit.
+    pub fn skip_missing_to(&mut self, sequence: u16) -> Result<u16, AirplayError> {
+        let skipped = self.jitter.skip_missing_to(sequence)?;
+        if skipped != 0 {
+            self.assembly = None;
+            self.fragment = None;
+        }
+        Ok(skipped)
+    }
+
+    /// Returns the number of packets waiting for ordered delivery.
+    pub fn buffered_len(&self) -> usize {
+        self.jitter.buffered_len()
+    }
+
+    /// Returns the number of packets dropped after arriving late.
+    pub fn dropped_late(&self) -> u64 {
+        self.jitter.dropped_late()
+    }
+
+    fn consume_packet(&mut self, packet: &RtpVideoPacket) -> Result<(), AirplayError> {
+        if let Some(assembly) = &self.assembly {
+            if assembly.timestamp != packet.timestamp {
+                return Err(AirplayError::Invalid("mirror video timestamp boundary"));
+            }
+        } else {
+            self.assembly = Some(MirrorVideoAssembly {
+                timestamp: packet.timestamp,
+                bytes: 0,
+                nal_units: Vec::new(),
+            });
+        }
+        let payload = packet.payload.as_slice();
+        if payload.is_empty() {
+            return Err(AirplayError::Invalid("mirror video RTP payload"));
+        }
+        match payload[0] & 0x1f {
+            1..=23 => self.append_nal(payload),
+            24 => self.consume_stap_a(payload),
+            28 => self.consume_fu_a(packet.timestamp, payload),
+            _ => Err(AirplayError::Invalid("mirror video RTP NAL type")),
+        }
+    }
+
+    fn consume_stap_a(&mut self, payload: &[u8]) -> Result<(), AirplayError> {
+        let mut cursor = 1usize;
+        let mut count = 0usize;
+        while cursor < payload.len() {
+            let end = cursor
+                .checked_add(2)
+                .ok_or(AirplayError::Invalid("mirror video STAP-A length"))?;
+            if end > payload.len() {
+                return Err(AirplayError::Invalid("mirror video STAP-A length"));
+            }
+            let length = usize::from(u16::from_be_bytes([payload[cursor], payload[cursor + 1]]));
+            cursor = end;
+            let nal_end = cursor
+                .checked_add(length)
+                .ok_or(AirplayError::Invalid("mirror video STAP-A length"))?;
+            if length == 0 || nal_end > payload.len() {
+                return Err(AirplayError::Invalid("mirror video STAP-A NAL"));
+            }
+            self.append_nal(&payload[cursor..nal_end])?;
+            count = count.saturating_add(1);
+            cursor = nal_end;
+        }
+        if count == 0 {
+            return Err(AirplayError::Invalid("mirror video STAP-A NAL"));
+        }
+        Ok(())
+    }
+
+    fn consume_fu_a(&mut self, timestamp: u32, payload: &[u8]) -> Result<(), AirplayError> {
+        if payload.len() < 3 {
+            return Err(AirplayError::Invalid("mirror video FU-A header"));
+        }
+        let indicator = payload[0];
+        let header = payload[1];
+        let start = header & 0x80 != 0;
+        let end = header & 0x40 != 0;
+        let nal_type = header & 0x1f;
+        if nal_type == 0 || payload[2..].is_empty() || (start && end) {
+            return Err(AirplayError::Invalid("mirror video FU-A header"));
+        }
+        if start {
+            if self.fragment.is_some() {
+                return Err(AirplayError::Invalid("mirror video FU-A overlap"));
+            }
+            let mut bytes = Vec::with_capacity(payload.len() - 1);
+            bytes.push((indicator & 0xe0) | nal_type);
+            bytes.extend_from_slice(&payload[2..]);
+            if bytes.len() > MAX_MIRROR_VIDEO_ASSEMBLY_BYTES {
+                return Err(AirplayError::TooLarge("mirror video FU-A"));
+            }
+            self.fragment = Some(MirrorVideoFragment { timestamp, bytes });
+            return Ok(());
+        }
+        let fragment = self
+            .fragment
+            .as_mut()
+            .ok_or(AirplayError::Invalid("mirror video FU-A start"))?;
+        if fragment.timestamp != timestamp {
+            return Err(AirplayError::Invalid("mirror video FU-A timestamp"));
+        }
+        let new_len = fragment
+            .bytes
+            .len()
+            .checked_add(payload.len() - 2)
+            .ok_or(AirplayError::TooLarge("mirror video FU-A"))?;
+        if new_len > MAX_MIRROR_VIDEO_ASSEMBLY_BYTES {
+            return Err(AirplayError::TooLarge("mirror video FU-A"));
+        }
+        fragment.bytes.extend_from_slice(&payload[2..]);
+        if end {
+            let bytes = self
+                .fragment
+                .take()
+                .ok_or(AirplayError::Invalid("mirror video FU-A end"))?
+                .bytes;
+            self.append_nal(&bytes)?;
+        }
+        Ok(())
+    }
+
+    fn append_nal(&mut self, bytes: &[u8]) -> Result<(), AirplayError> {
+        let Some(assembly) = self.assembly.as_mut() else {
+            return Err(AirplayError::Invalid("mirror video access unit"));
+        };
+        let new_len = assembly
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or(AirplayError::TooLarge("mirror video access unit"))?;
+        if new_len > MAX_MIRROR_VIDEO_ASSEMBLY_BYTES {
+            return Err(AirplayError::TooLarge("mirror video access unit"));
+        }
+        push_h264_nal(&mut assembly.nal_units, bytes)?;
+        assembly.bytes = new_len;
+        Ok(())
     }
 }
 
@@ -2205,6 +2448,109 @@ mod tests {
         assert!(pipeline.pop_ready().unwrap().is_some());
         assert_eq!(pipeline.skip_missing_to(12).unwrap(), 1);
         assert!(pipeline.pop_ready().unwrap().is_some());
+    }
+
+    #[test]
+    fn mirror_video_pipeline_reorders_stap_a_and_preserves_orientation() {
+        let mut pipeline = MirrorVideoPipeline::new(MirrorOrientation::Deg90, 98, 8).unwrap();
+        let packet = |sequence: u16, marker: bool, payload: Vec<u8>| RtpVideoPacket {
+            marker,
+            payload_type: 98,
+            sequence,
+            timestamp: 90_000,
+            ssrc: 11,
+            payload,
+        };
+        pipeline.push(packet(1, false, vec![0x67, 0x01])).unwrap();
+        pipeline
+            .push(packet(
+                3,
+                true,
+                vec![0x78, 0, 2, 0x68, 0x02, 0, 2, 0x65, 0x03],
+            ))
+            .unwrap();
+        pipeline.push(packet(2, false, vec![0x61, 0x04])).unwrap();
+
+        let unit = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(unit.pts_90khz, 90_000);
+        assert_eq!(unit.orientation, MirrorOrientation::Deg90);
+        assert!(unit.keyframe);
+        assert_eq!(unit.nal_units.len(), 4);
+        assert_eq!(unit.to_annex_b().unwrap().len(), 4 * 4 + 2 + 2 + 2 + 2);
+        assert!(pipeline.pop_ready().unwrap().is_none());
+    }
+
+    #[test]
+    fn mirror_video_pipeline_reassembles_fu_a_and_updates_orientation() {
+        let mut pipeline = MirrorVideoPipeline::new(MirrorOrientation::Deg0, 98, 8).unwrap();
+        let packet = |sequence: u16, marker: bool, payload: Vec<u8>| RtpVideoPacket {
+            marker,
+            payload_type: 98,
+            sequence,
+            timestamp: 180_000,
+            ssrc: 12,
+            payload,
+        };
+        pipeline
+            .push(packet(10, false, vec![0x7c, 0x85, 0x11, 0x22]))
+            .unwrap();
+        pipeline
+            .push(packet(12, true, vec![0x7c, 0x45, 0x44]))
+            .unwrap();
+        pipeline
+            .push(packet(11, false, vec![0x7c, 0x05, 0x33]))
+            .unwrap();
+        pipeline.set_orientation(MirrorOrientation::Deg180);
+
+        let unit = pipeline.pop_ready().unwrap().unwrap();
+        assert_eq!(unit.orientation, MirrorOrientation::Deg180);
+        assert!(unit.keyframe);
+        assert_eq!(unit.nal_units[0].bytes, vec![0x65, 0x11, 0x22, 0x33, 0x44]);
+    }
+
+    #[test]
+    fn mirror_video_pipeline_rejects_bad_payload_and_recovers_after_loss() {
+        let mut pipeline = MirrorVideoPipeline::new(MirrorOrientation::Deg0, 98, 4).unwrap();
+        assert_eq!(
+            pipeline.push(RtpVideoPacket {
+                payload_type: 97,
+                payload: vec![0x61, 1],
+                ..rtp_packet(1)
+            }),
+            Err(AirplayError::Invalid("mirror video payload type"))
+        );
+
+        let fu_start = RtpVideoPacket {
+            marker: false,
+            payload_type: 98,
+            timestamp: 270_000,
+            payload: vec![0x7c, 0x85, 0x01],
+            ..rtp_packet(20)
+        };
+        let fu_end = RtpVideoPacket {
+            marker: true,
+            payload_type: 98,
+            timestamp: 270_000,
+            payload: vec![0x7c, 0x45, 0x02],
+            ..rtp_packet(22)
+        };
+        pipeline.push(fu_start).unwrap();
+        pipeline.push(fu_end).unwrap();
+        assert!(pipeline.pop_ready().unwrap().is_none());
+        assert_eq!(pipeline.skip_missing_to(23).unwrap(), 2);
+        pipeline
+            .push(RtpVideoPacket {
+                marker: true,
+                payload_type: 98,
+                timestamp: 273_000,
+                payload: vec![0x65, 0x03],
+                ..rtp_packet(23)
+            })
+            .unwrap();
+        let recovered = pipeline.pop_ready().unwrap().unwrap();
+        assert!(recovered.keyframe);
+        assert_eq!(recovered.nal_units[0].bytes, vec![0x65, 0x03]);
+        assert!(pipeline.pop_ready().unwrap().is_none());
     }
 
     fn request(method: &str, cseq: u32, headers: &[(&str, &str)], body: &[u8]) -> RtspMessage {
