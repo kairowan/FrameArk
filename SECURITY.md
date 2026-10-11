@@ -102,7 +102,10 @@ caps the generated request. `GenaCallbackClient` adds bounded plain-HTTP
 connect/read/write timeouts and exact-length response parsing, rejects HTTPS
 unless a caller-owned TLS adapter is supplied, and does not provide callback
 authentication, retries, or SSRF policy beyond URL/authority
-validation.
+validation. `send_gena_callback_with_connector` accepts a caller-supplied
+HTTP/TLS stream and keeps the same bounds, but the connector must perform
+certificate validation, DNS policy, timeout setup, and peer authorization;
+passing a plain stream for an `https` URL is not secure.
 
 `validate_media_uri_network` is the caller-injected DNS-aware preflight for
 future URL fetchers: it resolves a hostname once through a bounded resolver,
@@ -113,9 +116,10 @@ pin the validated result or repeat the policy at connection time.
 
 The DLNA `MediaFormatCapabilities` report is validated and bounded before it is
 advertised through `ConnectionManager`; it is not a decoder probe or a promise
-that a remote URL is safe to fetch. Integrations must derive entries from the
-actual platform decoder policy and keep URL fetching and authorization outside
-the protocol parser.
+that a remote URL is safe to fetch. `MediaFormatProbe` only parses bounded
+response metadata and matches MIME types against that report. Integrations must
+derive entries from the actual platform decoder policy and keep URL fetching,
+redirect handling, and authorization outside the protocol parser.
 
 The experimental RAOP session rejects unknown codecs, payload mismatches,
 interleaved TCP transport, invalid state transitions, and oversized SDP before
