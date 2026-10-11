@@ -182,6 +182,10 @@ class FrameArkReceiverService : Service() {
     fun trustPeer(peer: FrameArkNative.TrustedPeer): Boolean =
         native.trustPeer(peer) && trustSnapshotStore.persist()
 
+    /** Persists an explicitly approved proof-verified sender key. */
+    fun trustPeerPublicKey(peer: FrameArkNative.VerifiedPeerKey): Boolean =
+        native.trustPeerPublicKey(peer) && trustSnapshotStore.persist()
+
     /** Persists an explicit Rust trust revocation through Keystore. */
     fun revokePeer(deviceId: String): Boolean =
         native.revokePeer(deviceId) && trustSnapshotStore.persist()
