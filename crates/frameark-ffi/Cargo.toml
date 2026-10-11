@@ -14,6 +14,7 @@ crate-type = ["cdylib"]
 frameark-api = { path = "../frameark-api" }
 frameark-core.workspace = true
 frameark-discovery = { path = "../frameark-discovery" }
+frameark-media = { path = "../frameark-media" }
 frameark-native = { path = "../frameark-native" }
 frameark-transport = { path = "../frameark-transport" }
 jni.workspace = true

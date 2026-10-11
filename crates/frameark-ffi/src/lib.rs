@@ -151,9 +151,18 @@ impl NetworkRuntime {
                 };
                 let bind_result = {
                     let _entered = runtime.enter();
+                    let bind_address = if cfg!(test) {
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+                    } else {
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+                    };
                     PairingServer::bind(
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                        NETWORK_SERVER_NAME,
+                        bind_address,
+                        if cfg!(test) {
+                            "localhost"
+                        } else {
+                            NETWORK_SERVER_NAME
+                        },
                         pairing_code,
                     )
                 };
@@ -179,17 +188,19 @@ impl NetworkRuntime {
                             server.accept_pairing(NETWORK_OPERATION_TIMEOUT),
                         )
                         .await;
-                        let Ok(Ok(transport)) = accepted else {
-                            continue;
+                        let transport = match accepted {
+                            Ok(Ok(transport)) => transport,
+                            Ok(Err(_)) | Err(_) => continue,
                         };
-                        let Ok(receiver) = NativeMediaControlReceiver::new(
+                        let receiver = match NativeMediaControlReceiver::new(
                             transport,
                             network_session(),
                             network_policy(),
                             NetworkBackend,
                             NetworkRendererFactory,
-                        ) else {
-                            continue;
+                        ) {
+                            Ok(receiver) => receiver,
+                            Err(_) => continue,
                         };
                         let _ = receiver.serve(NETWORK_OPERATION_TIMEOUT).await;
                     }
@@ -625,7 +636,13 @@ fn encode_media_frame(frame: &NativeMediaFrame) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState, TrackId};
+    use frameark_core::{
+        AudioConfig, CORE_ABI_VERSION, DeviceId, MediaCodec, Session, SessionId, SessionState,
+        TimeBase, TrackId, VideoConfig,
+    };
+    use frameark_media::{AudioPacket, MediaPacket, MediaTimestamp, VideoFrame};
+    use frameark_native::{NativeSender, media_wire};
+    use frameark_transport::{PairingClient, PairingCode};
 
     use super::*;
 
@@ -649,6 +666,123 @@ mod tests {
         assert!((0..=999_999).contains(&network.pairing_code));
         assert!(!network.certificate_der.is_empty());
         network.stop();
+    }
+
+    #[test]
+    fn network_runtime_completes_loopback_pairing_and_media_delivery() {
+        let _guard = test_guard();
+        {
+            let mut state = receiver_state().lock().unwrap();
+            state.session = Some(Session::new(
+                SessionId::try_from("loopback-receiver").unwrap(),
+                DeviceId::try_from("loopback-device").unwrap(),
+            ));
+            state.media_queue.clear();
+            state.network = None;
+        }
+        let network = NetworkRuntime::start().unwrap_or_else(|error| panic!("{error}"));
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
+        let pairing = PairingCode::parse(format!("{:06}", network.pairing_code))
+            .expect("generated pairing code is six digits");
+        let certificate = network.certificate_der.clone();
+        std::thread::sleep(Duration::from_millis(50));
+        let report = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("loopback runtime")
+            .block_on(async {
+                let transport = PairingClient::connect(
+                    address,
+                    "localhost",
+                    &certificate,
+                    pairing,
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("loopback FANP pairing");
+                let mut sender = NativeSender::new(
+                    transport,
+                    Session::new(
+                        SessionId::try_from("loopback-session").unwrap(),
+                        DeviceId::try_from("loopback-sender").unwrap(),
+                    ),
+                )
+                .unwrap();
+                sender
+                    .offer(
+                        SessionOffer {
+                            video: Some(VideoConfig {
+                                codec: MediaCodec::H264,
+                                width: 1280,
+                                height: 720,
+                                frame_rate_numerator: 30,
+                                frame_rate_denominator: 1,
+                            }),
+                            audio: Some(AudioConfig {
+                                codec: MediaCodec::Opus,
+                                sample_rate: 48_000,
+                                channels: 2,
+                            }),
+                            latency_ms: 120,
+                        },
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .unwrap();
+                sender.start(Duration::from_secs(5)).await.unwrap();
+                let time_base = TimeBase::new(90_000, 1).unwrap();
+                let video_track = TrackId::new("video-0").unwrap();
+                let audio_track = TrackId::new("audio-0").unwrap();
+                let video = VideoFrame::new(
+                    video_track,
+                    1,
+                    MediaTimestamp::new(0, time_base),
+                    None,
+                    true,
+                    vec![0, 0, 0, 1, 0x65, 0x88],
+                )
+                .unwrap();
+                let audio = AudioPacket::new(
+                    audio_track,
+                    1,
+                    MediaTimestamp::new(0, TimeBase::new(48_000, 1).unwrap()),
+                    960,
+                    vec![0xF8, 0xFF, 0xFE],
+                )
+                .unwrap();
+                let mut media = sender.open_media_stream().await.unwrap();
+                media
+                    .send_frame(
+                        &media_wire::encode(&MediaPacket::Video(video)).unwrap(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .unwrap();
+                media
+                    .send_frame(
+                        &media_wire::encode(&MediaPacket::Audio(audio)).unwrap(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .unwrap();
+                media.finish().unwrap();
+                sender.stop(Duration::from_secs(5)).await.unwrap()
+            });
+        assert_eq!(report.state, SessionState::Closed);
+        network.stop();
+        let mut state = receiver_state().lock().unwrap();
+        assert_eq!(state.media_queue.len(), 2);
+        assert_eq!(
+            state.media_queue.pop_front().unwrap().kind,
+            MEDIA_KIND_VIDEO
+        );
+        assert_eq!(
+            state.media_queue.pop_front().unwrap().kind,
+            MEDIA_KIND_AUDIO
+        );
+        state.session = None;
+        state.media_queue.clear();
+        state.network = None;
     }
 
     #[test]
