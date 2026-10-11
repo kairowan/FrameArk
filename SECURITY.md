@@ -141,6 +141,11 @@ pinned public certificate to an explicit in-app pairing flow. The listener
 closes and joins its worker before the Rust lifecycle reports stopped; it does
 not persist trust, log pairing material, or imply that a decoder/surface is
 available.
+`ReceiverNetworkCoordinator` gates the foreground service on a valid JNI
+endpoint snapshot and the service notification may display the port and
+temporary pairing code to the local user. The certificate remains in memory;
+the coordinator does not copy it into logs, preferences, or notification
+text.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on

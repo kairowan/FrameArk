@@ -11,6 +11,7 @@ class ReceiverSessionCoordinator(
     private val native: FrameArkNative,
     private val playbackLoop: PlaybackController,
     private val onStateChanged: (State) -> Unit = {},
+    private val network: ReceiverNetworkCoordinator? = null,
 ) : AutoCloseable {
     sealed interface State {
         data object Stopped : State
@@ -25,6 +26,7 @@ class ReceiverSessionCoordinator(
     enum class FailureReason {
         NATIVE_UNAVAILABLE,
         NATIVE_START_REJECTED,
+        NETWORK_ENDPOINT_UNAVAILABLE,
         PLAYBACK_LOOP_UNAVAILABLE,
         PLAYBACK_LOOP_FAILED,
     }
@@ -63,8 +65,15 @@ class ReceiverSessionCoordinator(
                 return false
             }
         }
+        if (network != null && network.refresh() !is ReceiverNetworkCoordinator.State.Ready) {
+            native.stopReceiver()
+            network.stop()
+            transitionLocked(State.Failed(FailureReason.NETWORK_ENDPOINT_UNAVAILABLE))
+            return false
+        }
         if (!playbackLoop.start()) {
             native.stopReceiver()
+            network?.stop()
             transitionLocked(State.Failed(FailureReason.PLAYBACK_LOOP_UNAVAILABLE))
             return false
         }
@@ -78,12 +87,14 @@ class ReceiverSessionCoordinator(
     /** Called by the polling loop when a platform consumer fails. */
     fun onPlaybackFailure() = synchronized(lock) {
         playbackLoop.stop()
+        network?.stop()
         native.stopReceiver()
         transitionLocked(State.Failed(FailureReason.PLAYBACK_LOOP_FAILED))
     }
 
     override fun close() = synchronized(lock) {
         playbackLoop.close()
+        network?.stop()
         native.stopReceiver()
         transitionLocked(State.Stopped)
     }
