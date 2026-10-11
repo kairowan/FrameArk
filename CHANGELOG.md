@@ -58,8 +58,9 @@ All notable FrameArk changes will be documented in this file. The project follow
   the crate.
 - Experimental bounded DLNA GENA `NOTIFY` request encoder with callback
   authority/target validation, SID/SEQ/NT/NTS headers, exact content length,
-  and loopback parser coverage; callback sockets, TLS, retries, and lease
-  expiry remain caller-owned.
+  and loopback parser coverage; callback delivery now includes a bounded
+  synchronous plain-HTTP client with response parsing and loopback integration
+  coverage. HTTPS/TLS, retries, and lease expiry remain caller-owned.
 - Experimental `frameark-airplay` RTSP/CSeq and strict RTP audio packet
   foundation; pairing, decryption, decoding, and Apple interoperability remain
   unimplemented.

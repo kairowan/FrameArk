@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
 /// Maximum complete SSDP message accepted by the parser.
@@ -188,6 +188,79 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
+    /// Parses one complete, non-chunked HTTP/1.1 response within the configured bounds.
+    pub fn parse(bytes: &[u8]) -> Result<Self, DlnaError> {
+        if bytes.len() > MAX_HTTP_BYTES {
+            return Err(DlnaError::TooLarge("HTTP response"));
+        }
+        let header_end = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .ok_or(DlnaError::Invalid("HTTP terminator"))?;
+        let header_bytes = &bytes[..header_end];
+        let body = &bytes[header_end + 4..];
+        let header_text =
+            std::str::from_utf8(header_bytes).map_err(|_| DlnaError::Invalid("HTTP UTF-8"))?;
+        let mut lines = header_text.split("\r\n");
+        let status_line = lines.next().ok_or(DlnaError::Invalid("HTTP status line"))?;
+        let mut parts = status_line.splitn(3, ' ');
+        let version = parts.next().unwrap_or_default();
+        let status = parts.next().unwrap_or_default();
+        let reason = parts.next().unwrap_or_default();
+        if version != "HTTP/1.1" || status.len() != 3 || reason.is_empty() {
+            return Err(DlnaError::Invalid("HTTP status line"));
+        }
+        let status = status
+            .parse::<u16>()
+            .map_err(|_| DlnaError::Invalid("HTTP status code"))?;
+        validate_field(reason, "HTTP reason")?;
+        let mut headers = BTreeMap::new();
+        for line in lines {
+            let (name, value) = line
+                .split_once(':')
+                .ok_or(DlnaError::Invalid("HTTP response header"))?;
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(DlnaError::Invalid("HTTP response header name"));
+            }
+            let value = value.trim();
+            if value.is_empty() || value.len() > MAX_FIELD_BYTES {
+                return Err(DlnaError::Invalid("HTTP response header value"));
+            }
+            if headers
+                .insert(name.to_ascii_lowercase(), value.to_string())
+                .is_some()
+                || headers.len() > MAX_HTTP_HEADERS
+            {
+                return Err(DlnaError::Invalid("HTTP duplicate or oversized header"));
+            }
+        }
+        if headers.contains_key("transfer-encoding") {
+            return Err(DlnaError::Invalid("HTTP transfer encoding"));
+        }
+        let declared = headers
+            .get("content-length")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .map_err(|_| DlnaError::Invalid("HTTP content length"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        if declared != body.len() || body.len() > MAX_HTTP_BYTES {
+            return Err(DlnaError::Invalid("HTTP content length"));
+        }
+        Ok(Self {
+            status,
+            reason: reason.to_string(),
+            headers,
+            body: body.to_vec(),
+        })
+    }
+
     /// Encodes a deterministic HTTP/1.1 response.
     pub fn encode(&self) -> Result<Vec<u8>, DlnaError> {
         if self.status < 100 || self.reason.is_empty() || self.body.len() > MAX_HTTP_BYTES {
@@ -949,6 +1022,70 @@ impl GenaEvent {
     }
 }
 
+/// Result returned by the bounded HTTP client used for GENA callbacks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenaCallbackResponse {
+    /// HTTP status returned by the subscriber callback endpoint.
+    pub status: u16,
+    /// HTTP reason phrase returned by the subscriber.
+    pub reason: String,
+    /// Lowercase response headers.
+    pub headers: BTreeMap<String, String>,
+    /// Bounded response body.
+    pub body: Vec<u8>,
+}
+
+/// A caller-owned, synchronous GENA callback client.
+///
+/// This client intentionally supports plain HTTP only. HTTPS callbacks are
+/// rejected rather than silently sending cleartext or pretending to provide
+/// TLS. A platform or daemon may wrap the same encoded request in a vetted TLS
+/// implementation and retain the same response bounds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenaCallbackClient {
+    timeout: Duration,
+}
+
+impl GenaCallbackClient {
+    /// Creates a client with one connect/read/write timeout for each callback.
+    pub fn new(timeout: Duration) -> Result<Self, DlnaError> {
+        if timeout.is_zero() {
+            return Err(DlnaError::Invalid("GENA callback timeout"));
+        }
+        Ok(Self { timeout })
+    }
+
+    /// Sends one encoded event to its validated callback and parses one HTTP response.
+    pub fn send(&self, event: &GenaEvent) -> Result<GenaCallbackResponse, DlnaError> {
+        let request = event.encode_http_notify()?;
+        let (scheme, _rest) = event
+            .callback_url
+            .split_once("://")
+            .ok_or(DlnaError::Invalid("GENA callback URL"))?;
+        if !scheme.eq_ignore_ascii_case("http") {
+            return Err(DlnaError::Invalid("GENA HTTPS requires TLS"));
+        }
+        let (authority, _) = callback_authority_and_target(&event.callback_url)?;
+        let address = callback_socket_address(&authority)?;
+        let mut stream = connect_callback(address, self.timeout)?;
+        stream
+            .set_read_timeout(Some(self.timeout))
+            .and_then(|_| stream.set_write_timeout(Some(self.timeout)))
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        stream
+            .write_all(&request)
+            .and_then(|_| stream.flush())
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        let response = read_http_response(&mut stream)?;
+        Ok(GenaCallbackResponse {
+            status: response.status,
+            reason: response.reason,
+            headers: response.headers,
+            body: response.body,
+        })
+    }
+}
+
 /// Bounded GENA subscription registry with deterministic IDs and event bodies.
 #[derive(Clone, Debug, Default)]
 pub struct GenaRegistry {
@@ -1146,6 +1283,97 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, DlnaError> {
         let remaining = MAX_HTTP_BYTES - bytes.len();
         bytes.extend_from_slice(&chunk[..read.min(remaining)]);
     }
+}
+
+fn callback_socket_address(authority: &str) -> Result<SocketAddr, DlnaError> {
+    if authority.contains('@') {
+        return Err(DlnaError::Invalid("GENA callback authority"));
+    }
+    let port = if authority.starts_with('[') {
+        let end = authority
+            .find(']')
+            .ok_or(DlnaError::Invalid("GENA callback authority"))?;
+        let suffix = authority
+            .get(end + 1..)
+            .ok_or(DlnaError::Invalid("GENA callback authority"))?;
+        suffix
+            .strip_prefix(':')
+            .ok_or(DlnaError::Invalid("GENA callback port"))?
+    } else {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .ok_or(DlnaError::Invalid("GENA callback port"))?;
+        if host.is_empty() || host.contains(':') {
+            return Err(DlnaError::Invalid("GENA callback authority"));
+        }
+        port
+    };
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| DlnaError::Invalid("GENA callback port"))?;
+    if port == 0 {
+        return Err(DlnaError::Invalid("GENA callback port"));
+    }
+    authority
+        .to_socket_addrs()
+        .map_err(|error| DlnaError::Io(error.kind()))?
+        .next()
+        .ok_or(DlnaError::Invalid("GENA callback address"))
+}
+
+fn connect_callback(address: SocketAddr, timeout: Duration) -> Result<TcpStream, DlnaError> {
+    TcpStream::connect_timeout(&address, timeout).map_err(|error| DlnaError::Io(error.kind()))
+}
+
+fn read_http_response(stream: &mut TcpStream) -> Result<HttpResponse, DlnaError> {
+    let mut bytes = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if bytes.len() >= MAX_HTTP_BYTES {
+            return Err(DlnaError::TooLarge("HTTP response"));
+        }
+        match HttpResponse::parse(&bytes) {
+            Ok(response) => return Ok(response),
+            Err(error) if response_may_be_incomplete(&bytes, &error) => {}
+            Err(error) => return Err(error),
+        }
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        if read == 0 {
+            return Err(DlnaError::Invalid("HTTP response"));
+        }
+        let remaining = MAX_HTTP_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+}
+
+fn response_may_be_incomplete(bytes: &[u8], error: &DlnaError) -> bool {
+    if *error == DlnaError::Invalid("HTTP terminator") {
+        return true;
+    }
+    if *error != DlnaError::Invalid("HTTP content length") {
+        return false;
+    }
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return true;
+    };
+    let Ok(header_text) = std::str::from_utf8(&bytes[..header_end]) else {
+        return false;
+    };
+    let Some(content_length) = header_text
+        .split("\r\n")
+        .skip(1)
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+        })
+        .flatten()
+    else {
+        return false;
+    };
+    bytes.len() - header_end - 4 < content_length
 }
 
 fn request_may_be_incomplete(bytes: &[u8], error: &DlnaError) -> bool {
@@ -2431,6 +2659,83 @@ mod tests {
         .unwrap();
         assert_eq!(service.handle(&unsubscribe).status, 200);
         assert_eq!(service.subscription_count(), 0);
+    }
+
+    #[test]
+    fn gena_callback_client_sends_notify_and_parses_bounded_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, peer) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let request = read_http_request(&mut stream).unwrap();
+            assert_eq!(request.method, "NOTIFY");
+            assert_eq!(request.target, "/events");
+            assert_eq!(request.header("NT"), Some("upnp:event"));
+            assert_eq!(request.body, b"<event/>".to_vec());
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            peer
+        });
+        let event = GenaEvent {
+            sid: "uuid:frameark-sub-1".to_string(),
+            callback_url: format!("http://{address}/events"),
+            service_type: AVTRANSPORT_SERVICE.to_string(),
+            sequence: 4,
+            body: "<event/>".to_string(),
+        };
+        let response = GenaCallbackClient::new(Duration::from_secs(1))
+            .unwrap()
+            .send(&event)
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert!(response.body.is_empty());
+        assert!(server.join().unwrap().ip().is_loopback());
+    }
+
+    #[test]
+    fn gena_callback_client_rejects_tls_and_unbounded_authorities() {
+        let event = GenaEvent {
+            sid: "uuid:frameark-sub-1".to_string(),
+            callback_url: "https://127.0.0.1:443/events".to_string(),
+            service_type: AVTRANSPORT_SERVICE.to_string(),
+            sequence: 1,
+            body: "<event/>".to_string(),
+        };
+        assert_eq!(
+            GenaCallbackClient::new(Duration::from_secs(1))
+                .unwrap()
+                .send(&event),
+            Err(DlnaError::Invalid("GENA HTTPS requires TLS"))
+        );
+        let invalid = GenaEvent {
+            callback_url: "http://127.0.0.1/events".to_string(),
+            ..event
+        };
+        assert_eq!(
+            GenaCallbackClient::new(Duration::from_secs(1))
+                .unwrap()
+                .send(&invalid),
+            Err(DlnaError::Invalid("GENA callback port"))
+        );
+    }
+
+    #[test]
+    fn http_response_parser_rejects_chunked_and_preserves_headers() {
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-FrameArk: yes\r\n\r\nack",
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers.get("x-frameark"), Some(&"yes".to_string()));
+        assert_eq!(response.body, b"ack");
+        assert_eq!(
+            HttpResponse::parse(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            Err(DlnaError::Invalid("HTTP transfer encoding"))
+        );
     }
 
     #[test]
