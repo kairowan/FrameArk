@@ -157,7 +157,10 @@ policy because the adapter is not an authentication boundary.
 The mirror-audio RTP pipeline validates the negotiated payload type, PCM sample
 alignment, packet capacity, and explicit sequence-gap recovery. It does not
 authenticate or decrypt RTP, conceal loss, own sockets, or authorize a sender;
-callers must keep it behind the authenticated AirPlay boundary.
+callers must keep it behind the authenticated AirPlay boundary. The
+`MirrorMediaCoordinator` adds peer-IP and per-track SSRC filtering plus reset,
+but those values are only trustworthy when derived from an authenticated RTSP
+session; the coordinator is not an Apple pairing or encryption boundary.
 
 The mirror RTSP session validates CSeq, session transitions, UDP ports,
 dimensions, orientation, audio sample rate, and bounded XML/binary plist
