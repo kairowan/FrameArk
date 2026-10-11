@@ -1,0 +1,18 @@
+[package]
+name = "framearkd"
+description = "Experimental FrameArk Native Protocol reference receiver daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+frameark-api = { path = "../../crates/frameark-api" }
+frameark-core.workspace = true
+frameark-native = { path = "../../crates/frameark-native" }
+frameark-transport = { path = "../../crates/frameark-transport" }
+tokio.workspace = true
+
+[lints]
+workspace = true

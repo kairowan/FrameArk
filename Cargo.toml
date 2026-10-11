@@ -11,6 +11,7 @@ members = [
     "crates/frameark-transport",
     "crates/frameark-trust",
     "tools/frameark-cli",
+    "tools/framearkd",
 ]
 resolver = "3"
 
