@@ -35,4 +35,24 @@ temporary pairing, capability negotiation, Offer → Start, one H.264 frame,
 one Opus frame, media-stream FIN, Stop, and delivery into the JNI queue.
 
 The native functions return redaction-safe integer status codes and never log
-JNI arguments. The shared state is process-local and is reset on stop.
+JNI arguments. The shared state is process-local. Stop clears media/session
+state, while the installed public identity remains available for a restart.
+
+Before `nativeStartReceiver`, Android must pass the Keystore alias and the
+lowercase colon-separated SHA-256 fingerprint of its public certificate through
+`nativeSetDeviceIdentity`. Rust validates both values, derives the session/device
+ID as `sha256-` plus the 64 fingerprint hexadecimal characters, and rejects
+startup with `-5` when no identity is
+installed. Only the public fingerprint crosses JNI; private key operations stay
+inside Android Keystore. The alias is a local key label, not a unique device ID.
+Reinstalling the same identity is idempotent; changing it while a session is
+active is rejected with `-2`. The validated alias is retained only as
+redaction-safe local metadata for future trust records. Invalid input returns
+`-3` without changing state.
+
+The Kotlin shell and native library must be packaged together: startup now
+requires the identity setter even though the additive JNI methods leave the
+core ABI version unchanged. This is local identity plumbing, not proof of key
+possession, persistent peer trust, or binding of the Keystore key to the
+ephemeral TLS certificate; temporary certificate pinning and PIN pairing remain
+the transport authentication mechanism.

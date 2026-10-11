@@ -63,10 +63,15 @@ class FrameArkReceiverService : Service() {
         identityCoordinator = ReceiverIdentityCoordinator {
             AndroidDeviceIdentityStore().getOrCreate()
         }
-        identityReady = when (val identity = identityCoordinator.initialize()) {
+        identityReady = when (val identityState = identityCoordinator.initialize()) {
             is ReceiverIdentityCoordinator.State.Ready -> {
-                Log.i(TAG, "device identity ready")
-                true
+                val installed = native.setDeviceIdentity(identityState.identity)
+                if (installed) {
+                    Log.i(TAG, "device identity ready")
+                } else {
+                    Log.e(TAG, "native identity bridge unavailable; receiver will remain stopped")
+                }
+                installed
             }
 
             is ReceiverIdentityCoordinator.State.Failed -> {

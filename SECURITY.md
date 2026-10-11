@@ -223,6 +223,15 @@ Rust, logs, notifications, or diagnostics; only a validated public-key
 fingerprint is retained in the identity state. This is an identity-availability
 gate, not sender authorization or a substitute for Rust trust approval.
 
+The JNI lifecycle requires that public identity before opening its network
+listener. Rust validates the bounded ASCII alias and SHA-256 fingerprint, uses
+a fingerprint-derived device ID (not the shared Keystore alias), and rejects
+identity changes during an active session. Reinstalling the same identity is
+idempotent and stop/recovery retains it in process memory. Neither the identity
+nor fingerprint is logged. No private key crosses JNI. This does not bind the
+Keystore key to the ephemeral TLS certificate, prove key possession, or create
+remembered peer authorization; the existing pinned TLS/PIN boundary is unchanged.
+
 ## Disclosure and fixes
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.

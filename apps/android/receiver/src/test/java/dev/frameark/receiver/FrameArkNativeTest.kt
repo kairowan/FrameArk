@@ -12,6 +12,57 @@ import org.junit.Test
 
 class FrameArkNativeTest {
     @Test
+    fun forwards_keystore_identity_only_after_abi_load() {
+        val calls = mutableListOf<Pair<String, String>>()
+        val fingerprint = List(32) { "ab" }.joinToString(":")
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            identityProvider = { alias, value -> calls += alias to value; 0 },
+        )
+
+        assertTrue(
+            bridge.setDeviceIdentity(DeviceIdentity("frameark-device", fingerprint)),
+        )
+        assertEquals(listOf("frameark-device" to fingerprint), calls)
+    }
+
+    @Test
+    fun rejects_malformed_identity_before_crossing_the_bridge() {
+        var calls = 0
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            identityProvider = { _, _ -> calls += 1; 0 },
+        )
+
+        assertFalse(bridge.setDeviceIdentity(DeviceIdentity("INVALID", "00")))
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun identity_fails_closed_for_unavailable_abi_or_native_rejection() {
+        val identity = DeviceIdentity("frameark-device", List(32) { "ab" }.joinToString(":"))
+        var calls = 0
+        val incompatible = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { 99 },
+            identityProvider = { _, _ -> calls += 1; 0 },
+        )
+        assertFalse(incompatible.setDeviceIdentity(identity))
+        assertEquals(0, calls)
+
+        val rejecting = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            identityProvider = { _, _ -> -2 },
+        )
+        assertFalse(rejecting.setDeviceIdentity(identity))
+        val missing = FrameArkNative(libraryLoader = { throw UnsatisfiedLinkError("missing") })
+        assertFalse(missing.setDeviceIdentity(identity))
+    }
+
+    @Test
     fun reports_a_loaded_matching_abi() {
         var requestedLibrary = ""
         val bridge = FrameArkNative(
