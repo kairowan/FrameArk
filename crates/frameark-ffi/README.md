@@ -17,5 +17,9 @@ remains the owner of protocol/session state. Native video and audio submissions
 are bounded to 4 MiB each and 16 queued frames, return explicit backpressure,
 and are polled as versioned `FAMF` envelopes.
 
+The test suite includes a real loopback QUIC/TLS integration path covering
+temporary pairing, capability negotiation, Offer → Start, one H.264 frame,
+one Opus frame, media-stream FIN, Stop, and delivery into the JNI queue.
+
 The native functions return redaction-safe integer status codes and never log
 JNI arguments. The shared state is process-local and is reset on stop.

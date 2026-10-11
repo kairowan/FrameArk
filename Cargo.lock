@@ -157,6 +157,7 @@ dependencies = [
  "frameark-api",
  "frameark-core",
  "frameark-discovery",
+ "frameark-media",
  "frameark-native",
  "frameark-transport",
  "jni",
