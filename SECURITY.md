@@ -154,6 +154,12 @@ released on stop/destroy and is not retained by the Rust layer.
 The standby Activity reads the endpoint through the JNI getters only to display
 the temporary port and pairing code after an explicit user refresh; it never
 displays or persists the certificate.
+`ReceiverNetworkObserver` listens only to Android's default connectivity
+callback and coalesces route/capability changes into the existing bounded
+Rust-owned recovery operation. It has no protocol state and does not authorize
+or reconnect a sender. Registration failure disables automatic recovery while
+leaving the explicit lifecycle available; callback storms cannot start
+overlapping recovery attempts.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on
