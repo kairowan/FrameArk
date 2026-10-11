@@ -18,6 +18,7 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 |---|---|---|
 | FrameArk DNS-SD discovery (`_frameark._udp.local.`) | Experimental | `frameark-discovery` validation/event-mapping tests plus bounded CLI browse command; multicast smoke coverage is host-dependent |
 | FrameArk Native Protocol control plane | Experimental | `frameark-transport` pairing/capability tests, `frameark-native` fake-backend Offer/Start/Status/Stop lifecycle, CLI connect/status/end commands, and the runnable `framearkd` reference receiver; no platform matrix yet |
+| FrameArk diagnostics recorder | Experimental | Bounded redaction-safe lifecycle/error ring, deterministic support-text export, control-character normalization, and session-identity omission tests; no file persistence, telemetry, or user-consent UI |
 | FrameArk Native encoded media contract | Experimental | `frameark-media` bounded packet and backpressure unit tests; no platform decoder yet |
 | FrameArk Native media-frame wire | Experimental | `frameark-native::media_wire` exact-boundary round-trip and malformed-input tests; no platform decoder yet |
 | FrameArk Native QUIC media stream | Experimental | `frameark-transport` bounded multi-frame stream tests; no platform decoder or congestion policy yet |
