@@ -13,6 +13,10 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 
 **预览前阶段：M1 Native 基础开发中。** 当前仓库已经包含初始 Rust 契约、受限 FANP 控制/媒体传输、Rust 媒体渲染桥、实验性的 fixture 发送 CLI 和 Android Receiver 壳；还不是面向普通用户的完整接收端或发送端。下方协议表和兼容性文档共同说明已验证范围与路线边界。
 
+按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
+M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
+Apple 设备尚未验证的行为写成完成。
+
 See [PLAN.md](PLAN.md) for the complete product definition, architecture, milestones, quality gates, and release criteria.
 
 ## Product direction / 产品方向
