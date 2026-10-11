@@ -30,7 +30,9 @@ public key to `frameark-trust::TrustRegistry::trust_public_key`; Rust then
 derives the same canonical SHA-256 fingerprint used by the encrypted platform
 snapshot. The helper does not verify signatures, so passing an unverified key
 remains a caller error. Platform sender enrollment and reconnect policy are
-still open.
+still open. The transport test suite also exercises the proof callback feeding
+the Rust trust registry after verification, including the canonical fingerprint
+and silent-rotation policy; this is a fixture, not automatic user approval.
 
 ## Control frame
 
