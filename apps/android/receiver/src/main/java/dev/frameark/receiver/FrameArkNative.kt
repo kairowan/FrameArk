@@ -21,13 +21,17 @@ class FrameArkNative(
     networkPortProvider: (() -> Int)? = null,
     networkPairingCodeProvider: (() -> Int)? = null,
     networkCertificateProvider: (() -> ByteArray?)? = null,
+    videoConfigProvider: (() -> ByteArray?)? = null,
+    audioConfigProvider: (() -> ByteArray?)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
         const val EXPECTED_ABI_VERSION = 1
         const val MAX_MEDIA_FRAME_BYTES = 4 * 1024 * 1024
         private const val MEDIA_FRAME_HEADER_BYTES = 19
+        private const val MEDIA_CONFIG_HEADER_BYTES = 8
         private val MEDIA_FRAME_MAGIC = byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'M'.code.toByte(), 'F'.code.toByte())
+        private val MEDIA_CONFIG_MAGIC = byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'M'.code.toByte(), 'C'.code.toByte())
     }
 
     private val bridgeVersionProvider: () -> Int = versionProvider ?: { nativeVersion() }
@@ -46,6 +50,10 @@ class FrameArkNative(
         networkPairingCodeProvider ?: { nativeReceiverPairingCode() }
     private val bridgeNetworkCertificateProvider: () -> ByteArray? =
         networkCertificateProvider ?: { nativeReceiverCertificate() }
+    private val bridgeVideoConfigProvider: () -> ByteArray? =
+        videoConfigProvider ?: { nativePollVideoConfig() }
+    private val bridgeAudioConfigProvider: () -> ByteArray? =
+        audioConfigProvider ?: { nativePollAudioConfig() }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -83,6 +91,33 @@ class FrameArkNative(
         VIDEO,
         AUDIO,
     }
+
+    /** Codec negotiated by Rust for one platform media track. */
+    enum class MediaCodecKind {
+        H264,
+        H265,
+        AAC,
+        OPUS,
+        PCM,
+        ALAC,
+        UNKNOWN,
+    }
+
+    /** Bounded video configuration emitted before encoded video frames. */
+    data class VideoConfig(
+        val codec: MediaCodecKind,
+        val width: Int,
+        val height: Int,
+        val frameRateNumerator: Int,
+        val frameRateDenominator: Int,
+    )
+
+    /** Bounded audio configuration emitted before encoded audio frames. */
+    data class AudioConfig(
+        val codec: MediaCodecKind,
+        val sampleRate: Int,
+        val channels: Int,
+    )
 
     /** One bounded encoded frame delivered from Rust to an Android renderer. */
     data class MediaFrame(
@@ -174,6 +209,20 @@ class FrameArkNative(
         return NetworkInfo(port, pairingCode, certificate)
     }
 
+    /** Polls the newest negotiated video configuration, if one is available. */
+    fun pollVideoConfig(): VideoConfig? = if (isLoaded()) {
+        decodeVideoConfig(bridgeVideoConfigProvider())
+    } else {
+        null
+    }
+
+    /** Polls the newest negotiated audio configuration, if one is available. */
+    fun pollAudioConfig(): AudioConfig? = if (isLoaded()) {
+        decodeAudioConfig(bridgeAudioConfigProvider())
+    } else {
+        null
+    }
+
     /** Submits one bounded encoded video access unit to Rust. */
     fun submitVideoFrame(payload: ByteArray, pts: Long, keyframe: Boolean): MediaSubmitResult {
         return submitMedia(payload) { bridgeSubmitVideoProvider(payload, pts, keyframe) }
@@ -235,6 +284,44 @@ class FrameArkNative(
         )
     }
 
+    private fun decodeVideoConfig(envelope: ByteArray?): VideoConfig? {
+        if (envelope == null || envelope.size != 24 || !hasConfigHeader(envelope, 1)) return null
+        val buffer = ByteBuffer.wrap(envelope).order(ByteOrder.BIG_ENDIAN)
+        val codec = decodeCodec(envelope[6].toInt())
+        val width = buffer.getInt(MEDIA_CONFIG_HEADER_BYTES)
+        val height = buffer.getInt(MEDIA_CONFIG_HEADER_BYTES + 4)
+        val numerator = buffer.getInt(MEDIA_CONFIG_HEADER_BYTES + 8)
+        val denominator = buffer.getInt(MEDIA_CONFIG_HEADER_BYTES + 12)
+        if (width !in 1..7_680 || height !in 1..7_680 ||
+            numerator !in 1..240_000 || denominator !in 1..240_000
+        ) return null
+        return VideoConfig(codec, width, height, numerator, denominator)
+    }
+
+    private fun decodeAudioConfig(envelope: ByteArray?): AudioConfig? {
+        if (envelope == null || envelope.size != 16 || !hasConfigHeader(envelope, 2)) return null
+        val buffer = ByteBuffer.wrap(envelope).order(ByteOrder.BIG_ENDIAN)
+        val codec = decodeCodec(envelope[6].toInt())
+        val sampleRate = buffer.getInt(MEDIA_CONFIG_HEADER_BYTES)
+        val channels = buffer.getInt(MEDIA_CONFIG_HEADER_BYTES + 4)
+        if (sampleRate !in 8_000..192_000 || channels !in 1..8) return null
+        return AudioConfig(codec, sampleRate, channels)
+    }
+
+    private fun hasConfigHeader(envelope: ByteArray, expectedKind: Int): Boolean =
+        envelope.copyOfRange(0, MEDIA_CONFIG_MAGIC.size).contentEquals(MEDIA_CONFIG_MAGIC) &&
+            envelope[4].toInt() == 1 && envelope[5].toInt() == expectedKind && envelope[7].toInt() == 0
+
+    private fun decodeCodec(value: Int): MediaCodecKind = when (value) {
+        1 -> MediaCodecKind.H264
+        2 -> MediaCodecKind.H265
+        3 -> MediaCodecKind.AAC
+        4 -> MediaCodecKind.OPUS
+        5 -> MediaCodecKind.PCM
+        6 -> MediaCodecKind.ALAC
+        else -> MediaCodecKind.UNKNOWN
+    }
+
     private external fun nativeVersion(): Int
 
     private external fun nativeStartReceiver(): Int
@@ -254,4 +341,8 @@ class FrameArkNative(
     private external fun nativeSubmitAudioFrame(payload: ByteArray, pts: Long): Int
 
     private external fun nativePollMediaFrame(): ByteArray?
+
+    private external fun nativePollVideoConfig(): ByteArray?
+
+    private external fun nativePollAudioConfig(): ByteArray?
 }

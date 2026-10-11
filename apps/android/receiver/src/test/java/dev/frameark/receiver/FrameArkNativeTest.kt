@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -129,5 +130,81 @@ class FrameArkNativeTest {
             bridge.submitAudioFrame(byteArrayOf(), 0),
         )
         assertFalse(loaded)
+    }
+
+    @Test
+    fun decodes_bounded_video_and_audio_config_envelopes() {
+        val video = ByteBuffer.allocate(24)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put("FAMC".toByteArray())
+            .put(1)
+            .put(1)
+            .put(1)
+            .put(0)
+            .putInt(1_920)
+            .putInt(1_080)
+            .putInt(60)
+            .putInt(1)
+            .array()
+        val audio = ByteBuffer.allocate(16)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put("FAMC".toByteArray())
+            .put(1)
+            .put(2)
+            .put(4)
+            .put(0)
+            .putInt(48_000)
+            .putInt(2)
+            .array()
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            videoConfigProvider = { video },
+            audioConfigProvider = { audio },
+        )
+
+        assertTrue(bridge.load() is FrameArkNative.LoadResult.Loaded)
+        assertEquals(
+            FrameArkNative.VideoConfig(
+                FrameArkNative.MediaCodecKind.H264,
+                1_920,
+                1_080,
+                60,
+                1,
+            ),
+            bridge.pollVideoConfig(),
+        )
+        assertEquals(
+            FrameArkNative.AudioConfig(
+                FrameArkNative.MediaCodecKind.OPUS,
+                48_000,
+                2,
+            ),
+            bridge.pollAudioConfig(),
+        )
+    }
+
+    @Test
+    fun rejects_malformed_media_config_without_exposing_unbounded_values() {
+        val malformed = ByteBuffer.allocate(24)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put("FAMC".toByteArray())
+            .put(1)
+            .put(1)
+            .put(1)
+            .put(0)
+            .putInt(20_000)
+            .putInt(1_080)
+            .putInt(60)
+            .putInt(1)
+            .array()
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            videoConfigProvider = { malformed },
+        )
+        bridge.load()
+
+        assertNull(bridge.pollVideoConfig())
     }
 }

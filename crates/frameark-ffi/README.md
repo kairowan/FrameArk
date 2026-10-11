@@ -15,7 +15,20 @@ bridge still does not own Android `Surface` objects, decode media, or persist
 trust. The Kotlin service owns Android lifecycle and notifications; Rust
 remains the owner of protocol/session state. Native video and audio submissions
 are bounded to 4 MiB each and 16 queued frames, return explicit backpressure,
-and are polled as versioned `FAMF` envelopes.
+and are polled as versioned `FAMF` envelopes. After FANP negotiation, the
+bridge exposes the latest video and audio track parameters as one-shot,
+versioned `FAMC` configuration envelopes before the corresponding media
+frames. Kotlin validates the fixed-size envelope and forwards the bounded
+configuration to platform-owned decoder/audio sinks; it does not treat the
+bridge as a hardware-decoder guarantee.
+
+`FAMC` v1 uses an eight-byte header (`FAMC`, version, media kind, codec, and a
+reserved byte). Video adds big-endian width, height, frame-rate numerator, and
+denominator (24 bytes total); audio adds sample rate and channel count (16
+bytes total). Unknown codec values remain explicit `UNKNOWN` values, while
+dimensions, rates, channels, and envelope lengths are bounded at the Kotlin
+boundary. A new receiver lifecycle clears pending configurations together with
+the media queue.
 
 The test suite includes a real loopback QUIC/TLS integration path covering
 temporary pairing, capability negotiation, Offer → Start, one H.264 frame,
