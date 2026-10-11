@@ -73,6 +73,8 @@ pub const MAX_HLS_PLAYLIST_BYTES: usize = 64 * 1024;
 pub const MAX_HLS_HTTP_HEADER_BYTES: usize = 8 * 1024;
 /// Maximum complete HTTP response retained while fetching one HLS playlist.
 pub const MAX_HLS_HTTP_RESPONSE_BYTES: usize = MAX_HLS_PLAYLIST_BYTES + MAX_HLS_HTTP_HEADER_BYTES;
+/// Maximum encoded bytes retained while fetching one HLS media segment.
+pub const MAX_HLS_SEGMENT_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum media segments retained by one HLS playlist.
 pub const MAX_HLS_SEGMENTS: usize = 512;
 /// Maximum segment URI length accepted by the HLS playlist boundary.
@@ -1167,6 +1169,19 @@ pub struct HlsPlaylistResponse {
     pub playlist: HlsMediaPlaylist,
 }
 
+/// A bounded HLS media-segment response obtained through a caller-owned
+/// transport. The body is still encoded media; decoding and cache eviction
+/// remain outside this protocol crate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HlsSegmentResponse {
+    /// HTTP status returned by the segment origin.
+    pub status: u16,
+    /// Lowercase response headers retained for diagnostics and policy checks.
+    pub headers: BTreeMap<String, String>,
+    /// Bounded encoded segment bytes.
+    pub body: Vec<u8>,
+}
+
 /// Fetches and parses one HLS media playlist through a caller-owned stream.
 ///
 /// The connector receives a validated `http`/`https` scheme, authority,
@@ -1222,6 +1237,59 @@ where
     })
 }
 
+/// Fetches one relative or absolute HLS segment without following redirects.
+///
+/// Relative URIs are resolved against the playlist path. The connector still
+/// owns DNS, network-class policy, TLS, authentication, cancellation, and
+/// connection reuse. A redirect or an oversized body is rejected before the
+/// bytes leave this bounded response boundary.
+pub fn fetch_hls_segment_with_connector<F, S>(
+    playlist_url: &str,
+    segment_uri: &str,
+    timeout: Duration,
+    connector: F,
+) -> Result<HlsSegmentResponse, AirplayError>
+where
+    F: FnOnce(&str, &str, &str, Duration) -> Result<S, AirplayError>,
+    S: Read + Write,
+{
+    if timeout.is_zero() {
+        return Err(AirplayError::Invalid("HLS segment timeout"));
+    }
+    let (playlist_scheme, playlist_authority, playlist_target) =
+        split_hls_playlist_url(playlist_url)?;
+    let (scheme, authority, target) = if segment_uri.contains("://") {
+        validate_hls_uri(segment_uri)?;
+        split_hls_playlist_url(segment_uri)?
+    } else {
+        validate_hls_uri(segment_uri)?;
+        let path = playlist_target
+            .split_once('?')
+            .map_or(playlist_target.as_str(), |(path, _)| path);
+        let base = path.rfind('/').map_or("/", |index| &path[..=index]);
+        let resolved = format!("{playlist_scheme}://{playlist_authority}{base}{segment_uri}");
+        split_hls_playlist_url(&resolved)?
+    };
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nAccept: */*\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = connector(&scheme, &authority, &target, timeout)?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|error| AirplayError::Io(error.kind()))?;
+    let response =
+        read_hls_http_response_with_limit(&mut stream, MAX_HLS_SEGMENT_BYTES, "HLS segment")?;
+    if !(200..300).contains(&response.status) {
+        return Err(AirplayError::Invalid("HLS segment status"));
+    }
+    Ok(HlsSegmentResponse {
+        status: response.status,
+        headers: response.headers,
+        body: response.body,
+    })
+}
+
 #[derive(Debug)]
 struct HlsHttpResponse {
     status: u16,
@@ -1230,6 +1298,14 @@ struct HlsHttpResponse {
 }
 
 fn read_hls_http_response<R: Read>(stream: &mut R) -> Result<HlsHttpResponse, AirplayError> {
+    read_hls_http_response_with_limit(stream, MAX_HLS_PLAYLIST_BYTES, "HLS playlist")
+}
+
+fn read_hls_http_response_with_limit<R: Read>(
+    stream: &mut R,
+    max_body_bytes: usize,
+    body_label: &'static str,
+) -> Result<HlsHttpResponse, AirplayError> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4 * 1024];
     loop {
@@ -1240,16 +1316,16 @@ fn read_hls_http_response<R: Read>(stream: &mut R) -> Result<HlsHttpResponse, Ai
             break;
         }
         bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() > MAX_HLS_HTTP_RESPONSE_BYTES {
-            return Err(AirplayError::TooLarge("HLS HTTP response"));
+        if bytes.len() > max_body_bytes.saturating_add(MAX_HLS_HTTP_HEADER_BYTES) {
+            return Err(AirplayError::TooLarge(body_label));
         }
         if let Some(header_end) = find_http_header_end(&bytes) {
             if header_end > MAX_HLS_HTTP_HEADER_BYTES {
                 return Err(AirplayError::TooLarge("HLS HTTP headers"));
             }
             if let Some(content_length) = parse_hls_content_length(&bytes[..header_end])? {
-                if content_length > MAX_HLS_PLAYLIST_BYTES {
-                    return Err(AirplayError::TooLarge("HLS playlist"));
+                if content_length > max_body_bytes {
+                    return Err(AirplayError::TooLarge(body_label));
                 }
                 let body_len = bytes.len().saturating_sub(header_end + 4);
                 if body_len > content_length {
@@ -1261,10 +1337,14 @@ fn read_hls_http_response<R: Read>(stream: &mut R) -> Result<HlsHttpResponse, Ai
             }
         }
     }
-    parse_hls_http_response(&bytes)
+    parse_hls_http_response_with_limit(&bytes, max_body_bytes, body_label)
 }
 
-fn parse_hls_http_response(bytes: &[u8]) -> Result<HlsHttpResponse, AirplayError> {
+fn parse_hls_http_response_with_limit(
+    bytes: &[u8],
+    max_body_bytes: usize,
+    body_label: &'static str,
+) -> Result<HlsHttpResponse, AirplayError> {
     let header_end =
         find_http_header_end(bytes).ok_or(AirplayError::Invalid("HLS HTTP terminator"))?;
     if header_end > MAX_HLS_HTTP_HEADER_BYTES {
@@ -1310,8 +1390,8 @@ fn parse_hls_http_response(bytes: &[u8]) -> Result<HlsHttpResponse, AirplayError
         return Err(AirplayError::Invalid("HLS HTTP transfer encoding"));
     }
     let body = bytes[header_end + 4..].to_vec();
-    if body.len() > MAX_HLS_PLAYLIST_BYTES {
-        return Err(AirplayError::TooLarge("HLS playlist"));
+    if body.len() > max_body_bytes {
+        return Err(AirplayError::TooLarge(body_label));
     }
     if let Some(content_length) = parse_hls_content_length(&bytes[..header_end])?
         && content_length != body.len()
@@ -4689,6 +4769,86 @@ mod tests {
                 },
             ),
             Err(AirplayError::TooLarge("HLS playlist"))
+        );
+    }
+
+    #[test]
+    fn hls_segment_fetch_resolves_relative_uri_and_keeps_transport_caller_owned() {
+        let body = vec![0x47, 0x40, 0x00, 0x10];
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        let mut response = response;
+        response.extend_from_slice(&body);
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&observed);
+        let result = fetch_hls_segment_with_connector(
+            "https://media.example.test:8443/live/index.m3u8?token=bounded",
+            "segment-42.ts?part=1",
+            Duration::from_secs(2),
+            move |scheme, authority, target, timeout| {
+                *sink.lock().unwrap() = Some((
+                    scheme.to_string(),
+                    authority.to_string(),
+                    target.to_string(),
+                    timeout,
+                ));
+                Ok(HlsScriptStream {
+                    response: std::io::Cursor::new(response),
+                    request: Vec::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body, body);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((
+                "https".to_string(),
+                "media.example.test:8443".to_string(),
+                "/live/segment-42.ts?part=1".to_string(),
+                Duration::from_secs(2),
+            ))
+        );
+    }
+
+    #[test]
+    fn hls_segment_fetch_rejects_redirects_and_oversized_bodies() {
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.test/segment.ts\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(
+            fetch_hls_segment_with_connector(
+                "https://media.example.test/live/index.m3u8",
+                "segment.ts",
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(HlsScriptStream {
+                        response: std::io::Cursor::new(redirect.to_vec()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(AirplayError::Invalid("HLS segment status"))
+        );
+        let oversized = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_HLS_SEGMENT_BYTES + 1
+        );
+        assert_eq!(
+            fetch_hls_segment_with_connector(
+                "https://media.example.test/live/index.m3u8",
+                "segment.ts",
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(HlsScriptStream {
+                        response: std::io::Cursor::new(oversized.clone().into_bytes()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(AirplayError::TooLarge("HLS segment"))
         );
     }
 
