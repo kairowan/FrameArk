@@ -13,7 +13,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val native = FrameArkNative()
-        val status = when (val result = native.load()) {
+        val nativeStatus = when (val result = native.load()) {
             is FrameArkNative.LoadResult.Loaded ->
                 getString(R.string.native_loaded, result.abiVersion)
 
@@ -25,16 +25,29 @@ class MainActivity : Activity() {
         }
 
         val statusView = TextView(this).apply {
-            text = getString(R.string.receiver_status, status)
             textSize = 20f
             setPadding(32, 32, 32, 32)
         }
+        fun refreshStatus() {
+            val network = native.networkInfo()
+            statusView.text = if (network == null) {
+                getString(R.string.receiver_status, nativeStatus)
+            } else {
+                getString(
+                    R.string.receiver_network_info,
+                    network.port,
+                    network.pairingCode,
+                )
+            }
+        }
+        refreshStatus()
         val start = Button(this).apply {
             text = getString(R.string.receiver_start)
             setOnClickListener {
                 val intent = Intent(this@MainActivity, FrameArkReceiverService::class.java)
                     .setAction(ReceiverServicePolicy.ACTION_START)
                 startService(intent)
+                statusView.postDelayed({ refreshStatus() }, NETWORK_REFRESH_DELAY_MS)
             }
         }
         val stop = Button(this).apply {
@@ -43,13 +56,23 @@ class MainActivity : Activity() {
                 val intent = Intent(this@MainActivity, FrameArkReceiverService::class.java)
                     .setAction(ReceiverServicePolicy.ACTION_STOP)
                 startService(intent)
+                statusView.postDelayed({ refreshStatus() }, NETWORK_REFRESH_DELAY_MS)
             }
+        }
+        val refresh = Button(this).apply {
+            text = getString(R.string.receiver_refresh)
+            setOnClickListener { refreshStatus() }
         }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(statusView)
             addView(start)
             addView(stop)
+            addView(refresh)
         })
+    }
+
+    private companion object {
+        const val NETWORK_REFRESH_DELAY_MS = 500L
     }
 }

@@ -151,6 +151,9 @@ The Android service also acquires a non-reference-counted Wi-Fi multicast lock
 for the active lifecycle when the platform provides one. Acquisition failure is
 best effort and never bypasses FANP endpoint authentication; the lock is
 released on stop/destroy and is not retained by the Rust layer.
+The standby Activity reads the endpoint through the JNI getters only to display
+the temporary port and pairing code after an explicit user refresh; it never
+displays or persists the certificate.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on

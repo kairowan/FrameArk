@@ -1,8 +1,10 @@
 <resources>
     <string name="app_name">FrameArk Receiver</string>
     <string name="receiver_status">FrameArk M2\n\n%1$s</string>
+    <string name="receiver_network_info">FrameArk M2\n\nFANP frameark.local:%1$d\nPairing code: %2$06d</string>
     <string name="receiver_start">Start receiver service</string>
     <string name="receiver_stop">Stop receiver service</string>
+    <string name="receiver_refresh">Refresh pairing info</string>
     <string name="service_channel">FrameArk playback</string>
     <string name="service_title">FrameArk Receiver</string>
     <string name="service_text">Ready for a local-network media session</string>
