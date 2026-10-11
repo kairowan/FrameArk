@@ -9,6 +9,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - DLNA GENA subscriptions now use monotonic lease deadlines, refresh on renew,
   and are reaped before publishing events or handling renderer requests.
 
+- Added a bounded caller-owned AirPlay RTP UDP socket adapter with loopback
+  coverage; malformed datagrams and OS errors remain explicit and no peer or
+  authentication policy is implied.
+
 - Experimental `frameark-media` crate with bounded encoded video/audio packets
   and explicit FIFO backpressure semantics.
 - Experimental `FAM1` media-frame envelope with bounded exact-boundary

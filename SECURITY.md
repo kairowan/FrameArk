@@ -130,7 +130,10 @@ assembly, marker-delimited access units, and sequence recovery. It rejects
 malformed STAP-A/FU-A boundaries, timestamp changes before an access-unit
 marker, unsupported payload types, and partial-frame loss without fabricating
 media. It does not authenticate RTP, conceal loss, decrypt, decode, or own UDP
-sockets.
+sockets. The separate RTP socket adapter allocates one bounded datagram buffer
+and returns malformed-packet or OS errors without retaining input; callers must
+still enforce the RTSP-negotiated peer, SSRC, payload type, and encryption
+policy because the adapter is not an authentication boundary.
 
 The mirror-audio RTP pipeline validates the negotiated payload type, PCM sample
 alignment, packet capacity, and explicit sequence-gap recovery. It does not
