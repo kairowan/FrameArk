@@ -30,7 +30,7 @@ Planned products include:
 - FrameArk Receiver for Android and desktop;
 - FrameArk Sender for Android, Windows, Linux, macOS, and browsers;
 - `frameark-sdk`, `frameark-cli`, `frameark-lab`, and Web Admin. The current
-  CLI is an experimental fixture sender documented in
+  CLI is an experimental discovery/lifecycle and fixture tool documented in
   [`tools/frameark-cli/README.md`](tools/frameark-cli/README.md).
 
 ## Protocol roadmap / 协议路线

@@ -22,6 +22,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental `frameark-cli send` fixture sender for pinned FANP pairing and
   bounded FAM1 media access units supplied by the caller, now using the Native
   control lifecycle before and after the stream.
+- Experimental `frameark-cli discover`, `connect`, `status`, and `end` commands
+  with bounded mDNS browsing and fresh pinned temporary FANP management
+  sessions; trust persistence, reconnect, and user-facing workflows remain
+  pending.
 - Experimental Android `MediaCodec` H.264 and PCM `AudioTrack` renderer
   lifecycles with explicit setup, backpressure, and release paths.
 - Experimental Android Receiver foreground-service lifecycle with explicit

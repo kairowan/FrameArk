@@ -46,6 +46,11 @@ current schema requires an exact version match and rejects unknown or duplicate
 entries before allocation; it does not silently downgrade or authorize media,
 remote input, file transfer, or internet relay.
 
+The CLI management commands accept the certificate and pairing code only for
+one bounded invocation. They do not persist them, create a trust record, or
+reuse a connection across commands; operators must protect the command line,
+fixture paths, and certificate files supplied to the process.
+
 Authenticated control streams enforce one bounded frame per stream and a total
 operation deadline. Cancellation closes the connection rather than reusing
 partially read state; pairing codes have redacted debug formatting.
