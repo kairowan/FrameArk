@@ -12,4 +12,12 @@
     <string name="native_loaded">Rust core ABI %1$d loaded</string>
     <string name="native_incompatible">Rust core ABI mismatch: expected %1$d, found %2$d</string>
     <string name="native_unavailable">Rust core unavailable: %1$s</string>
+    <string name="trust_warning">Experimental trust settings. Approve only a fingerprint shown by an authenticated pairing flow; a typed fingerprint is not proof of sender identity.</string>
+    <string name="trust_device_id_hint">Trusted device ID</string>
+    <string name="trust_fingerprint_hint">Lowercase SHA-256 fingerprint</string>
+    <string name="trust_label_hint">Label</string>
+    <string name="trust_approve">Approve trusted device</string>
+    <string name="trust_revoke">Revoke trusted device ID</string>
+    <string name="trust_applied">Trust change saved</string>
+    <string name="trust_rejected">Trust change rejected or persistence unavailable</string>
 </resources>
