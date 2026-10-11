@@ -8,10 +8,19 @@
 #![allow(unsafe_code)]
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use frameark_api::{AudioFrame, EncodedMediaSink, VideoFrame};
+use frameark_api::{AudioFrame, AudioRenderer, EncodedMediaSink, VideoFrame, VideoRenderer};
 use frameark_core::{CORE_ABI_VERSION, DeviceId, Session, SessionId, SessionState};
+use frameark_native::media_session::MediaSession;
+use frameark_native::{
+    MediaRendererFactory, NativeMediaControlReceiver, ReceiverPolicy, SessionBackend, SessionOffer,
+};
+use frameark_transport::{PairingCode, PairingServer};
 use jni::{
     JNIEnv,
     objects::{JByteArray, JObject},
@@ -26,6 +35,8 @@ const MEDIA_FRAME_MAGIC: &[u8; 4] = b"FAMF";
 const MEDIA_FRAME_VERSION: u8 = 1;
 const MEDIA_KIND_VIDEO: u8 = 1;
 const MEDIA_KIND_AUDIO: u8 = 2;
+const NETWORK_SERVER_NAME: &str = "frameark.local";
+const NETWORK_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Returns the core ABI version expected by the Android receiver.
 #[unsafe(no_mangle)]
@@ -40,6 +51,228 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeVersion(
 struct NativeReceiverState {
     session: Option<Session>,
     media_queue: VecDeque<NativeMediaFrame>,
+    network: Option<NetworkRuntime>,
+}
+
+struct NetworkRuntime {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+    port: u16,
+    pairing_code: u32,
+    certificate_der: Vec<u8>,
+}
+
+impl NetworkRuntime {
+    fn start() -> Result<Self, String> {
+        let pairing_code = PairingCode::generate();
+        let pairing_value = pairing_code
+            .as_str()
+            .parse()
+            .map_err(|_| "FANP pairing code".to_string())?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+        let join = thread::Builder::new()
+            .name("frameark-fanp-receiver".to_string())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    let _ = ready_sender.send(Err("FANP runtime".to_string()));
+                    return;
+                };
+                let bind_result = {
+                    let _entered = runtime.enter();
+                    PairingServer::bind(
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                        NETWORK_SERVER_NAME,
+                        pairing_code,
+                    )
+                };
+                let server = match bind_result {
+                    Ok(server) => server,
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(format!("FANP listener: {error:?}")));
+                        return;
+                    }
+                };
+                let Ok(port) = server.local_addr().map(|address| address.port()) else {
+                    let _ = ready_sender.send(Err("FANP address".to_string()));
+                    return;
+                };
+                let certificate_der = server.certificate_der().to_vec();
+                if ready_sender.send(Ok((port, certificate_der))).is_err() {
+                    return;
+                }
+                runtime.block_on(async move {
+                    while !stop_thread.load(Ordering::Acquire) {
+                        let accepted = tokio::time::timeout(
+                            Duration::from_millis(250),
+                            server.accept_pairing(NETWORK_OPERATION_TIMEOUT),
+                        )
+                        .await;
+                        let Ok(Ok(transport)) = accepted else {
+                            continue;
+                        };
+                        let Ok(receiver) = NativeMediaControlReceiver::new(
+                            transport,
+                            network_session(),
+                            network_policy(),
+                            NetworkBackend,
+                            NetworkRendererFactory,
+                        ) else {
+                            continue;
+                        };
+                        let _ = receiver.serve(NETWORK_OPERATION_TIMEOUT).await;
+                    }
+                    server.close();
+                });
+            })
+            .map_err(|_| "FANP worker".to_string())?;
+        let (port, certificate_der) = ready_receiver
+            .recv()
+            .map_err(|_| "FANP startup".to_string())??;
+        Ok(Self {
+            stop,
+            join: Some(join),
+            port,
+            pairing_code: pairing_value,
+            certificate_der,
+        })
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn network_session() -> Session {
+    Session::new(
+        SessionId::try_from("android-network-session").expect("static session id"),
+        DeviceId::try_from("android-device").expect("static device id"),
+    )
+}
+
+const fn network_policy() -> ReceiverPolicy {
+    ReceiverPolicy {
+        video: true,
+        opus: true,
+        aac: true,
+        max_width: 3840,
+        max_height: 2160,
+        max_fps: 60,
+        max_channels: 8,
+    }
+}
+
+struct NetworkBackend;
+
+impl SessionBackend for NetworkBackend {
+    fn prepare(&mut self, _offer: SessionOffer) -> frameark_core::Result<()> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> frameark_core::Result<()> {
+        Ok(())
+    }
+
+    fn reset(&mut self) -> frameark_core::Result<()> {
+        Ok(())
+    }
+}
+
+struct NetworkVideoRenderer;
+
+impl VideoRenderer for NetworkVideoRenderer {
+    type Error = ();
+
+    fn configure(
+        &mut self,
+        _config: frameark_core::VideoConfig,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn render(&mut self, frame: VideoFrame<'_>) -> std::result::Result<(), Self::Error> {
+        if submit_media_frame(NativeMediaFrame {
+            kind: MEDIA_KIND_VIDEO,
+            pts: frame.timestamp,
+            keyframe: frame.keyframe,
+            payload: frame.data.to_vec(),
+        }) == 0
+        {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn reset(&mut self) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+struct NetworkAudioRenderer;
+
+impl AudioRenderer for NetworkAudioRenderer {
+    type Error = ();
+
+    fn configure(
+        &mut self,
+        _config: frameark_core::AudioConfig,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn render(&mut self, frame: AudioFrame<'_>) -> std::result::Result<(), Self::Error> {
+        if submit_media_frame(NativeMediaFrame {
+            kind: MEDIA_KIND_AUDIO,
+            pts: frame.timestamp,
+            keyframe: false,
+            payload: frame.data.to_vec(),
+        }) == 0
+        {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn reset(&mut self) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+struct NetworkRendererFactory;
+
+impl MediaRendererFactory for NetworkRendererFactory {
+    type Video = NetworkVideoRenderer;
+    type Audio = NetworkAudioRenderer;
+
+    fn prepare(
+        &mut self,
+        offer: SessionOffer,
+    ) -> frameark_core::Result<MediaSession<Self::Video, Self::Audio>> {
+        MediaSession::prepare(
+            offer,
+            offer.video.map(|_| {
+                (
+                    frameark_core::TrackId::new("video-0").expect("static track id"),
+                    NetworkVideoRenderer,
+                )
+            }),
+            offer.audio.map(|_| {
+                (
+                    frameark_core::TrackId::new("audio-0").expect("static track id"),
+                    NetworkAudioRenderer,
+                )
+            }),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,7 +355,11 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
     if session.transition(SessionState::Connecting).is_err() {
         return -1;
     }
+    let Ok(network) = NetworkRuntime::start() else {
+        return -4;
+    };
     state.session = Some(session);
+    state.network = Some(network);
     0
 }
 
@@ -139,7 +376,13 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStopRecei
         return 0;
     };
     state.media_queue.clear();
-    if session.transition(SessionState::Closed).is_err() {
+    let network = state.network.take();
+    let transition_failed = session.transition(SessionState::Closed).is_err();
+    drop(state);
+    if let Some(network) = network {
+        network.stop();
+    }
+    if transition_failed {
         return -1;
     }
     0
@@ -155,6 +398,54 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeReceiverR
         return -1;
     };
     if state.session.is_some() { 1 } else { 0 }
+}
+
+/// Returns the ephemeral FANP listener port, or zero when the receiver is stopped.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeReceiverPort(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jint {
+    let Ok(state) = receiver_state().lock() else {
+        return -1;
+    };
+    state
+        .network
+        .as_ref()
+        .map_or(0, |network| i32::from(network.port))
+}
+
+/// Returns the temporary six-digit pairing code, or zero when stopped.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeReceiverPairingCode(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jint {
+    let Ok(state) = receiver_state().lock() else {
+        return -1;
+    };
+    state
+        .network
+        .as_ref()
+        .map_or(0, |network| network.pairing_code as jint)
+}
+
+/// Returns the pinned ephemeral server certificate, or null when stopped.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeReceiverCertificate(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jbyteArray {
+    let Ok(state) = receiver_state().lock() else {
+        return JObject::null().into_raw() as jbyteArray;
+    };
+    let Some(network) = state.network.as_ref() else {
+        return JObject::null().into_raw() as jbyteArray;
+    };
+    match env.byte_array_from_slice(&network.certificate_der) {
+        Ok(array) => array.into_raw(),
+        Err(_) => JObject::null().into_raw() as jbyteArray,
+    }
 }
 
 /// Queues one encoded video access unit for the Android renderer boundary.
@@ -279,6 +570,16 @@ mod tests {
     }
 
     #[test]
+    fn network_runtime_exposes_bounded_pairing_material_and_stops_cleanly() {
+        let _guard = test_guard();
+        let network = NetworkRuntime::start().unwrap_or_else(|error| panic!("{error}"));
+        assert_ne!(network.port, 0);
+        assert!((0..=999_999).contains(&network.pairing_code));
+        assert!(!network.certificate_der.is_empty());
+        network.stop();
+    }
+
+    #[test]
     fn lifecycle_state_is_bounded_and_idempotent() {
         let _guard = test_guard();
         let state = receiver_state();
@@ -303,6 +604,7 @@ mod tests {
                 DeviceId::try_from("media-device").unwrap(),
             )),
             media_queue: VecDeque::new(),
+            network: None,
         };
         assert_eq!(
             enqueue_media_frame(

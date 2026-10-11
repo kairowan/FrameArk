@@ -18,6 +18,9 @@ class FrameArkNative(
     submitVideoProvider: ((ByteArray, Long, Boolean) -> Int)? = null,
     submitAudioProvider: ((ByteArray, Long) -> Int)? = null,
     pollMediaProvider: (() -> ByteArray?)? = null,
+    networkPortProvider: (() -> Int)? = null,
+    networkPairingCodeProvider: (() -> Int)? = null,
+    networkCertificateProvider: (() -> ByteArray?)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
@@ -37,6 +40,12 @@ class FrameArkNative(
         submitAudioProvider ?: { payload, pts -> nativeSubmitAudioFrame(payload, pts) }
     private val bridgePollMediaProvider: () -> ByteArray? =
         pollMediaProvider ?: { nativePollMediaFrame() }
+    private val bridgeNetworkPortProvider: () -> Int =
+        networkPortProvider ?: { nativeReceiverPort() }
+    private val bridgeNetworkPairingCodeProvider: () -> Int =
+        networkPairingCodeProvider ?: { nativeReceiverPairingCode() }
+    private val bridgeNetworkCertificateProvider: () -> ByteArray? =
+        networkCertificateProvider ?: { nativeReceiverCertificate() }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -81,6 +90,13 @@ class FrameArkNative(
         val pts: Long,
         val keyframe: Boolean,
         val payload: ByteArray,
+    )
+
+    /** Ephemeral FANP listener material for an explicit in-app pairing flow. */
+    data class NetworkInfo(
+        val port: Int,
+        val pairingCode: Int,
+        val certificateDer: ByteArray,
     )
 
     /** Result of submitting encoded media to the bounded Rust queue. */
@@ -147,6 +163,16 @@ class FrameArkNative(
 
     /** Returns the native lifecycle flag, or false when the bridge is absent. */
     fun isReceiverRunning(): Boolean = isLoaded() && bridgeRunningProvider() == 1
+
+    /** Returns the current ephemeral FANP endpoint and pinned certificate. */
+    fun networkInfo(): NetworkInfo? {
+        if (!isLoaded()) return null
+        val port = bridgeNetworkPortProvider()
+        val pairingCode = bridgeNetworkPairingCodeProvider()
+        val certificate = bridgeNetworkCertificateProvider() ?: return null
+        if (port !in 1..65_535 || pairingCode !in 0..999_999 || certificate.isEmpty()) return null
+        return NetworkInfo(port, pairingCode, certificate)
+    }
 
     /** Submits one bounded encoded video access unit to Rust. */
     fun submitVideoFrame(payload: ByteArray, pts: Long, keyframe: Boolean): MediaSubmitResult {
@@ -216,6 +242,12 @@ class FrameArkNative(
     private external fun nativeStopReceiver(): Int
 
     private external fun nativeReceiverRunning(): Int
+
+    private external fun nativeReceiverPort(): Int
+
+    private external fun nativeReceiverPairingCode(): Int
+
+    private external fun nativeReceiverCertificate(): ByteArray?
 
     private external fun nativeSubmitVideoFrame(payload: ByteArray, pts: Long, keyframe: Boolean): Int
 
