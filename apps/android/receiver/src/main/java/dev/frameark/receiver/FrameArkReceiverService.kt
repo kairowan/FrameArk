@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -22,6 +23,8 @@ class FrameArkReceiverService : Service() {
     private lateinit var playbackLoop: MediaPlaybackLoop
     private lateinit var coordinator: ReceiverSessionCoordinator
     private lateinit var networkCoordinator: ReceiverNetworkCoordinator
+    private lateinit var multicastLockCoordinator: ReceiverMulticastLockCoordinator
+    private var multicastLock: WifiManager.MulticastLock? = null
     private lateinit var identityCoordinator: ReceiverIdentityCoordinator
     private var identityReady = false
 
@@ -36,6 +39,20 @@ class FrameArkReceiverService : Service() {
             },
         )
         networkCoordinator = ReceiverNetworkCoordinator(native)
+        val wifiManager = getSystemService(WifiManager::class.java)
+        multicastLockCoordinator = ReceiverMulticastLockCoordinator(
+            acquireLock = {
+                val manager = wifiManager ?: error("Wi-Fi multicast is unavailable")
+                multicastLock = manager.createMulticastLock("frameark.discovery").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            },
+            releaseLock = {
+                multicastLock?.release()
+                multicastLock = null
+            },
+        )
         coordinator = ReceiverSessionCoordinator(native, playbackLoop, network = networkCoordinator)
         identityCoordinator = ReceiverIdentityCoordinator {
             AndroidDeviceIdentityStore().getOrCreate()
@@ -60,6 +77,7 @@ class FrameArkReceiverService : Service() {
         val action = ReceiverServicePolicy.normalize(intent?.action)
         if (ReceiverServicePolicy.isStop(action)) {
             coordinator.stop()
+            multicastLockCoordinator.release()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelfResult(startId)
             return START_NOT_STICKY
@@ -68,7 +86,9 @@ class FrameArkReceiverService : Service() {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
+        multicastLockCoordinator.acquire()
         if (!coordinator.start()) {
+            multicastLockCoordinator.release()
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
@@ -78,6 +98,7 @@ class FrameArkReceiverService : Service() {
 
     override fun onDestroy() {
         coordinator.close()
+        multicastLockCoordinator.close()
         super.onDestroy()
     }
 

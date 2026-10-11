@@ -147,6 +147,10 @@ temporary pairing code to the local user. The certificate remains in memory;
 the coordinator does not copy it into logs, preferences, or notification
 text. Best-effort mDNS metadata advertises protocol/capability labels only; it
 never advertises the pairing code or certificate.
+The Android service also acquires a non-reference-counted Wi-Fi multicast lock
+for the active lifecycle when the platform provides one. Acquisition failure is
+best effort and never bypasses FANP endpoint authentication; the lock is
+released on stop/destroy and is not retained by the Rust layer.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on
