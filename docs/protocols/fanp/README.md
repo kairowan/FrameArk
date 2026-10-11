@@ -17,6 +17,14 @@ The client must receive the server certificate through an in-scope channel
 and pin those exact DER bytes. mDNS metadata is discovery only and is not a
 certificate authority.
 
+After the code is accepted, a receiver may run a caller-owned asynchronous
+approval policy before sending `PairAccepted`. The policy receives the peer
+address and may reject the connection before capability negotiation. This is
+only an authorization seam: the address and pairing code are not sender
+identity proof. A production trust UI must bind the decision to an
+independently authenticated key-possession transcript; typed fingerprints are
+not sufficient.
+
 ## Control frame
 
 Every control stream starts with this 8-byte header:

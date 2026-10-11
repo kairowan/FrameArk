@@ -6,6 +6,7 @@
 //! process and must be pinned by the caller for the session.
 
 use std::fmt;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,6 +59,8 @@ pub enum TransportError {
     UnsupportedVersion(u8),
     /// The peer rejected the temporary pairing code.
     PairingRejected,
+    /// The caller-owned post-PIN approval policy rejected the peer.
+    ApprovalRejected,
     /// The peer rejected or could not complete capability negotiation.
     NegotiationRejected,
     /// Local capability validation failed before or during negotiation.
@@ -83,6 +86,7 @@ impl fmt::Display for TransportError {
                 write!(f, "unsupported FANP protocol version {version}")
             }
             Self::PairingRejected => f.write_str("temporary pairing was rejected"),
+            Self::ApprovalRejected => f.write_str("caller-owned pairing approval was rejected"),
             Self::NegotiationRejected => f.write_str("FANP capability negotiation was rejected"),
             Self::Negotiation(error) => write!(f, "FANP capability negotiation error: {error}"),
             Self::ConnectionClosed => f.write_str("FANP connection closed during pairing"),
@@ -295,6 +299,27 @@ impl PairingServer {
         &self,
         operation_timeout: Duration,
     ) -> Result<PairingSession, TransportError> {
+        self.accept_pairing_with_approval(operation_timeout, |_| async { true })
+            .await
+    }
+
+    /// Waits for one incoming connection and lets the caller approve it after
+    /// the temporary pairing code has been verified but before the server
+    /// acknowledges the pairing. The callback receives only the transport
+    /// peer address; it is a policy seam, not sender identity proof. Callers
+    /// that expose a trust UI must bind this address to an independently
+    /// authenticated key-possession transcript and keep the approval
+    /// decision in Rust-owned state. A false result sends the normal bounded
+    /// rejection frame and leaves no persistent trust record.
+    pub async fn accept_pairing_with_approval<F, Fut>(
+        &self,
+        operation_timeout: Duration,
+        approve: F,
+    ) -> Result<PairingSession, TransportError>
+    where
+        F: FnOnce(SocketAddr) -> Fut,
+        Fut: Future<Output = bool>,
+    {
         let incoming = timeout(operation_timeout, self.endpoint.accept())
             .await
             .map_err(|_| TransportError::Timeout)?
@@ -321,6 +346,14 @@ impl PairingServer {
             // short and bounded; rejected peers never become persistent state.
             let _ = timeout(operation_timeout, send.stopped()).await;
             return Err(TransportError::PairingRejected);
+        }
+        let approved = timeout(operation_timeout, approve(connection.remote_address()))
+            .await
+            .map_err(|_| TransportError::Timeout)?;
+        if !approved {
+            reject(&mut send).await?;
+            let _ = timeout(operation_timeout, send.stopped()).await;
+            return Err(TransportError::ApprovalRejected);
         }
         write_frame_with_timeout(&mut send, PAIR_ACCEPTED, &[], operation_timeout).await?;
         let (mut hello_send, mut hello_receive) =
@@ -658,6 +691,85 @@ mod tests {
         assert!(server_session.is_temporary());
         client.close();
         server_session.close();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_owned_approval_runs_after_pin_and_before_acceptance() {
+        let server = Arc::new(
+            PairingServer::bind(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("004207").unwrap(),
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let accepting = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            accepting
+                .accept_pairing_with_approval(TEST_TIMEOUT, |peer| async move {
+                    peer.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                })
+                .await
+        });
+
+        let client = PairingClient::connect(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("004207").unwrap(),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(client.is_temporary());
+        let server_session = server_task.await.unwrap().unwrap();
+        client.close();
+        server_session.close();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_owned_approval_rejects_without_creating_a_session() {
+        let server = Arc::new(
+            PairingServer::bind(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                "localhost",
+                PairingCode::parse("004207").unwrap(),
+            )
+            .unwrap(),
+        );
+        let address = server.local_addr().unwrap();
+        let certificate = server.certificate_der().to_vec();
+        let accepting = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            accepting
+                .accept_pairing_with_approval(TEST_TIMEOUT, |_| async { false })
+                .await
+        });
+
+        let client_error = match PairingClient::connect(
+            address,
+            "localhost",
+            &certificate,
+            PairingCode::parse("004207").unwrap(),
+            TEST_TIMEOUT,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(session) => {
+                session.close();
+                panic!("rejected approval unexpectedly created a client session")
+            }
+        };
+        assert_eq!(client_error, TransportError::PairingRejected);
+        assert!(matches!(
+            server_task.await.unwrap(),
+            Err(TransportError::ApprovalRejected)
+        ));
         server.close();
     }
 
