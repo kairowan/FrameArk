@@ -56,3 +56,10 @@ core ABI version unchanged. This is local identity plumbing, not proof of key
 possession, persistent peer trust, or binding of the Keystore key to the
 ephemeral TLS certificate; temporary certificate pinning and PIN pairing remain
 the transport authentication mechanism.
+
+The bridge also exposes `nativeTrustPeer`, `nativeRevokePeer`, and
+`nativeIsPeerTrusted` for an explicit Android approval UI. These calls delegate
+validation, capacity, identity-change rejection, and revocation to Rust's
+bounded `frameark-trust::TrustRegistry`; Kotlin forwards only public IDs,
+fingerprints, and labels. The registry is process-local in this increment and
+does not authenticate the sender, persist a snapshot, or replace user approval.

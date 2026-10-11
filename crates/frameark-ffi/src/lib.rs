@@ -25,6 +25,7 @@ use frameark_native::{
     MediaRendererFactory, NativeMediaControlReceiver, ReceiverPolicy, SessionBackend, SessionOffer,
 };
 use frameark_transport::{PairingCode, PairingServer};
+use frameark_trust::{DeviceFingerprint, TrustError, TrustRegistry};
 use jni::{
     JNIEnv,
     objects::{JByteArray, JObject, JString},
@@ -81,6 +82,99 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetDevice
         return -3;
     };
     install_device_identity(&mut state, &alias, &fingerprint)
+}
+
+/// Adds or refreshes one explicitly approved peer in Rust's bounded registry.
+/// Return values: 0 accepted, -2 key changed, -3 malformed/lock failure,
+/// -4 registry capacity exhausted.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeer(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    device_id: JString<'_>,
+    fingerprint: JString<'_>,
+    label: JString<'_>,
+) -> jint {
+    let Ok(device_id) = env.get_string(&device_id) else {
+        return -3;
+    };
+    let Ok(fingerprint) = env.get_string(&fingerprint) else {
+        return -3;
+    };
+    let Ok(label) = env.get_string(&label) else {
+        return -3;
+    };
+    let Ok(device_id) = DeviceId::try_from(device_id.to_string_lossy().into_owned()) else {
+        return -3;
+    };
+    let Ok(fingerprint) = DeviceFingerprint::new(fingerprint.to_string_lossy().into_owned()) else {
+        return -3;
+    };
+    let label = label.to_string_lossy().into_owned();
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    match state.trust_registry.trust(device_id, fingerprint, label) {
+        Ok(_) => 0,
+        Err(TrustError::IdentityChanged) => -2,
+        Err(TrustError::Capacity) => -4,
+        Err(_) => -3,
+    }
+}
+
+/// Explicitly revokes one trusted peer. Return values: 0 revoked, -3 unknown
+/// or malformed/lock failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeRevokePeer(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    device_id: JString<'_>,
+) -> jint {
+    let Ok(device_id) = env.get_string(&device_id) else {
+        return -3;
+    };
+    let Ok(device_id) = DeviceId::try_from(device_id.to_string_lossy().into_owned()) else {
+        return -3;
+    };
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    if state.trust_registry.revoke(&device_id).is_ok() {
+        0
+    } else {
+        -3
+    }
+}
+
+/// Checks one peer/fingerprint pair without exposing the registry contents.
+/// Return values: 1 trusted, 0 not trusted, -3 malformed/lock failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeIsPeerTrusted(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    device_id: JString<'_>,
+    fingerprint: JString<'_>,
+) -> jint {
+    let Ok(device_id) = env.get_string(&device_id) else {
+        return -3;
+    };
+    let Ok(fingerprint) = env.get_string(&fingerprint) else {
+        return -3;
+    };
+    let Ok(device_id) = DeviceId::try_from(device_id.to_string_lossy().into_owned()) else {
+        return -3;
+    };
+    let Ok(fingerprint) = DeviceFingerprint::new(fingerprint.to_string_lossy().into_owned()) else {
+        return -3;
+    };
+    let Ok(state) = receiver_state().lock() else {
+        return -3;
+    };
+    if state.trust_registry.is_trusted(&device_id, &fingerprint) {
+        1
+    } else {
+        0
+    }
 }
 
 fn install_device_identity(
@@ -150,6 +244,7 @@ struct NativeReceiverState {
     identity_alias: Option<String>,
     device_id: Option<DeviceId>,
     identity_fingerprint: Option<String>,
+    trust_registry: TrustRegistry,
     network: Option<NetworkRuntime>,
 }
 
@@ -939,6 +1034,42 @@ mod tests {
     }
 
     #[test]
+    fn trust_registry_bridge_keeps_key_rotation_explicit_and_revocation_bounded() {
+        let mut state = NativeReceiverState::default();
+        let device_id = DeviceId::try_from("sender-1").unwrap();
+        let fingerprint = DeviceFingerprint::new(
+            "ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89",
+        )
+        .unwrap();
+        assert!(
+            state
+                .trust_registry
+                .trust(device_id.clone(), fingerprint.clone(), "Sender")
+                .is_ok()
+        );
+        assert!(state.trust_registry.is_trusted(&device_id, &fingerprint));
+        let rotated = DeviceFingerprint::new(
+            "cd:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89",
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .trust_registry
+                .trust(device_id.clone(), rotated, "Rotated"),
+            Err(TrustError::IdentityChanged)
+        );
+        assert_eq!(
+            state.trust_registry.revoke(&device_id).unwrap().label,
+            "Sender"
+        );
+        assert!(!state.trust_registry.is_trusted(&device_id, &fingerprint));
+        assert_eq!(
+            state.trust_registry.revoke(&device_id),
+            Err(TrustError::UnknownDevice)
+        );
+    }
+
+    #[test]
     fn network_runtime_exposes_bounded_pairing_material_and_stops_cleanly() {
         let _guard = test_guard();
         let network =
@@ -1102,6 +1233,7 @@ mod tests {
             identity_alias: None,
             device_id: None,
             identity_fingerprint: None,
+            trust_registry: TrustRegistry::default(),
             network: None,
         };
         assert_eq!(
