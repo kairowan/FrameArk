@@ -21,4 +21,14 @@ class DeviceIdentityPolicyTest {
     fun rejects_empty_public_keys() {
         DeviceIdentityPolicy.fingerprint(byteArrayOf())
     }
+
+    @Test
+    fun validates_lowercase_sha256_fingerprints() {
+        DeviceIdentityPolicy.validateFingerprint("00".repeat(32).chunked(2).joinToString(":"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejects_uppercase_fingerprints() {
+        DeviceIdentityPolicy.validateFingerprint("AA".repeat(32).chunked(2).joinToString(":"))
+    }
 }
