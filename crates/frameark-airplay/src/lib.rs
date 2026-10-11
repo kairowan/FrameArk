@@ -9,6 +9,7 @@ use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 
 /// Maximum RTSP message size accepted before parsing.
 pub const MAX_RTSP_BYTES: usize = 64 * 1024;
@@ -54,6 +55,8 @@ pub const MIRROR_VIDEO_CLOCK_HZ: u32 = 90_000;
 pub const MAX_MIRROR_SESSION_ID_BYTES: usize = 128;
 /// Maximum requests served by one bounded mirror RTSP accept loop.
 pub const MAX_MIRROR_RTSP_REQUESTS_PER_RUN: usize = 128;
+/// Maximum wall-clock budget accepted by the mirror RTSP runtime helper.
+pub const MAX_MIRROR_RTSP_RUNTIME_DURATION: Duration = Duration::from_secs(60);
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1906,12 +1909,24 @@ impl MirrorRtspTcpServer {
     /// Accepts one request, applies the state machine, writes one response,
     /// and closes the connection.
     pub fn serve_once(&mut self) -> Result<SocketAddr, AirplayError> {
-        let (mut stream, peer) = self
+        let (stream, peer) = self
             .listener
             .accept()
             .map_err(|error| AirplayError::Io(error.kind()))?;
+        self.serve_connection(stream, peer, self.read_timeout)
+    }
+
+    fn serve_connection(
+        &mut self,
+        mut stream: std::net::TcpStream,
+        peer: SocketAddr,
+        timeout: Duration,
+    ) -> Result<SocketAddr, AirplayError> {
         stream
-            .set_read_timeout(Some(self.read_timeout))
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        stream
+            .set_write_timeout(Some(timeout))
             .map_err(|error| AirplayError::Io(error.kind()))?;
         let request = read_rtsp_request(&mut stream)?;
         let response = self.session.handle(&request)?;
@@ -1921,6 +1936,55 @@ impl MirrorRtspTcpServer {
             .and_then(|_| stream.flush())
             .map_err(|error| AirplayError::Io(error.kind()))?;
         Ok(peer)
+    }
+
+    /// Serves mirror RTSP connections for a bounded time and request budget.
+    ///
+    /// The listener is temporarily non-blocking and restored to blocking mode
+    /// before returning. A malformed client consumes only its own request
+    /// budget slot; the caller retains ownership of the session and any RTP
+    /// sockets.
+    pub fn serve_for(
+        &mut self,
+        duration: Duration,
+        max_requests: usize,
+    ) -> Result<usize, AirplayError> {
+        if duration.is_zero() || duration > MAX_MIRROR_RTSP_RUNTIME_DURATION {
+            return Err(AirplayError::Invalid("mirror RTSP runtime duration"));
+        }
+        if max_requests == 0 || max_requests > MAX_MIRROR_RTSP_REQUESTS_PER_RUN {
+            return Err(AirplayError::Invalid("mirror RTSP runtime request budget"));
+        }
+        self.listener
+            .set_nonblocking(true)
+            .map_err(|error| AirplayError::Io(error.kind()))?;
+        let deadline = Instant::now() + duration;
+        let mut served = 0;
+        let result = loop {
+            if served >= max_requests || Instant::now() >= deadline {
+                break Ok(served);
+            }
+            match self.listener.accept() {
+                Ok((stream, peer)) => {
+                    served += 1;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let timeout = self.read_timeout.min(remaining);
+                    if timeout.is_zero() {
+                        break Ok(served);
+                    }
+                    let _ = self.serve_connection(stream, peer, timeout);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => break Err(AirplayError::Io(error.kind())),
+            }
+        };
+        let restore = self
+            .listener
+            .set_nonblocking(false)
+            .map_err(|error| AirplayError::Io(error.kind()));
+        result.and(restore.map(|()| served))
     }
 
     /// Serves a bounded sequential request batch.
@@ -3645,5 +3709,43 @@ mod tests {
         assert!(peer.ip().is_loopback());
         assert!(response.starts_with(b"RTSP/1.0 200 OK\r\n"));
         assert_eq!(server.state(), MirrorSessionState::Idle);
+    }
+
+    #[test]
+    fn mirror_rtsp_runtime_is_time_and_request_bounded() {
+        let session = MirrorSession::new("mirror-session", 7010).unwrap();
+        let mut server = MirrorRtspTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            session,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            server.serve_for(Duration::ZERO, 1),
+            Err(AirplayError::Invalid("mirror RTSP runtime duration"))
+        );
+        assert_eq!(
+            server.serve_for(
+                MAX_MIRROR_RTSP_RUNTIME_DURATION + Duration::from_millis(1),
+                1,
+            ),
+            Err(AirplayError::Invalid("mirror RTSP runtime duration"))
+        );
+        assert_eq!(
+            server.serve_for(Duration::from_millis(1), 0),
+            Err(AirplayError::Invalid("mirror RTSP runtime request budget"))
+        );
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            stream
+                .write_all(b"OPTIONS rtsp://receiver/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        });
+        assert_eq!(server.serve_for(Duration::from_secs(1), 1).unwrap(), 1);
+        assert!(client.join().unwrap().starts_with(b"RTSP/1.0 200 OK\r\n"));
     }
 }
