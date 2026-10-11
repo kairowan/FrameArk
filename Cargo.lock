@@ -121,6 +121,7 @@ name = "frameark-cli"
 version = "0.1.0"
 dependencies = [
  "frameark-core",
+ "frameark-discovery",
  "frameark-media",
  "frameark-native",
  "frameark-transport",

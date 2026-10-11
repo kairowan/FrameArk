@@ -28,6 +28,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Android Receiver foreground-service lifecycle | Pass for manifest, notification-service wiring, and action-policy JVM tests; device reclaim behavior unverified | `ReceiverServicePolicyTest`, Android `lint test assembleDebug` |
 | Android Keystore identity policy | Pass for alias bounds and deterministic public-key fingerprint formatting; Keystore provisioning unverified on JVM | `DeviceIdentityPolicyTest`, Android `lint test assembleDebug` |
 | Android Rust/JNI receiver lifecycle and media envelope | Pass for protected Rust core-session start/stop mapping, bounded JNI video/audio queue, backpressure, and Kotlin `FAMF` decoding; physical-device loading, network attachment, and hardware renderer callbacks unverified | `frameark-ffi` lifecycle/media-queue tests, `FrameArkNativeTest`, Android `lint test assembleDebug` |
+| CLI discovery and lifecycle command validation | Pass; bounded mDNS event window plus connect/status/end option and usage checks | `frameark-cli` unit tests; live peer behavior remains matrix work |
 | Fixture sender CLI validation | Pass; bounded fixture file, frame-count, interval, pairing-code, and required-input checks | `frameark-cli` unit tests |
 
 ## Explicit limits
@@ -45,6 +46,9 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
 - The current sender/orchestrator supports one Offer, one media stream, and one
   Stop sequence; it does not yet implement dynamic reconfiguration, retry, or
   reconnect.
+- CLI management commands create one temporary pinned pairing per invocation;
+  they do not persist a device record, reuse a session between commands, or
+  provide a user-facing trust store.
 - The fixture CLI accepts real H.264/Opus/AAC access-unit files but the
   repository does not ship a licensed codec sample or decoder matrix yet; no
   1080p playback evidence exists.

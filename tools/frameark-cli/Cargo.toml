@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+frameark-discovery = { path = "../../crates/frameark-discovery" }
 frameark-core.workspace = true
 frameark-media = { path = "../../crates/frameark-media" }
 frameark-native = { path = "../../crates/frameark-native" }
