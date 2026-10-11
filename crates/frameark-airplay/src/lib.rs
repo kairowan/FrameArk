@@ -1450,7 +1450,9 @@ fn plist_unsigned(
 /// Bounded RTSP state machine for one AirPlay screen-mirroring session.
 ///
 /// The session owns protocol state only. It does not open UDP sockets, decode
-/// H.264, decrypt audio, or render to a platform surface.
+/// H.264, decrypt audio, or render to a platform surface. A validated SETUP
+/// received while Streaming replaces the negotiated transport/configuration
+/// atomically and keeps the session in Streaming for dynamic reconfiguration.
 pub struct MirrorSession {
     session_id: String,
     server_port: u16,
@@ -1512,7 +1514,12 @@ impl MirrorSession {
                 );
                 Vec::new()
             }
-            "SETUP" if self.state == MirrorSessionState::Idle => {
+            "SETUP"
+                if matches!(
+                    self.state,
+                    MirrorSessionState::Idle | MirrorSessionState::Streaming
+                ) =>
+            {
                 let transport = request
                     .headers
                     .get("transport")
@@ -1526,7 +1533,9 @@ impl MirrorSession {
                 let config = MirrorVideoConfig::from_plist(&plist)?;
                 self.transport = Some(transport);
                 self.config = Some(config);
-                self.state = MirrorSessionState::Setup;
+                if self.state == MirrorSessionState::Idle {
+                    self.state = MirrorSessionState::Setup;
+                }
                 response_headers.insert(
                     "transport".to_string(),
                     format!(
@@ -2974,6 +2983,75 @@ mod tests {
         session.handle(&request("FLUSH", 5, &[], &[])).unwrap();
         session.handle(&request("TEARDOWN", 6, &[], &[])).unwrap();
         assert_eq!(session.state(), MirrorSessionState::Closed);
+    }
+
+    #[test]
+    fn mirror_session_applies_streaming_setup_atomically() {
+        let mut initial = BTreeMap::new();
+        initial.insert("width".to_string(), PlistValue::Integer(1920));
+        initial.insert("height".to_string(), PlistValue::Integer(1080));
+        initial.insert("orientation".to_string(), PlistValue::Integer(0));
+        initial.insert("audio_sample_rate".to_string(), PlistValue::Integer(48_000));
+        let initial_body = encode_xml_plist(&PlistValue::Dictionary(initial)).unwrap();
+        let mut session = MirrorSession::new("mirror-session", 7010).unwrap();
+        session
+            .handle(&request(
+                "SETUP",
+                1,
+                &[(
+                    "transport",
+                    "RTP/AVP/UDP;unicast;mode=record;control_port=7011",
+                )],
+                &initial_body,
+            ))
+            .unwrap();
+        session.handle(&request("RECORD", 2, &[], &[])).unwrap();
+
+        let mut updated = BTreeMap::new();
+        updated.insert("width".to_string(), PlistValue::Integer(1280));
+        updated.insert("height".to_string(), PlistValue::Integer(720));
+        updated.insert("orientation".to_string(), PlistValue::Integer(180));
+        updated.insert("audio_sample_rate".to_string(), PlistValue::Integer(44_100));
+        let updated_body = encode_xml_plist(&PlistValue::Dictionary(updated)).unwrap();
+        session
+            .handle(&request(
+                "SETUP",
+                3,
+                &[(
+                    "transport",
+                    "RTP/AVP/UDP;unicast;mode=record;control_port=7021",
+                )],
+                &updated_body,
+            ))
+            .unwrap();
+        assert_eq!(session.state(), MirrorSessionState::Streaming);
+        assert_eq!(session.transport().unwrap().control_port, 7021);
+        assert_eq!(session.config().unwrap().width, 1280);
+        assert_eq!(
+            session.config().unwrap().orientation,
+            MirrorOrientation::Deg180
+        );
+
+        let mut invalid = BTreeMap::new();
+        invalid.insert("width".to_string(), PlistValue::Integer(0));
+        invalid.insert("height".to_string(), PlistValue::Integer(720));
+        invalid.insert("orientation".to_string(), PlistValue::Integer(0));
+        invalid.insert("audio_sample_rate".to_string(), PlistValue::Integer(48_000));
+        let invalid_body = encode_xml_plist(&PlistValue::Dictionary(invalid)).unwrap();
+        assert_eq!(
+            session.handle(&request(
+                "SETUP",
+                4,
+                &[(
+                    "transport",
+                    "RTP/AVP/UDP;unicast;mode=record;control_port=7031"
+                )],
+                &invalid_body,
+            )),
+            Err(AirplayError::Invalid("mirror dimensions"))
+        );
+        assert_eq!(session.transport().unwrap().control_port, 7021);
+        assert_eq!(session.config().unwrap().width, 1280);
     }
 
     #[test]

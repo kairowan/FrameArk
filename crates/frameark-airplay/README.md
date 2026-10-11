@@ -21,8 +21,9 @@ AirPlay/RAOP interoperability.
 - bounded caller-owned UDP RTP socket parsing that returns each packet's source
   address for higher-level RTSP policy enforcement;
 - bounded mirror RTSP session state with OPTIONS/SETUP/RECORD,
-  GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, and
-  XML/binary plist video configuration checks;
+  GET_PARAMETER/FLUSH/TEARDOWN transitions, UDP transport validation, XML/
+  binary plist video configuration checks, and atomic SETUP reconfiguration
+  while streaming;
 - bounded mirror AAC/PCM16 audio format and access-unit contracts with sample
   timestamps, duration, channel, and payload-size validation;
 - an explicit OPTIONS → ANNOUNCE → SETUP → RECORD → FLUSH/TEARDOWN RTSP

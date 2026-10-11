@@ -142,8 +142,11 @@ callers must keep it behind the authenticated AirPlay boundary.
 
 The mirror RTSP session validates CSeq, session transitions, UDP ports,
 dimensions, orientation, audio sample rate, and bounded XML/binary plist
-configuration before entering Streaming. It owns no socket or authorization;
-callers must authenticate the sender and enforce connection deadlines before
+configuration before entering Streaming or applying a streaming SETUP
+reconfiguration. Reconfiguration is committed only after the complete new
+configuration validates, so malformed updates cannot partially replace the
+old one. It owns no socket or authorization; callers must authenticate the
+sender and coordinate socket/pipeline reset and connection deadlines before
 exposing it to an untrusted network.
 
 The mirror audio contract caps access-unit bytes and duration, restricts sample
