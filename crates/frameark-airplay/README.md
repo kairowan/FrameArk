@@ -38,10 +38,12 @@ AirPlay/RAOP interoperability.
 - bounded HLS media-playlist parsing with target/sequence/end-list state,
   segment duration limits, and relative/HTTP(S) URI traversal/credential
   checks;
-- a caller-owned HTTP/HTTPS HLS playlist connector boundary with bounded
-  response headers/body, content-length checks, MIME validation, and explicit
-  no-redirect behavior; DNS, TLS, redirects, caching, and decoding remain
-  caller-owned.
+- a caller-owned HTTP/HTTPS HLS playlist and segment connector boundary with
+  bounded response headers/body, content-length checks, MIME validation, and
+  explicit no-redirect behavior;
+- an optional bounded FIFO HLS segment cache with URI validation, duplicate
+  replacement, entry/byte budgets, and oldest-entry eviction; DNS, TLS,
+  redirects, authentication, and decoding remain caller-owned.
 - caller-owned peer authorization hooks on the RAOP and mirror RTSP TCP
   adapters, evaluated before request bytes enter the session state machine.
 
