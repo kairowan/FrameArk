@@ -42,6 +42,8 @@ pub const MAX_DIDL_ITEMS: usize = 8;
 pub const MAX_GENA_SUBSCRIPTIONS: usize = 16;
 /// Maximum queued GENA callback events awaiting the caller's HTTP client.
 pub const MAX_GENA_PENDING_EVENTS: usize = 32;
+/// Maximum requests handled by one bounded synchronous accept loop.
+pub const MAX_TCP_REQUESTS_PER_RUN: usize = 1024;
 /// Default GENA lease when a subscriber omits or gives an invalid timeout.
 pub const DEFAULT_GENA_TIMEOUT_SECONDS: u32 = 1800;
 /// Maximum GENA lease accepted from an untrusted subscriber.
@@ -1459,6 +1461,22 @@ impl MediaRendererTcpServer {
             .map_err(|error| DlnaError::Io(error.kind()))?;
         Ok(peer)
     }
+
+    /// Accepts a bounded batch of sequential requests and returns their peers.
+    ///
+    /// The loop intentionally has an explicit request budget and remains
+    /// synchronous; callers that need cancellation or concurrent clients must
+    /// provide their own bounded scheduler around this handler.
+    pub fn serve_requests(&mut self, max_requests: usize) -> Result<Vec<SocketAddr>, DlnaError> {
+        if max_requests == 0 || max_requests > MAX_TCP_REQUESTS_PER_RUN {
+            return Err(DlnaError::Invalid("HTTP request batch size"));
+        }
+        let mut peers = Vec::with_capacity(max_requests);
+        for _ in 0..max_requests {
+            peers.push(self.serve_once()?);
+        }
+        Ok(peers)
+    }
 }
 
 fn write_file_headers(
@@ -2775,6 +2793,41 @@ mod tests {
                 .windows(17)
                 .any(|window| window == b"FrameArk Renderer")
         );
+    }
+
+    #[test]
+    fn tcp_renderer_serves_a_bounded_request_batch_and_rejects_unbounded_budget() {
+        let service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut server = MediaRendererTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            service,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            server.serve_requests(0),
+            Err(DlnaError::Invalid("HTTP request batch size"))
+        );
+        assert_eq!(
+            server.serve_requests(MAX_TCP_REQUESTS_PER_RUN + 1),
+            Err(DlnaError::Invalid("HTTP request batch size"))
+        );
+        let address = server.local_addr().unwrap();
+        let clients = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream
+                    .write_all(b"GET /device.xml HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .unwrap();
+                let mut response = Vec::new();
+                stream.read_to_end(&mut response).unwrap();
+                assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+            }
+        });
+        let peers = server.serve_requests(2).unwrap();
+        clients.join().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert!(peers.iter().all(|peer| peer.ip().is_loopback()));
     }
 
     #[test]
