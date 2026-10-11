@@ -1,10 +1,10 @@
 //! Bounded DLNA/UPnP protocol contracts.
 //!
-//! This crate starts M3 with deterministic SSDP parsing and XML description
-//! generation. It provides a synchronous unicast-testable UDP publisher, but
-//! deliberately does not join multicast groups, expose an HTTP server, or
-//! claim AVTransport/GENA interoperability until those layers have their own
-//! bounded parsers and compatibility fixtures.
+//! This crate provides bounded SSDP parsing/publication, XML descriptions, a
+//! synchronous MediaRenderer HTTP adapter, and AVTransport/GENA contracts.
+//! It deliberately does not join multicast groups or claim broad device
+//! interoperability until platform schedulers and compatibility fixtures cover
+//! those environments.
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -46,6 +46,8 @@ pub const MAX_GENA_PENDING_EVENTS: usize = 32;
 pub const MAX_PROTOCOL_INFO_ENTRIES: usize = 16;
 /// Maximum requests handled by one bounded synchronous accept loop.
 pub const MAX_TCP_REQUESTS_PER_RUN: usize = 1024;
+/// Maximum wall-clock budget accepted by the non-blocking runtime helper.
+pub const MAX_TCP_RUNTIME_DURATION: Duration = Duration::from_secs(60);
 /// Default GENA lease when a subscriber omits or gives an invalid timeout.
 pub const DEFAULT_GENA_TIMEOUT_SECONDS: u32 = 1800;
 /// Maximum GENA lease accepted from an untrusted subscriber.
@@ -1488,15 +1490,35 @@ impl MediaRendererTcpServer {
 
     /// Accepts one bounded request, sends one response, and closes the stream.
     pub fn serve_once(&mut self) -> Result<SocketAddr, DlnaError> {
-        let (mut stream, peer) = self
+        let (stream, peer) = self
             .listener
             .accept()
             .map_err(|error| DlnaError::Io(error.kind()))?;
+        self.serve_connection(stream, peer)
+    }
+
+    fn serve_connection(
+        &mut self,
+        mut stream: TcpStream,
+        peer: SocketAddr,
+    ) -> Result<SocketAddr, DlnaError> {
+        self.serve_connection_with_timeout(&mut stream, peer, self.read_timeout)
+    }
+
+    fn serve_connection_with_timeout(
+        &mut self,
+        stream: &mut TcpStream,
+        peer: SocketAddr,
+        timeout: Duration,
+    ) -> Result<SocketAddr, DlnaError> {
         stream
-            .set_read_timeout(Some(self.read_timeout))
+            .set_read_timeout(Some(timeout))
             .map_err(|error| DlnaError::Io(error.kind()))?;
-        let request = read_http_request(&mut stream)?;
-        if self.service.stream_file_response(&request, &mut stream)? {
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        let request = read_http_request(stream)?;
+        if self.service.stream_file_response(&request, stream)? {
             return Ok(peer);
         }
         let response = self.service.handle(&request);
@@ -1506,6 +1528,57 @@ impl MediaRendererTcpServer {
             .and_then(|_| stream.flush())
             .map_err(|error| DlnaError::Io(error.kind()))?;
         Ok(peer)
+    }
+
+    /// Serves connections for a bounded wall-clock interval.
+    ///
+    /// The listener is temporarily non-blocking. Idle periods do not consume
+    /// a request budget, malformed clients are isolated to their connection,
+    /// and the listener is restored to blocking mode before returning. This
+    /// is a scheduler primitive, not an unbounded daemon or a concurrency
+    /// guarantee.
+    pub fn serve_for(
+        &mut self,
+        duration: Duration,
+        max_requests: usize,
+    ) -> Result<usize, DlnaError> {
+        if duration.is_zero() || duration > MAX_TCP_RUNTIME_DURATION {
+            return Err(DlnaError::Invalid("HTTP runtime duration"));
+        }
+        if max_requests == 0 || max_requests > MAX_TCP_REQUESTS_PER_RUN {
+            return Err(DlnaError::Invalid("HTTP runtime request budget"));
+        }
+        self.listener
+            .set_nonblocking(true)
+            .map_err(|error| DlnaError::Io(error.kind()))?;
+        let deadline = Instant::now() + duration;
+        let mut served = 0;
+        let result = loop {
+            if served >= max_requests || Instant::now() >= deadline {
+                break Ok(served);
+            }
+            match self.listener.accept() {
+                Ok((stream, peer)) => {
+                    served += 1;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let timeout = self.read_timeout.min(remaining);
+                    if timeout.is_zero() {
+                        break Ok(served);
+                    }
+                    let mut stream = stream;
+                    let _ = self.serve_connection_with_timeout(&mut stream, peer, timeout);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => break Err(DlnaError::Io(error.kind())),
+            }
+        };
+        let restore = self
+            .listener
+            .set_nonblocking(false)
+            .map_err(|error| DlnaError::Io(error.kind()));
+        result.and(restore.map(|()| served))
     }
 
     /// Accepts a bounded batch of sequential requests and returns their peers.
@@ -2887,6 +2960,41 @@ mod tests {
         clients.join().unwrap();
         assert_eq!(peers.len(), 2);
         assert!(peers.iter().all(|peer| peer.ip().is_loopback()));
+    }
+
+    #[test]
+    fn tcp_renderer_runtime_is_time_and_request_bounded() {
+        let service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut server = MediaRendererTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            service,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            server.serve_for(Duration::ZERO, 1),
+            Err(DlnaError::Invalid("HTTP runtime duration"))
+        );
+        assert_eq!(
+            server.serve_for(MAX_TCP_RUNTIME_DURATION + Duration::from_millis(1), 1),
+            Err(DlnaError::Invalid("HTTP runtime duration"))
+        );
+        assert_eq!(
+            server.serve_for(Duration::from_millis(1), 0),
+            Err(DlnaError::Invalid("HTTP runtime request budget"))
+        );
+        let address = server.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(b"GET /device.xml HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        });
+        assert_eq!(server.serve_for(Duration::from_secs(1), 1).unwrap(), 1);
+        assert!(client.join().unwrap().starts_with(b"HTTP/1.1 200 OK\r\n"));
     }
 
     #[test]
