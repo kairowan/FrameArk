@@ -117,6 +117,27 @@ jobs:
         if: steps.detect.outputs.present == 'true'
         run: python scripts/verify_android_native_package.py --apk apps/android/receiver/build/outputs/apk/debug/receiver-debug.apk
 
+  platform:
+    name: platform-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run cross-platform Rust tests
+        run: cargo test --workspace --all-features --locked
+      - name: Build reference receiver
+        run: cargo build -p framearkd --locked
+
   gate:
     name: ci-gate
     if: always()
@@ -125,6 +146,7 @@ jobs:
       - rust
       - runtime
       - android
+      - platform
     runs-on: ubuntu-latest
     steps:
       - name: Require all CI jobs
@@ -133,8 +155,10 @@ jobs:
           RUST_RESULT: ${{ needs.rust.result }}
           RUNTIME_RESULT: ${{ needs.runtime.result }}
           ANDROID_RESULT: ${{ needs.android.result }}
+          PLATFORM_RESULT: ${{ needs.platform.result }}
         run: |
           test "$REPOSITORY_RESULT" = "success"
           test "$RUST_RESULT" = "success"
           test "$RUNTIME_RESULT" = "success"
           test "$ANDROID_RESULT" = "success"
+          test "$PLATFORM_RESULT" = "success"
