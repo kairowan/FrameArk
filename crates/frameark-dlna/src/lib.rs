@@ -1610,6 +1610,43 @@ impl MediaFormatProbe {
     }
 }
 
+/// Probes one HTTP(S) media URI through a caller-owned connector.
+///
+/// The request uses a bounded `Range: bytes=0-0` hint so a compliant origin
+/// can return headers without transferring the full object. The connector
+/// remains responsible for DNS and network-class policy, TLS verification,
+/// authentication, cancellation, and connection reuse. Redirects are never
+/// followed; the response is passed through [`MediaFormatProbe`] only after
+/// the bounded HTTP parser accepts it.
+pub fn fetch_media_format_with_connector<R, F, S>(
+    uri: &str,
+    network_policy: MediaUriNetworkPolicy,
+    resolve: R,
+    timeout: Duration,
+    connector: F,
+) -> Result<MediaFormatProbe, DlnaError>
+where
+    R: FnOnce(&str) -> Result<Vec<IpAddr>, DlnaError>,
+    F: FnOnce(&str, &str, &str, Duration) -> Result<S, DlnaError>,
+    S: Read + Write,
+{
+    if timeout.is_zero() {
+        return Err(DlnaError::Invalid("media probe timeout"));
+    }
+    validate_media_uri_network(uri, network_policy, resolve)?;
+    let (scheme, authority, target) = split_media_uri(uri)?;
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nAccept: */*\r\nRange: bytes=0-0\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = connector(&scheme, &authority, &target, timeout)?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|error| DlnaError::Io(error.kind()))?;
+    let response = read_http_response(&mut stream)?;
+    MediaFormatProbe::from_response(&response)
+}
+
 fn validate_media_mime(value: &str) -> Result<(), DlnaError> {
     if value.is_empty()
         || value.len() > MAX_MEDIA_FORMAT_FIELD_BYTES
@@ -2745,6 +2782,32 @@ fn media_uri_host(uri: &str) -> Result<&str, DlnaError> {
         .map_or(authority, |(host, _)| host))
 }
 
+fn split_media_uri(uri: &str) -> Result<(String, String, String), DlnaError> {
+    media_uri_host(uri)?;
+    let (raw_scheme, remainder) = uri
+        .split_once("://")
+        .ok_or(DlnaError::Invalid("media URI"))?;
+    let scheme = raw_scheme.to_ascii_lowercase();
+    let authority_end = remainder.find(['/', '?']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let tail = &remainder[authority_end..];
+    let target = if tail.is_empty() {
+        "/".to_string()
+    } else if tail.starts_with('?') {
+        format!("/{tail}")
+    } else {
+        tail.to_string()
+    };
+    if !target.starts_with('/')
+        || target
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(DlnaError::Invalid("media URI"));
+    }
+    Ok((scheme, authority.to_string(), target))
+}
+
 fn validate_media_authority(authority: &str) -> bool {
     if authority.is_empty() || authority.contains(['@', '\\']) {
         return false;
@@ -3021,6 +3084,29 @@ fn gena_property_set(properties: &BTreeMap<String, String>) -> Result<String, Dl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct ProbeScriptStream {
+        response: std::io::Cursor<Vec<u8>>,
+        request: Vec<u8>,
+    }
+
+    impl Read for ProbeScriptStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buffer)
+        }
+    }
+
+    impl Write for ProbeScriptStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.request.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn parses_and_reencodes_bounded_msearch() {
@@ -3960,6 +4046,78 @@ mod tests {
         ])
         .unwrap();
         assert!(probe.is_supported_by(&capabilities));
+    }
+
+    #[test]
+    fn media_format_probe_connector_applies_network_policy_and_preserves_origin() {
+        let response = b"HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/1234\r\n\r\n\0";
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&observed);
+        let probe = fetch_media_format_with_connector(
+            "https://media.example.test:8443/live/video.mp4?token=bounded",
+            MediaUriNetworkPolicy::PublicNetworkOnly,
+            |_host| Ok(vec!["93.184.216.34".parse().unwrap()]),
+            Duration::from_secs(2),
+            move |scheme, authority, target, timeout| {
+                *sink.lock().unwrap() = Some((
+                    scheme.to_string(),
+                    authority.to_string(),
+                    target.to_string(),
+                    timeout,
+                ));
+                Ok(ProbeScriptStream {
+                    response: std::io::Cursor::new(response.to_vec()),
+                    request: Vec::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(probe.mime_type, "video/mp4");
+        assert_eq!(probe.content_length, Some(1));
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((
+                "https".to_string(),
+                "media.example.test:8443".to_string(),
+                "/live/video.mp4?token=bounded".to_string(),
+                Duration::from_secs(2),
+            ))
+        );
+    }
+
+    #[test]
+    fn media_format_probe_connector_rejects_redirects_and_unsafe_resolution() {
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.test/video.mp4\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(
+            fetch_media_format_with_connector(
+                "http://media.example.test/video.mp4",
+                MediaUriNetworkPolicy::AllowAny,
+                |_host| Ok(vec!["192.0.2.10".parse().unwrap()]),
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(ProbeScriptStream {
+                        response: std::io::Cursor::new(redirect.to_vec()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(DlnaError::Invalid("media probe status"))
+        );
+        assert_eq!(
+            fetch_media_format_with_connector(
+                "http://media.example.test/video.mp4",
+                MediaUriNetworkPolicy::PublicNetworkOnly,
+                |_host| Ok(vec!["127.0.0.1".parse().unwrap()]),
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(ProbeScriptStream {
+                        response: std::io::Cursor::new(Vec::new()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(DlnaError::Invalid("media URI network policy"))
+        );
     }
 
     #[test]
