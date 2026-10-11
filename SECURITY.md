@@ -98,6 +98,8 @@ and renderer ownership must remain in the Rust transport and Android platform
 layers. `JniMediaQueueSink` only accepts samples after the Rust receiver
 lifecycle is started; it does not open sockets, authenticate senders, or grant
 Android decoder/surface access.
+`MediaPlaybackPump` adds only a bounded poll/dispatch loop and likewise does
+not decode, retain surfaces, or bypass the native lifecycle.
 
 The AirPlay XML Property List boundary caps document size, nesting, entries,
 scalar/data fields, duplicate keys, and base64 decoding. It is not a parser for
