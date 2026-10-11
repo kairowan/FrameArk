@@ -52,6 +52,10 @@ All notable FrameArk changes will be documented in this file. The project follow
 - Experimental Android `MediaPlaybackLoop` with a bounded fixed-rate scheduler,
   consumer-failure cancellation, and foreground-service lifecycle ownership;
   platform codec consumers and real-device playback remain pending.
+- Experimental AirPlay mirror video RTP pipeline with bounded single-NAL,
+  STAP-A, and FU-A assembly, marker-delimited H.264 access units, sequence
+  recovery, keyframe detection, and orientation propagation; sockets,
+  encryption, decoding, and Apple-device compatibility remain pending.
 - Experimental `frameark-dlna` foundation with bounded SSDP parsing and
   escaped UPnP device-description generation; network/SOAP interoperability
   remains unimplemented.

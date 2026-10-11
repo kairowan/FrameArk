@@ -125,6 +125,13 @@ unbounded A/V offsets before platform allocation. It does not authenticate,
 decrypt, decode, or render incoming video; those network and platform layers
 must remain behind the receiver's authorization boundary.
 
+The mirror video RTP pipeline additionally caps jitter, NAL aggregation, FU-A
+assembly, marker-delimited access units, and sequence recovery. It rejects
+malformed STAP-A/FU-A boundaries, timestamp changes before an access-unit
+marker, unsupported payload types, and partial-frame loss without fabricating
+media. It does not authenticate RTP, conceal loss, decrypt, decode, or own UDP
+sockets.
+
 The mirror-audio RTP pipeline validates the negotiated payload type, PCM sample
 alignment, packet capacity, and explicit sequence-gap recovery. It does not
 authenticate or decrypt RTP, conceal loss, own sockets, or authorize a sender;
