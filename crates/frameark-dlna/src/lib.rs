@@ -42,6 +42,8 @@ pub const MAX_DIDL_ITEMS: usize = 8;
 pub const MAX_GENA_SUBSCRIPTIONS: usize = 16;
 /// Maximum queued GENA callback events awaiting the caller's HTTP client.
 pub const MAX_GENA_PENDING_EVENTS: usize = 32;
+/// Maximum sink protocol-info entries advertised by one renderer.
+pub const MAX_PROTOCOL_INFO_ENTRIES: usize = 16;
 /// Maximum requests handled by one bounded synchronous accept loop.
 pub const MAX_TCP_REQUESTS_PER_RUN: usize = 1024;
 /// Default GENA lease when a subscriber omits or gives an invalid timeout.
@@ -1385,11 +1387,55 @@ impl GenaRegistry {
 pub struct MediaRendererHttpService {
     description: DeviceDescription,
     device_description_path: String,
+    capabilities: MediaFormatCapabilities,
     state: MediaRendererState,
     resources: BTreeMap<String, MediaResource>,
     file_resources: BTreeMap<String, FileMediaResource>,
     gena: GenaRegistry,
     pending_events: Vec<GenaEvent>,
+}
+
+/// Bounded format capability report advertised by `ConnectionManager`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaFormatCapabilities {
+    /// DLNA `Sink` protocol-info entries in deterministic order.
+    pub sink: Vec<String>,
+}
+
+impl Default for MediaFormatCapabilities {
+    fn default() -> Self {
+        Self {
+            sink: vec![
+                "http-get:*:audio/L16:*".to_string(),
+                "http-get:*:video/mp4:*".to_string(),
+            ],
+        }
+    }
+}
+
+impl MediaFormatCapabilities {
+    /// Validates a bounded capability list before it is exposed to a controller.
+    pub fn new(sink: Vec<String>) -> Result<Self, DlnaError> {
+        if sink.is_empty() || sink.len() > MAX_PROTOCOL_INFO_ENTRIES {
+            return Err(DlnaError::Invalid("protocol-info entries"));
+        }
+        let mut entries = sink;
+        entries.sort();
+        entries.dedup();
+        if entries.is_empty() {
+            return Err(DlnaError::Invalid("protocol-info entries"));
+        }
+        if entries.iter().any(|entry| {
+            entry.is_empty() || entry.len() > MAX_FIELD_BYTES || entry.contains(['\r', '\n'])
+        }) {
+            return Err(DlnaError::InvalidField("protocol-info entry"));
+        }
+        Ok(Self { sink: entries })
+    }
+
+    fn sink_protocol_info(&self) -> String {
+        self.sink.join(",")
+    }
 }
 
 /// A bounded synchronous TCP adapter for one MediaRenderer service.
@@ -1663,6 +1709,7 @@ impl MediaRendererHttpService {
         Ok(Self {
             description,
             device_description_path: "/device.xml".to_string(),
+            capabilities: MediaFormatCapabilities::default(),
             state: MediaRendererState::default(),
             resources: BTreeMap::new(),
             file_resources: BTreeMap::new(),
@@ -1679,6 +1726,16 @@ impl MediaRendererHttpService {
     /// Returns mutable renderer state for a platform-owned playback backend.
     pub fn state_mut(&mut self) -> &mut MediaRendererState {
         &mut self.state
+    }
+
+    /// Returns the bounded protocol-info capability report.
+    pub fn capabilities(&self) -> &MediaFormatCapabilities {
+        &self.capabilities
+    }
+
+    /// Replaces the advertised protocol-info report after validation.
+    pub fn set_capabilities(&mut self, capabilities: MediaFormatCapabilities) {
+        self.capabilities = capabilities;
     }
 
     /// Registers or replaces one bounded media resource for HTTP GET/Range.
@@ -2171,12 +2228,14 @@ impl MediaRendererHttpService {
     fn invoke_connection_manager(&self, action: &SoapAction) -> Result<String, SoapFault> {
         match action.name.as_str() {
             "GetProtocolInfo" => {
-                let arguments =
-                    "<Source></Source><Sink>http-get:*:video/mp4:*,http-get:*:audio/L16:*</Sink>";
+                let arguments = format!(
+                    "<Source></Source><Sink>{}</Sink>",
+                    xml_escape(&self.capabilities.sink_protocol_info())
+                );
                 Ok(soap_response(
                     CONNECTION_MANAGER_SERVICE,
                     &action.name,
-                    arguments,
+                    &arguments,
                 ))
             }
             "GetCurrentConnectionIDs" => Ok(soap_response(
@@ -3220,6 +3279,29 @@ mod tests {
         assert!(service.drain_events().is_empty());
         let renew_expired = HttpRequest::parse(format!("SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {}\r\nTIMEOUT: Second-60\r\n\r\n", subscription.sid).as_bytes()).unwrap();
         assert_eq!(service.handle(&renew_expired).status, 412);
+    }
+
+    #[test]
+    fn renderer_advertises_a_bounded_custom_capability_report() {
+        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let capabilities = MediaFormatCapabilities::new(vec![
+            "http-get:*:video/webm:*".to_string(),
+            "http-get:*:audio/ogg:*".to_string(),
+        ])
+        .unwrap();
+        service.set_capabilities(capabilities);
+        let request = soap_request(
+            "/upnp/control/connectionmanager",
+            CONNECTION_MANAGER_SERVICE,
+            "GetProtocolInfo",
+            "",
+        );
+        let response = service.handle(&request);
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(body.contains("http-get:*:audio/ogg:*,http-get:*:video/webm:*"));
+        assert!(MediaFormatCapabilities::new(Vec::new()).is_err());
+        assert!(MediaFormatCapabilities::new(vec!["bad\rentry".to_string()]).is_err());
     }
 
     #[test]

@@ -104,6 +104,12 @@ unless a caller-owned TLS adapter is supplied, and does not provide callback
 authentication, retries, or SSRF policy beyond URL/authority
 validation.
 
+The DLNA `MediaFormatCapabilities` report is validated and bounded before it is
+advertised through `ConnectionManager`; it is not a decoder probe or a promise
+that a remote URL is safe to fetch. Integrations must derive entries from the
+actual platform decoder policy and keep URL fetching and authorization outside
+the protocol parser.
+
 The experimental RAOP session rejects unknown codecs, payload mismatches,
 interleaved TCP transport, invalid state transitions, and oversized SDP before
 allocating media state. It does not authenticate Apple senders or decrypt
