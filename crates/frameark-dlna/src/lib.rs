@@ -56,6 +56,12 @@ pub const MAX_GENA_TIMEOUT_SECONDS: u32 = 86_400;
 pub const MAX_MEDIA_RESOLVED_ADDRESSES: usize = 16;
 /// Maximum bytes accepted for a probed media content type or DLNA profile.
 pub const MAX_MEDIA_FORMAT_FIELD_BYTES: usize = 256;
+/// Maximum body bytes returned by one caller-owned remote media range fetch.
+///
+/// A receiver should issue additional bounded ranges for larger resources;
+/// this helper deliberately never turns an untrusted URL into an unbounded
+/// in-memory download.
+pub const MAX_MEDIA_FETCH_BYTES: usize = MAX_HTTP_BYTES - 4096;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -1556,6 +1562,103 @@ pub struct MediaFormatProbe {
     pub content_length: Option<u64>,
 }
 
+/// One bounded remote media response obtained through a caller-owned
+/// connector. The body is a single response chunk, never a complete
+/// unbounded media object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaFetchChunk {
+    /// HTTP status returned by the origin (`200` or `206`).
+    pub status: u16,
+    /// Validated response metadata.
+    pub probe: MediaFormatProbe,
+    /// Optional validated `Content-Range` header.
+    pub content_range: Option<String>,
+    /// One bounded response body chunk.
+    pub body: Vec<u8>,
+}
+
+/// Fetches one bounded media chunk through a caller-owned connector.
+///
+/// `range` is an inclusive byte range. When supplied, the origin must return
+/// `206` with a matching `Content-Range`; a `200` response is rejected so an
+/// origin that ignores the range cannot cause an accidental full download.
+/// The connector owns DNS resolution, TLS verification, authentication,
+/// cancellation and connection reuse. Redirects are never followed.
+pub fn fetch_media_range_with_connector<R, F, S>(
+    uri: &str,
+    network_policy: MediaUriNetworkPolicy,
+    resolve: R,
+    range: Option<ByteRange>,
+    timeout: Duration,
+    connector: F,
+) -> Result<MediaFetchChunk, DlnaError>
+where
+    R: FnOnce(&str) -> Result<Vec<IpAddr>, DlnaError>,
+    F: FnOnce(&str, &str, &str, Duration) -> Result<S, DlnaError>,
+    S: Read + Write,
+{
+    if timeout.is_zero() {
+        return Err(DlnaError::Invalid("media fetch timeout"));
+    }
+    if let Some(range) = range {
+        let length = range
+            .end
+            .checked_sub(range.start)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(DlnaError::Invalid("media fetch range"))?;
+        if length == 0 || length > MAX_MEDIA_FETCH_BYTES {
+            return Err(DlnaError::TooLarge("media fetch range"));
+        }
+    }
+    validate_media_uri_network(uri, network_policy, resolve)?;
+    let (scheme, authority, target) = split_media_uri(uri)?;
+    let range_header = range.map(|value| format!("Range: bytes={}-{}\r\n", value.start, value.end));
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nAccept: */*\r\n{}Host: {authority}\r\nConnection: close\r\n\r\n",
+        range_header.as_deref().unwrap_or_default()
+    );
+    let mut stream = connector(&scheme, &authority, &target, timeout)?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|error| DlnaError::Io(error.kind()))?;
+    let response = read_http_response(&mut stream)?;
+    if response.body.len() > MAX_MEDIA_FETCH_BYTES {
+        return Err(DlnaError::TooLarge("media fetch body"));
+    }
+    let probe = MediaFormatProbe::from_response(&response)
+        .map_err(|_| DlnaError::Invalid("media fetch response"))?;
+    let content_range = response.headers.get("content-range").cloned();
+    match range {
+        Some(expected) => {
+            if response.status != 206 {
+                return Err(DlnaError::Invalid("media fetch range status"));
+            }
+            let actual = parse_content_range(
+                content_range
+                    .as_deref()
+                    .ok_or(DlnaError::Invalid("media fetch content range"))?,
+            )?;
+            if actual.0 != expected.start
+                || actual.1 != expected.end
+                || response.body.len() != actual.1.saturating_sub(actual.0) + 1
+            {
+                return Err(DlnaError::Invalid("media fetch content range"));
+            }
+        }
+        None if response.status != 200 => {
+            return Err(DlnaError::Invalid("media fetch status"));
+        }
+        None => {}
+    }
+    Ok(MediaFetchChunk {
+        status: response.status,
+        probe,
+        content_range,
+        body: response.body,
+    })
+}
+
 impl MediaFormatProbe {
     /// Extracts and validates media format fields from one bounded response.
     pub fn from_response(response: &HttpResponse) -> Result<Self, DlnaError> {
@@ -1676,6 +1779,41 @@ fn parse_dlna_profile(value: &str) -> Option<&str> {
         }
         None
     })
+}
+
+fn parse_content_range(value: &str) -> Result<(usize, usize, Option<u64>), DlnaError> {
+    let value = value.trim();
+    let Some(value) = value.strip_prefix("bytes ") else {
+        return Err(DlnaError::Invalid("media fetch content range"));
+    };
+    let (range, total) = value
+        .split_once('/')
+        .ok_or(DlnaError::Invalid("media fetch content range"))?;
+    let (start, end) = range
+        .split_once('-')
+        .ok_or(DlnaError::Invalid("media fetch content range"))?;
+    let start = start
+        .parse::<usize>()
+        .map_err(|_| DlnaError::Invalid("media fetch content range"))?;
+    let end = end
+        .parse::<usize>()
+        .map_err(|_| DlnaError::Invalid("media fetch content range"))?;
+    if end < start {
+        return Err(DlnaError::Invalid("media fetch content range"));
+    }
+    let total = if total == "*" {
+        None
+    } else {
+        Some(
+            total
+                .parse::<u64>()
+                .map_err(|_| DlnaError::Invalid("media fetch content range"))?,
+        )
+    };
+    if total.is_some_and(|total| total <= end as u64) {
+        return Err(DlnaError::Invalid("media fetch content range"));
+    }
+    Ok((start, end, total))
 }
 
 /// A bounded synchronous TCP adapter for one MediaRenderer service.
@@ -3108,6 +3246,29 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CaptureScriptStream {
+        response: std::io::Cursor<Vec<u8>>,
+        request: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl Read for CaptureScriptStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buffer)
+        }
+    }
+
+    impl Write for CaptureScriptStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.request.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn parses_and_reencodes_bounded_msearch() {
         let bytes = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n";
@@ -4118,6 +4279,98 @@ mod tests {
             ),
             Err(DlnaError::Invalid("media URI network policy"))
         );
+    }
+
+    #[test]
+    fn media_range_fetch_enforces_range_and_returns_one_bounded_chunk() {
+        let response = b"HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nContent-Range: bytes 4-7/1234\r\n\r\nDATA";
+        let request = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_sink = std::sync::Arc::clone(&request);
+        let chunk = fetch_media_range_with_connector(
+            "https://media.example.test/video.mp4",
+            MediaUriNetworkPolicy::PublicNetworkOnly,
+            |_host| Ok(vec!["93.184.216.34".parse().unwrap()]),
+            Some(ByteRange { start: 4, end: 7 }),
+            Duration::from_secs(2),
+            move |_scheme, _authority, _target, _timeout| {
+                Ok(CaptureScriptStream {
+                    response: std::io::Cursor::new(response.to_vec()),
+                    request: request_sink,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(chunk.status, 206);
+        assert_eq!(chunk.body, b"DATA");
+        assert_eq!(chunk.probe.mime_type, "video/mp4");
+        assert_eq!(chunk.content_range.as_deref(), Some("bytes 4-7/1234"));
+        let request = String::from_utf8(request.lock().unwrap().clone()).unwrap();
+        assert!(request.contains("GET /video.mp4 HTTP/1.1"));
+        assert!(request.contains("Range: bytes=4-7\r\n"));
+        assert_eq!(MAX_MEDIA_FETCH_BYTES, MAX_HTTP_BYTES - 4096);
+    }
+
+    #[test]
+    fn media_range_fetch_rejects_origins_that_ignore_range_or_mismatch_it() {
+        let full = b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\n\r\nDATA";
+        assert_eq!(
+            fetch_media_range_with_connector(
+                "http://media.example.test/video.mp4",
+                MediaUriNetworkPolicy::AllowAny,
+                |_host| Ok(vec!["192.0.2.10".parse().unwrap()]),
+                Some(ByteRange { start: 0, end: 3 }),
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(ProbeScriptStream {
+                        response: std::io::Cursor::new(full.to_vec()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(DlnaError::Invalid("media fetch range status"))
+        );
+        let mismatch = b"HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nContent-Range: bytes 5-8/1234\r\n\r\nDATA";
+        assert_eq!(
+            fetch_media_range_with_connector(
+                "http://media.example.test/video.mp4",
+                MediaUriNetworkPolicy::AllowAny,
+                |_host| Ok(vec!["192.0.2.10".parse().unwrap()]),
+                Some(ByteRange { start: 0, end: 3 }),
+                Duration::from_secs(1),
+                |_scheme, _authority, _target, _timeout| {
+                    Ok(ProbeScriptStream {
+                        response: std::io::Cursor::new(mismatch.to_vec()),
+                        request: Vec::new(),
+                    })
+                },
+            ),
+            Err(DlnaError::Invalid("media fetch content range"))
+        );
+    }
+
+    #[test]
+    fn media_range_fetch_rejects_oversized_requested_ranges_before_connecting() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = std::sync::Arc::clone(&called);
+        let result = fetch_media_range_with_connector(
+            "http://media.example.test/video.mp4",
+            MediaUriNetworkPolicy::AllowAny,
+            |_host| Ok(vec!["192.0.2.10".parse().unwrap()]),
+            Some(ByteRange {
+                start: 0,
+                end: MAX_MEDIA_FETCH_BYTES,
+            }),
+            Duration::from_secs(1),
+            move |_scheme, _authority, _target, _timeout| {
+                marker.store(true, std::sync::atomic::Ordering::Release);
+                Ok(ProbeScriptStream {
+                    response: std::io::Cursor::new(Vec::new()),
+                    request: Vec::new(),
+                })
+            },
+        );
+        assert_eq!(result, Err(DlnaError::TooLarge("media fetch range")));
+        assert!(!called.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
