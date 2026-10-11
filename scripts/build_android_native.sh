@@ -24,11 +24,10 @@ rustup target add "$target" --toolchain "$rust_toolchain"
 
 target_key="${target^^}"
 target_key="${target_key//-/_}"
+target_env_key="${target//-/_}"
 export "CARGO_TARGET_${target_key}_LINKER=$linker"
-export "CC_${target_key}=$linker"
-export "CC_${target}=$linker"
-export "AR_${target_key}=$toolchain_root/bin/llvm-ar"
-export "AR_${target}=$toolchain_root/bin/llvm-ar"
+export "CC_${target_env_key}=$linker"
+export "AR_${target_env_key}=$toolchain_root/bin/llvm-ar"
 rustup run "$rust_toolchain" cargo build \
   --locked \
   --release \
