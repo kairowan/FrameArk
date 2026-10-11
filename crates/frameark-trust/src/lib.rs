@@ -2,11 +2,17 @@
 //!
 //! This crate stores only caller-supplied device identifiers, labels, and
 //! SHA-256 public-key fingerprints. It does not generate keys, perform
-//! signatures, persist records, or replace the platform secure keystore.
+//! signatures, or replace the platform secure keystore. The optional snapshot
+//! store persists only the bounded public trust registry; callers still need a
+//! platform-protected directory and authenticated user approval.
 
 use frameark_core::DeviceId;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum trusted devices retained by one registry.
 pub const MAX_TRUSTED_DEVICES: usize = 128;
@@ -35,6 +41,105 @@ pub enum TrustError {
     InvalidEncoding,
     /// A serialized trust snapshot exceeds its explicit bound.
     TooLarge,
+}
+
+/// Redacted errors from the caller-owned snapshot persistence boundary.
+#[derive(Debug)]
+pub enum TrustStoreError {
+    /// The snapshot file could not be read or replaced.
+    Io,
+    /// The file was read but did not satisfy the bounded FTR1 contract.
+    Corrupt(TrustError),
+}
+
+impl Display for TrustStoreError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io => formatter.write_str("trust snapshot storage failed"),
+            Self::Corrupt(error) => write!(formatter, "trust snapshot is invalid: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TrustStoreError {}
+
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Bounded persistence adapter for an encoded [`TrustRegistry`].
+///
+/// The adapter writes a private temporary file, flushes it, and replaces the
+/// destination with a rename. On platforms whose rename cannot replace an
+/// existing file, the destination is removed only after the temporary file is
+/// durable; callers should place the path in a platform-protected directory
+/// and treat the operation as a best-effort crash-safe replacement. The file
+/// contains fingerprints and labels only, never private keys or pairing PINs.
+pub struct TrustSnapshotStore {
+    path: PathBuf,
+}
+
+impl TrustSnapshotStore {
+    /// Creates a store at an explicit caller-owned path.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Returns the configured path for diagnostics that already apply redaction.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Loads a snapshot, or creates an empty bounded registry when absent.
+    pub fn load(&self, capacity: usize) -> Result<TrustRegistry, TrustStoreError> {
+        match fs::read(&self.path) {
+            Ok(bytes) => TrustRegistry::decode(&bytes).map_err(TrustStoreError::Corrupt),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                TrustRegistry::new(capacity).map_err(TrustStoreError::Corrupt)
+            }
+            Err(_) => Err(TrustStoreError::Io),
+        }
+    }
+
+    /// Replaces the snapshot with a bounded, flushed FTR1 representation.
+    pub fn save(&self, registry: &TrustRegistry) -> Result<(), TrustStoreError> {
+        let encoded = registry.encode().map_err(TrustStoreError::Corrupt)?;
+        let temporary = self.temporary_path();
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| TrustStoreError::Io)?;
+            file.write_all(&encoded).map_err(|_| TrustStoreError::Io)?;
+            file.sync_all().map_err(|_| TrustStoreError::Io)?;
+            drop(file);
+            replace_file(&temporary, &self.path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn temporary_path(&self) -> PathBuf {
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("trust");
+        self.path.with_file_name(format!(".{name}.{sequence}.tmp"))
+    }
+}
+
+fn replace_file(temporary: &Path, destination: &Path) -> Result<(), TrustStoreError> {
+    match fs::rename(temporary, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(destination).map_err(|_| TrustStoreError::Io)?;
+            fs::rename(temporary, destination).map_err(|_| TrustStoreError::Io)
+        }
+        Err(_) => Err(TrustStoreError::Io),
+    }
 }
 
 impl Display for TrustError {
@@ -444,5 +549,46 @@ mod tests {
             TrustRegistry::decode(&bad_magic),
             Err(TrustError::InvalidEncoding)
         );
+    }
+
+    #[test]
+    fn snapshot_store_loads_missing_file_and_replaces_existing_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "frameark-trust-{}-{}.ftr",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store = TrustSnapshotStore::new(&path);
+        let mut registry = store.load(2).unwrap();
+        let fingerprint = DeviceFingerprint::new(FINGERPRINT).unwrap();
+        registry
+            .trust(device("phone-1"), fingerprint.clone(), "Phone")
+            .unwrap();
+        store.save(&registry).unwrap();
+        assert_eq!(store.load(2).unwrap(), registry);
+
+        registry
+            .trust(device("phone-2"), fingerprint, "Tablet")
+            .unwrap();
+        store.save(&registry).unwrap();
+        assert_eq!(store.load(2).unwrap(), registry);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn snapshot_store_reports_corrupt_file_without_exposing_path() {
+        let path = std::env::temp_dir().join(format!(
+            "frameark-trust-corrupt-{}-{}.ftr",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, b"not-ftr1").unwrap();
+        let error = TrustSnapshotStore::new(&path).load(1).unwrap_err();
+        assert!(matches!(
+            error,
+            TrustStoreError::Corrupt(TrustError::InvalidEncoding)
+        ));
+        assert!(!error.to_string().contains(path.to_string_lossy().as_ref()));
+        let _ = fs::remove_file(path);
     }
 }

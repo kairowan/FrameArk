@@ -43,11 +43,13 @@ downgrade, replay, or code-disclosure issue privately.
 
 The experimental `frameark-trust` registry accepts only bounded lowercase
 SHA-256 public-key fingerprints, rejects silent key changes for a known device,
-and requires explicit revocation before replacement. It is in-memory and does
-not verify signatures or persist records. Its deterministic `FTR1` snapshot is
-only a bounded serialization format and is not encrypted or authenticated;
-platform adapters must wrap it in secure storage, authenticated key exchange,
-and user approval before adding or restoring a record.
+and requires explicit revocation before replacement. Its `FTR1` snapshot is
+only a bounded serialization format and is not encrypted or authenticated.
+`TrustSnapshotStore` can flush a temporary snapshot and replace a caller-owned
+path, but it does not establish directory permissions, authenticate the file,
+or protect private keys. Platform adapters must place it behind secure storage,
+authenticated key exchange, and user approval before adding or restoring a
+record.
 Do not treat a fingerprint string supplied by an unauthenticated peer as proof
 of identity.
 
