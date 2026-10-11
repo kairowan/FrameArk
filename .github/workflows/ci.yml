@@ -91,6 +91,9 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace lint test assembleDebug
+      - name: Verify JNI library is packaged
+        if: steps.detect.outputs.present == 'true'
+        run: python scripts/verify_android_native_package.py --apk apps/android/receiver/build/outputs/apk/debug/receiver-debug.apk
 
   gate:
     name: ci-gate

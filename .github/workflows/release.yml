@@ -68,6 +68,7 @@ jobs:
             bash scripts/build_android_native.sh
             chmod +x gradlew
             ./gradlew --no-daemon --stacktrace lint test assembleRelease
+            python scripts/verify_android_native_package.py --apk apps/android/receiver/build/outputs/apk/release/receiver-release.apk
           fi
           if [[ "$found" != "true" ]]; then
             echo "No Rust or Android product manifest exists; refusing to publish a release." >&2
