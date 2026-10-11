@@ -139,6 +139,13 @@ parsers enforce document, object-table, reference, depth, and scalar-size
 bounds; binary plist cycles and unsupported object types are rejected before
 allocation of nested values.
 
+The RAOP and mirror RTSP TCP adapters expose a caller-owned peer authorization
+hook that runs immediately after `accept` and before request bytes reach the
+session state machine. A rejected peer is dropped without mutating negotiated
+state. This hook is an integration boundary, not Apple pairing or sender
+authentication: deployments must bind it to an authenticated RTSP/pairing
+identity and still enforce TLS, rate limits, and network policy.
+
 The RAOP RTP jitter buffer caps retained packets, rejects duplicate and late
 sequence numbers, handles 16-bit sequence wrap, and requires the caller to
 declare a missing-packet recovery point. It does not conceal loss, authenticate
