@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -107,6 +109,10 @@ jobs:
             --output="dist/FrameArk-$RELEASE_TAG-source.zip" \
             "$RELEASE_TAG"
           (cd dist && sha256sum * > SHA256SUMS)
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*'
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
