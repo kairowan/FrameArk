@@ -27,7 +27,7 @@ use frameark_native::{
 use frameark_transport::{PairingCode, PairingServer};
 use jni::{
     JNIEnv,
-    objects::{JByteArray, JObject},
+    objects::{JByteArray, JObject, JString},
     sys::{jboolean, jbyteArray, jint, jlong},
 };
 
@@ -55,12 +55,101 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeVersion(
     CORE_ABI_VERSION as jint
 }
 
+/// Installs the Android Keystore-backed public identity before startup.
+///
+/// Only the stable alias and lowercase SHA-256 public-key fingerprint cross
+/// JNI. Private key material remains inside Android Keystore. A return value of
+/// 0 means accepted (including the same identity on a running receiver), -2
+/// means an identity change was rejected while running, and -3 means
+/// the identity fields are malformed or the state lock is unavailable.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetDeviceIdentity(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    alias: JString<'_>,
+    fingerprint: JString<'_>,
+) -> jint {
+    let Ok(alias) = env.get_string(&alias) else {
+        return -3;
+    };
+    let Ok(fingerprint) = env.get_string(&fingerprint) else {
+        return -3;
+    };
+    let alias = alias.to_string_lossy().into_owned();
+    let fingerprint = fingerprint.to_string_lossy().into_owned();
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    install_device_identity(&mut state, &alias, &fingerprint)
+}
+
+fn install_device_identity(
+    state: &mut NativeReceiverState,
+    alias: &str,
+    fingerprint: &str,
+) -> jint {
+    if alias.is_empty()
+        || alias.len() > 64
+        || !alias.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+        || !valid_identity_fingerprint(fingerprint)
+    {
+        return -3;
+    }
+    // Keystore aliases are local labels shared by every installation, not IDs.
+    let Ok(device_id) = DeviceId::try_from(format!("sha256-{}", fingerprint.replace(':', "")))
+    else {
+        return -3;
+    };
+    if state.identity_alias.as_deref() == Some(alias)
+        && state.device_id.as_ref() == Some(&device_id)
+        && state.identity_fingerprint.as_deref() == Some(fingerprint)
+    {
+        return 0;
+    }
+    if state.session.is_some() || state.network.is_some() {
+        return -2;
+    }
+    state.identity_alias = Some(alias.to_owned());
+    state.device_id = Some(device_id);
+    state.identity_fingerprint = Some(fingerprint.to_owned());
+    0
+}
+
+fn prepare_receiver_session(state: &NativeReceiverState) -> Result<Session, jint> {
+    let device_id = state.device_id.clone().ok_or(-5)?;
+    if state.identity_fingerprint.is_none() {
+        return Err(-5);
+    }
+    let session_id = SessionId::try_from("android-receiver").map_err(|_| -1)?;
+    let mut session = Session::new(session_id, device_id);
+    session
+        .transition(SessionState::Connecting)
+        .map_err(|_| -1)?;
+    Ok(session)
+}
+
+fn valid_identity_fingerprint(value: &str) -> bool {
+    value.len() == 95
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if index % 3 == 2 {
+                byte == b':'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
 #[derive(Default)]
 struct NativeReceiverState {
     session: Option<Session>,
     media_queue: VecDeque<NativeMediaFrame>,
     video_config: Option<VideoConfig>,
     audio_config: Option<AudioConfig>,
+    identity_alias: Option<String>,
+    device_id: Option<DeviceId>,
+    identity_fingerprint: Option<String>,
     network: Option<NetworkRuntime>,
 }
 
@@ -137,7 +226,7 @@ fn unregister_discovery(registration: PublishedRegistration, discovery: MdnsDisc
 }
 
 impl NetworkRuntime {
-    fn start() -> Result<Self, String> {
+    fn start(device_id: DeviceId) -> Result<Self, String> {
         let pairing_code = PairingCode::generate();
         let pairing_value = pairing_code
             .as_str()
@@ -201,7 +290,7 @@ impl NetworkRuntime {
                         };
                         let receiver = match NativeMediaControlReceiver::new(
                             transport,
-                            network_session(),
+                            network_session(device_id.clone()),
                             network_policy(),
                             NetworkBackend,
                             NetworkRendererFactory,
@@ -240,10 +329,10 @@ impl NetworkRuntime {
     }
 }
 
-fn network_session() -> Session {
+fn network_session(device_id: DeviceId) -> Session {
     Session::new(
         SessionId::try_from("android-network-session").expect("static session id"),
-        DeviceId::try_from("android-device").expect("static device id"),
+        device_id,
     )
 }
 
@@ -418,8 +507,8 @@ fn receiver_state() -> &'static Mutex<NativeReceiverState> {
 /// Starts the Rust-owned receiver lifecycle and returns 0 on success.
 ///
 /// A return value of 1 means the receiver is already started; negative values
-/// indicate an internal lock or session construction failure. Network
-/// discovery and media sockets are deliberately separate increments.
+/// indicate an internal failure (-1), network startup failure (-4), or missing
+/// platform identity (-5). An identity is required before any sockets open.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartReceiver(
     _env: JNIEnv<'_>,
@@ -431,22 +520,16 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
     if state.session.is_some() {
         return 1;
     }
+    let session = match prepare_receiver_session(&state) {
+        Ok(session) => session,
+        Err(code) => return code,
+    };
+    let Ok(network) = NetworkRuntime::start(session.device_id().clone()) else {
+        return -4;
+    };
     state.media_queue.clear();
     state.video_config = None;
     state.audio_config = None;
-    let Ok(session_id) = SessionId::try_from("android-receiver") else {
-        return -1;
-    };
-    let Ok(device_id) = DeviceId::try_from("android-device") else {
-        return -1;
-    };
-    let mut session = Session::new(session_id, device_id);
-    if session.transition(SessionState::Connecting).is_err() {
-        return -1;
-    }
-    let Ok(network) = NetworkRuntime::start() else {
-        return -4;
-    };
     state.session = Some(session);
     state.network = Some(network);
     0
@@ -765,9 +848,102 @@ mod tests {
     }
 
     #[test]
+    fn identity_fingerprint_validation_is_strict_and_lowercase() {
+        let valid = "ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89";
+        assert!(valid_identity_fingerprint(valid));
+        assert!(!valid_identity_fingerprint(&valid.to_uppercase()));
+        assert!(!valid_identity_fingerprint("00:11"));
+        assert!(!valid_identity_fingerprint(
+            "ab-cd-ef-01-23-45-67-89-ab-cd-ef-01-23-45-67-89-ab-cd-ef-01-23-45-67-89-ab-cd-ef-01-23-45-67-89"
+        ));
+    }
+
+    #[test]
+    fn identity_is_required_and_key_derived_in_both_session_paths() {
+        let mut state = NativeReceiverState::default();
+        assert_eq!(prepare_receiver_session(&state).unwrap_err(), -5);
+        let fingerprint = vec!["ab"; 32].join(":");
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &fingerprint),
+            0
+        );
+        let session = prepare_receiver_session(&state).unwrap();
+        assert_eq!(
+            session.device_id().as_str(),
+            format!("sha256-{}", "ab".repeat(32))
+        );
+        assert_eq!(
+            network_session(session.device_id().clone()).device_id(),
+            session.device_id()
+        );
+        assert_eq!(session.state(), SessionState::Connecting);
+    }
+
+    #[test]
+    fn active_identity_is_idempotent_but_cannot_be_replaced() {
+        let mut state = NativeReceiverState::default();
+        let first = vec!["ab"; 32].join(":");
+        let second = vec!["cd"; 32].join(":");
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &first),
+            0
+        );
+        let first_id = state.device_id.clone();
+        state.session = Some(prepare_receiver_session(&state).unwrap());
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &first),
+            0
+        );
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &second),
+            -2
+        );
+        assert_eq!(state.device_id, first_id);
+        assert_eq!(state.identity_fingerprint.as_deref(), Some(first.as_str()));
+        state.session = None;
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &second),
+            0
+        );
+        assert_ne!(state.device_id, first_id);
+    }
+
+    #[test]
+    fn malformed_identity_does_not_mutate_installed_identity() {
+        let mut state = NativeReceiverState::default();
+        let fingerprint = vec!["ab"; 32].join(":");
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &fingerprint),
+            0
+        );
+        let first_id = state.device_id.clone();
+        for alias in [
+            "",
+            "INVALID",
+            "é",
+            "bad alias",
+            "bad\nlabel",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(install_device_identity(&mut state, alias, &fingerprint), -3);
+        }
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", "bad"),
+            -3
+        );
+        assert_eq!(state.device_id, first_id);
+        assert_eq!(
+            state.identity_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
+    }
+
+    #[test]
     fn network_runtime_exposes_bounded_pairing_material_and_stops_cleanly() {
         let _guard = test_guard();
-        let network = NetworkRuntime::start().unwrap_or_else(|error| panic!("{error}"));
+        let network =
+            NetworkRuntime::start(DeviceId::try_from("test-device").expect("valid test identity"))
+                .unwrap_or_else(|error| panic!("{error}"));
         assert_ne!(network.port, 0);
         assert!((0..=999_999).contains(&network.pairing_code));
         assert!(!network.certificate_der.is_empty());
@@ -786,7 +962,10 @@ mod tests {
             state.media_queue.clear();
             state.network = None;
         }
-        let network = NetworkRuntime::start().unwrap_or_else(|error| panic!("{error}"));
+        let network = NetworkRuntime::start(
+            DeviceId::try_from("loopback-device").expect("valid test identity"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
         let pairing = PairingCode::parse(format!("{:06}", network.pairing_code))
             .expect("generated pairing code is six digits");
@@ -920,6 +1099,9 @@ mod tests {
             media_queue: VecDeque::new(),
             video_config: None,
             audio_config: None,
+            identity_alias: None,
+            device_id: None,
+            identity_fingerprint: None,
             network: None,
         };
         assert_eq!(

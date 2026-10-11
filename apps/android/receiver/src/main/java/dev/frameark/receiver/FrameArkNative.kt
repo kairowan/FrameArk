@@ -23,6 +23,7 @@ class FrameArkNative(
     networkCertificateProvider: (() -> ByteArray?)? = null,
     videoConfigProvider: (() -> ByteArray?)? = null,
     audioConfigProvider: (() -> ByteArray?)? = null,
+    identityProvider: ((String, String) -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
@@ -54,6 +55,8 @@ class FrameArkNative(
         videoConfigProvider ?: { nativePollVideoConfig() }
     private val bridgeAudioConfigProvider: () -> ByteArray? =
         audioConfigProvider ?: { nativePollAudioConfig() }
+    private val bridgeIdentityProvider: (String, String) -> Int =
+        identityProvider ?: { alias, fingerprint -> nativeSetDeviceIdentity(alias, fingerprint) }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -168,6 +171,19 @@ class FrameArkNative(
 
     /** Returns whether a compatible library has already been loaded. */
     fun isLoaded(): Boolean = loadedAbiVersion != null
+
+    /** Installs the validated public identity before Rust can expose a network endpoint. */
+    fun setDeviceIdentity(identity: DeviceIdentity): Boolean {
+        when (load()) {
+            is LoadResult.Loaded -> Unit
+            else -> return false
+        }
+        return runCatching {
+            DeviceIdentityPolicy.validateAlias(identity.alias)
+            DeviceIdentityPolicy.validateFingerprint(identity.publicKeyFingerprint)
+            bridgeIdentityProvider(identity.alias, identity.publicKeyFingerprint) == 0
+        }.getOrDefault(false)
+    }
 
     /** Starts the Rust-owned lifecycle after verifying the ABI. */
     fun startReceiver(): ReceiverResult {
@@ -323,6 +339,8 @@ class FrameArkNative(
     }
 
     private external fun nativeVersion(): Int
+
+    private external fun nativeSetDeviceIdentity(alias: String, fingerprint: String): Int
 
     private external fun nativeStartReceiver(): Int
 

@@ -23,7 +23,7 @@ object DeviceIdentityPolicy {
         require(alias.toByteArray(Charsets.UTF_8).size <= MAX_ALIAS_BYTES) {
             "identity alias is too long"
         }
-        require(alias.all { it.isLowerCase() || it.isDigit() || it == '-' || it == '_' || it == '.' }) {
+        require(alias.all { it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' || it == '.' }) {
             "identity alias contains unsupported characters"
         }
     }

@@ -18,6 +18,11 @@ class DeviceIdentityPolicyTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
+    fun rejects_non_ascii_aliases_consistently_with_rust() {
+        DeviceIdentityPolicy.validateAlias("é")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
     fun rejects_empty_public_keys() {
         DeviceIdentityPolicy.fingerprint(byteArrayOf())
     }
