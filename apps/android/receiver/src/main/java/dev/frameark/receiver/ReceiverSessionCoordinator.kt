@@ -18,6 +18,8 @@ class ReceiverSessionCoordinator(
 
         data object Starting : State
 
+        data object Recovering : State
+
         data object Running : State
 
         data class Failed(val reason: FailureReason) : State
@@ -38,9 +40,27 @@ class ReceiverSessionCoordinator(
     fun state(): State = synchronized(lock) { state }
 
     /** Starts native lifecycle and playback polling exactly once. */
-    fun start(): Boolean = synchronized(lock) {
+    fun start(): Boolean = synchronized(lock) { startLocked() }
+
+    /**
+     * Rebuilds one interrupted session through the same bounded start path.
+     *
+     * This is an explicit seam for transport/network observers. It does not
+     * retry indefinitely and never duplicates FANP state in Kotlin.
+     */
+    fun recover(): Boolean = synchronized(lock) {
+        if (state != State.Running) return false
+        playbackLoop.stop()
+        network?.stop()
+        native.stopReceiver()
+        transitionLocked(State.Recovering)
+        startLocked()
+    }
+
+    private fun startLocked(): Boolean {
         when (state) {
             State.Running, State.Starting -> return true
+            State.Recovering -> Unit
             is State.Failed -> stopLocked()
             State.Stopped -> Unit
         }
@@ -78,7 +98,7 @@ class ReceiverSessionCoordinator(
             return false
         }
         transitionLocked(State.Running)
-        true
+        return true
     }
 
     /** Stops polling and releases the Rust-owned lifecycle, safely repeated. */
@@ -101,6 +121,7 @@ class ReceiverSessionCoordinator(
 
     private fun stopLocked() {
         playbackLoop.stop()
+        network?.stop()
         native.stopReceiver()
         transitionLocked(State.Stopped)
     }
