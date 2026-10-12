@@ -25,6 +25,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Native packet-to-renderer lifecycle | Pass with fake video/audio renderers, track checks, and partial-prepare cleanup | `frameark-native::media_session` tests |
 | Rust QUIC media receiver orchestration | Pass on a real pinned-QUIC loopback: FAM1 frames are decoded, routed to both renderers, counted, and reset on FIN | `quic_media_stream_reaches_renderers_and_cleans_up` |
 | Native Offer → Start → media → Stop vertical sequence | Pass on a real pinned-QUIC loopback with backend, renderer-factory, control-state, media counters, and cleanup assertions; runnable `framearkd` exposes the same reference path | `control_and_media_complete_one_native_session`, `cargo run -p framearkd` |
+| Repeated Native short sessions | Pass for three consecutive pinned-QUIC Offer → Start → H.264/Opus → FIN → Stop cycles; each cycle asserts negotiated config, queued media kinds, closed session state, and cleared receiver state before the next listener starts | `frameark-ffi::network_runtime_repeats_short_loopback_sessions_without_stale_state` |
 | Android renderer configuration | Pass for JVM config validation and Android lint/build; hardware behavior unverified | `MediaTrackConfigTest`, Android `lint test assembleDebug` |
 | Android Receiver foreground-service lifecycle | Pass for manifest, notification-service wiring, action-policy and coordinator JVM tests; device reclaim behavior unverified | `ReceiverServicePolicyTest`, `ReceiverSessionCoordinatorTest`, Android `lint test assembleDebug` |
 | Android Keystore identity policy | Pass for alias bounds and deterministic public-key fingerprint formatting; Keystore provisioning unverified on JVM | `DeviceIdentityPolicyTest`, Android `lint test assembleDebug` |
@@ -54,6 +55,9 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
 - The current sender/orchestrator supports one Offer, one media stream, and one
   Stop sequence; it does not yet implement dynamic reconfiguration, retry, or
   reconnect.
+- The repeated-session test covers three bounded loopback cycles and resource
+  cleanup only; it does not establish hardware decoding, 1080p30 playback, or
+  a physical LAN sender/receiver matrix.
 - CLI management commands create one temporary pinned pairing per invocation;
   they do not persist a device record, reuse a session between commands, or
   provide a user-facing trust store.
