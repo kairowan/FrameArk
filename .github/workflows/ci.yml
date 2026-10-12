@@ -137,6 +137,8 @@ jobs:
         run: cargo test --workspace --all-features --locked
       - name: Build reference receiver
         run: cargo build -p framearkd --locked
+      - name: Run reference receiver startup smoke
+        run: python scripts/platform_runtime_smoke.py --binary target/debug/framearkd --wait-seconds 3
 
   gate:
     name: ci-gate
