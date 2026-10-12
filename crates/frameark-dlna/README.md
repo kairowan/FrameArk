@@ -35,6 +35,9 @@ DLNA/UPnP MediaRenderer work.
 - a caller-injected bounded remote media range stream that schedules exact
   inclusive chunks up to a 512 MiB resource/4096-request budget without
   buffering the complete object;
+- an explicit-root Rustls HTTPS connector for media URIs with bounded caller
+  DNS, address-policy validation, SNI verification, socket timeouts, and no
+  redirect or system-trust-store behavior;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 - a caller-injected, bounded DNS-aware media URI policy for public-only or
@@ -57,7 +60,7 @@ and handles `SetAVTransportURI`, `Play`, `Pause`, `Stop`, `Seek`,
 control/whitespace characters, fragments, malformed hosts, invalid ports, and
 unbracketed IPv6 authorities. FrameArk does not fetch URLs or bypass DRM.
 
-HTTP chunked transfer, callback connection retries and built-in HTTPS/TLS, full
+HTTP chunked transfer, callback connection retries, full
 DIDL-Lite parsing,
 multicast lease scheduling, built-in network URL fetching, real decoder integration,
 and named client interoperability are not implemented yet. File streaming is
@@ -69,15 +72,20 @@ bounded resolver and checks every returned address, rejecting empty/oversized
 sets, multicast/unspecified addresses, private addresses for
 `PublicNetworkOnly`, and public addresses for `LocalNetworkOnly`. It is a
 preflight policy boundary rather than a fetcher and cannot by itself prevent a
-later redirect or DNS change. `GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
+later redirect or DNS change. `connect_https_media_uri_with_roots` supplies an
+explicit-root Rustls connector: callers provide bounded DNS results and trust
+anchors, while the connector rejects non-HTTPS URIs, verifies SNI, installs
+socket timeouts, and never follows redirects or loads system roots. It does
+not replace caller-owned authentication, cancellation, or redirect policy.
+`GenaEvent::encode_http_notify` prepares bytes for a caller-owned HTTP/TLS
 client but does not open callback sockets or retry failures.
 `send_gena_callback_with_connector` reuses the bounded request and response
 parser with a vetted TLS stream, but does not implement TLS or prove peer
 authentication. `MediaFormatProbe` is metadata-only. The
 `fetch_media_range_with_connector` adds one bounded range request and
 `stream_media_ranges_with_connector` schedules a known-length sequence of
-bounded ranges. Neither follows redirects, implements TLS, authenticates an
-origin, inspects a decoder, or overrides authorization and DNS policy. The
+bounded ranges. Neither follows redirects, inspects a decoder, or overrides
+authorization and DNS policy. The
 caller owns cancellation, connector security, buffering, and output; unknown
 resource lengths are rejected rather than fetched until exhaustion.
 `GenaCallbackClient` supplies plain-HTTP socket I/O. Subscriptions expire on
