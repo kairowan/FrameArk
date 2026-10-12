@@ -78,7 +78,8 @@ requests in a process-local queue, and exposes each as a bounded `FAPR` event
 through `nativePollPeerProof`. Android returns the request id with
 `nativeDecidePeerProof`; only an explicit approval lets the temporary FANP
 session continue. The queue waits at most 30 seconds and clears on stop or
-restart. The Kotlin bridge validates the envelope and forwards the copied key
-to `VerifiedPeerApprovalQueue`; proof verification and session admission stay
-in Rust. PIN-only mode remains the default for compatibility with senders that
-do not implement the optional proof handshake.
+restart. The Kotlin bridge validates the envelope and exposes the copied key to
+a caller-owned approval UI; it does not automatically persist trust or invoke
+`VerifiedPeerApprovalQueue` while the receiver is running. Proof verification
+and one-session admission stay in Rust. PIN-only mode remains the default for
+compatibility with senders that do not implement the optional proof handshake.
