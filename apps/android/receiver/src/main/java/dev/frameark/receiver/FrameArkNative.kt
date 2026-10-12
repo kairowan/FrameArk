@@ -32,14 +32,19 @@ class FrameArkNative(
     trustSnapshotImportProvider: ((ByteArray) -> Int)? = null,
     pairingApprovalRequiredProvider: ((Boolean) -> Int)? = null,
     pairingApprovalProvider: (() -> Int)? = null,
+    peerProofRequiredProvider: ((Boolean) -> Int)? = null,
+    pollPeerProofProvider: (() -> ByteArray?)? = null,
+    peerProofDecisionProvider: ((Long, Boolean) -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
         const val EXPECTED_ABI_VERSION = 1
         const val MAX_MEDIA_FRAME_BYTES = 4 * 1024 * 1024
         const val MAX_TRUST_SNAPSHOT_BYTES = 64 * 1024
+        const val MAX_PEER_PROOF_EVENT_BYTES = 4 + 1 + 8 + 1 + 128 + 32
         private const val MEDIA_FRAME_HEADER_BYTES = 19
         private const val MEDIA_CONFIG_HEADER_BYTES = 8
+        private const val PEER_PROOF_EVENT_HEADER_BYTES = 14
         private val MEDIA_FRAME_MAGIC = byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'M'.code.toByte(), 'F'.code.toByte())
         private val MEDIA_CONFIG_MAGIC = byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'M'.code.toByte(), 'C'.code.toByte())
     }
@@ -84,6 +89,14 @@ class FrameArkNative(
         pairingApprovalRequiredProvider ?: { required -> nativeSetPairingApprovalRequired(required) }
     private val bridgePairingApprovalProvider: () -> Int =
         pairingApprovalProvider ?: { nativeApproveNextPairing() }
+    private val bridgePeerProofRequiredProvider: (Boolean) -> Int =
+        peerProofRequiredProvider ?: { required -> nativeSetPeerProofRequired(required) }
+    private val bridgePollPeerProofProvider: () -> ByteArray? =
+        pollPeerProofProvider ?: { nativePollPeerProof() }
+    private val bridgePeerProofDecisionProvider: (Long, Boolean) -> Int =
+        peerProofDecisionProvider ?: { requestId, approved ->
+            nativeDecidePeerProof(requestId, approved)
+        }
     private var loadedAbiVersion: Int? = null
 
     /** Result of one native-library load attempt. */
@@ -161,6 +174,12 @@ class FrameArkNative(
         val deviceId: String,
         val publicKey: ByteArray,
         val label: String,
+    )
+
+    /** One Rust-verified sender proof awaiting an explicit Android decision. */
+    data class VerifiedPeerProofEvent(
+        val requestId: Long,
+        val peer: VerifiedPeerKey,
     )
 
     /** One bounded encoded frame delivered from Rust to an Android renderer. */
@@ -304,6 +323,48 @@ class FrameArkNative(
     /** Arms exactly one upcoming pairing when the optional gate is enabled. */
     fun approveNextPairing(): Boolean =
         isLoaded() && bridgePairingApprovalProvider() == 0
+
+    /** Enables the optional Rust-verified sender-proof approval flow. */
+    fun setPeerProofRequired(required: Boolean): Boolean {
+        when (load()) {
+            is LoadResult.Loaded -> Unit
+            else -> return false
+        }
+        return bridgePeerProofRequiredProvider(required) == 0
+    }
+
+    /** Polls one copied public-key proof event from Rust, or null when empty. */
+    fun pollPeerProof(): VerifiedPeerProofEvent? {
+        if (!isLoaded()) return null
+        val envelope = bridgePollPeerProofProvider() ?: return null
+        if (envelope.size < PEER_PROOF_EVENT_HEADER_BYTES ||
+            envelope.size > MAX_PEER_PROOF_EVENT_BYTES ||
+            !envelope.copyOfRange(0, 4).contentEquals(byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'P'.code.toByte(), 'R'.code.toByte())) ||
+            envelope[4].toInt() != 1
+        ) return null
+        val buffer = ByteBuffer.wrap(envelope).order(ByteOrder.BIG_ENDIAN)
+        val requestId = buffer.getLong(5)
+        if (requestId <= 0) return null
+        val idLength = envelope[13].toInt() and 0xff
+        val keyStart = PEER_PROOF_EVENT_HEADER_BYTES + idLength
+        if (idLength !in 1..128 || keyStart + 32 != envelope.size) return null
+        val deviceId = envelope.copyOfRange(14, keyStart).toString(Charsets.UTF_8)
+        if (deviceId.isBlank() || deviceId.length > 128 ||
+            deviceId.any { !(it.isLetterOrDigit() || it == '-' || it == '_' || it == '.') }
+        ) return null
+        return VerifiedPeerProofEvent(
+            requestId = requestId,
+            peer = VerifiedPeerKey(
+                deviceId = deviceId,
+                publicKey = envelope.copyOfRange(keyStart, keyStart + 32),
+                label = "FANP sender proof",
+            ),
+        )
+    }
+
+    /** Resolves one Rust proof request after the user approves or rejects it. */
+    fun decidePeerProof(requestId: Long, approved: Boolean): Boolean =
+        isLoaded() && requestId > 0 && bridgePeerProofDecisionProvider(requestId, approved) == 0
 
     /** Starts the Rust-owned lifecycle after verifying the ABI. */
     fun startReceiver(): ReceiverResult {
@@ -476,6 +537,12 @@ class FrameArkNative(
     private external fun nativeSetPairingApprovalRequired(required: Boolean): Int
 
     private external fun nativeApproveNextPairing(): Int
+
+    private external fun nativeSetPeerProofRequired(required: Boolean): Int
+
+    private external fun nativePollPeerProof(): ByteArray?
+
+    private external fun nativeDecidePeerProof(requestId: Long, approved: Boolean): Int
 
     private external fun nativeStartReceiver(): Int
 

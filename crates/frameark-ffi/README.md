@@ -70,3 +70,15 @@ is rejected while a session is active. `AndroidTrustSnapshotStore` encrypts
 those bytes with an Android Keystore AES-GCM key and atomically replaces an
 app-private file. This still does not authenticate the sender, prove key
 possession, or replace an explicit user approval UI.
+
+The optional proof mode is enabled while stopped through
+`nativeSetPeerProofRequired(true)`. In that mode the Rust listener uses the
+verified FANP Ed25519 proof handshake, places at most 16 copied public-key
+requests in a process-local queue, and exposes each as a bounded `FAPR` event
+through `nativePollPeerProof`. Android returns the request id with
+`nativeDecidePeerProof`; only an explicit approval lets the temporary FANP
+session continue. The queue waits at most 30 seconds and clears on stop or
+restart. The Kotlin bridge validates the envelope and forwards the copied key
+to `VerifiedPeerApprovalQueue`; proof verification and session admission stay
+in Rust. PIN-only mode remains the default for compatibility with senders that
+do not implement the optional proof handshake.
