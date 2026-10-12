@@ -3672,6 +3672,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_parser_fuzz_smoke_rejects_or_parses_without_panicking() {
+        let mut state = 0x9e37_79b9_u32;
+        for _ in 0..512 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let length = state as usize % 2048;
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            let _ = HttpRequest::parse(&bytes);
+            let _ = HttpResponse::parse(&bytes);
+            let _ = SsdpMessage::parse(&bytes);
+            let text = String::from_utf8_lossy(&bytes);
+            let _ = ByteRange::parse(&text, 1_024);
+        }
+    }
+
+    #[test]
     fn redacted_dlna_replay_trace_bounds_and_evicts_without_payloads() {
         assert!(matches!(
             DlnaReplayTrace::new(0),

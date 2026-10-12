@@ -41,6 +41,8 @@ DLNA/UPnP MediaRenderer work.
 - a bounded payload-free DLNA replay trace for SSDP, HTTP, SOAP/GENA, and
   media-range counters without retaining XML, headers, URLs, credentials, or
   media bytes;
+- deterministic parser fuzz-smoke coverage that feeds bounded arbitrary bytes
+  through HTTP request/response, SSDP, and media-range boundaries.
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 - a caller-injected, bounded DNS-aware media URI policy for public-only or

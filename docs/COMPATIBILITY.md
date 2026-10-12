@@ -37,3 +37,7 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 ## Evidence required for an entry
 
 Each tested entry must identify receiver build/commit, sender device and OS, network type, codec and media mode, expected and observed result, session duration, diagnostics reference, and limitations. Use the [device compatibility evidence template](compatibility/device-matrix.md) for new records. Do not submit private media, credentials, persistent device identifiers, or unsanitized packet captures.
+
+The DLNA parser boundary also has deterministic fuzz-smoke coverage for HTTP,
+SSDP, and media-range inputs; this is parser-hardening evidence, not named
+controller or long-duration playback evidence.
