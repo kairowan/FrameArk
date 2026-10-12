@@ -38,6 +38,9 @@ DLNA/UPnP MediaRenderer work.
 - an explicit-root Rustls HTTPS connector for media URIs with bounded caller
   DNS, address-policy validation, SNI verification, socket timeouts, and no
   redirect or system-trust-store behavior;
+- a bounded payload-free DLNA replay trace for SSDP, HTTP, SOAP/GENA, and
+  media-range counters without retaining XML, headers, URLs, credentials, or
+  media bytes;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 - a caller-injected, bounded DNS-aware media URI policy for public-only or

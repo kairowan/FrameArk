@@ -6,7 +6,7 @@
 //! interoperability until platform schedulers and compatibility fixtures cover
 //! those environments.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -71,6 +71,8 @@ pub const MAX_MEDIA_STREAM_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_MEDIA_STREAM_CHUNKS: u64 = 4096;
 /// Maximum trust anchors accepted by the bounded HTTPS connector.
 pub const MAX_MEDIA_TLS_ROOT_CERTIFICATES: usize = 128;
+/// Maximum redacted DLNA replay events retained by one trace.
+pub const MAX_DLNA_REPLAY_EVENTS: usize = 512;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -165,6 +167,187 @@ impl Display for DlnaError {
             }
             Self::Io(kind) => write!(formatter, "DLNA UDP operation failed: {kind}"),
         }
+    }
+}
+
+/// Direction of a redacted DLNA replay event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DlnaReplayDirection {
+    /// Data observed from a controller or media origin.
+    Inbound,
+    /// Data emitted by the renderer or callback client.
+    Outbound,
+    /// A local state or policy decision.
+    Internal,
+}
+
+/// Protocol family represented by a redacted DLNA replay event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DlnaReplayKind {
+    /// SSDP discovery metadata only.
+    Ssdp,
+    /// HTTP response/request metadata only.
+    Http,
+    /// SOAP/GENA state metadata only.
+    Soap,
+    /// Bounded media range metadata only.
+    Media,
+}
+
+/// One payload-free DLNA replay event.
+///
+/// Only stable codes and protocol counters are retained. The event never
+/// stores XML, headers, URLs, addresses, credentials, or media bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DlnaReplayEvent {
+    /// Monotonic trace sequence assigned by [`DlnaReplayTrace`].
+    pub sequence: u64,
+    /// Event direction relative to the renderer.
+    pub direction: DlnaReplayDirection,
+    /// Protocol family represented by the event.
+    pub kind: DlnaReplayKind,
+    /// Stable redacted event code.
+    pub code: &'static str,
+    /// Protocol-specific counter, such as HTTP status or range start.
+    pub value_a: u64,
+    /// Protocol-specific counter, such as body bytes or range length.
+    pub value_b: u64,
+}
+
+impl DlnaReplayEvent {
+    /// Creates an SSDP metadata event without retaining headers or body data.
+    pub const fn ssdp(
+        direction: DlnaReplayDirection,
+        status_code: u16,
+        message_bytes: usize,
+    ) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: DlnaReplayKind::Ssdp,
+            code: "dlna.ssdp",
+            value_a: status_code as u64,
+            value_b: message_bytes as u64,
+        }
+    }
+
+    /// Creates an HTTP metadata event without retaining headers or body data.
+    pub const fn http(direction: DlnaReplayDirection, status_code: u16, body_bytes: usize) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: DlnaReplayKind::Http,
+            code: "dlna.http",
+            value_a: status_code as u64,
+            value_b: body_bytes as u64,
+        }
+    }
+
+    /// Creates a SOAP/GENA metadata event without retaining XML or headers.
+    pub const fn soap(direction: DlnaReplayDirection, action_code: u16, body_bytes: usize) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: DlnaReplayKind::Soap,
+            code: "dlna.soap",
+            value_a: action_code as u64,
+            value_b: body_bytes as u64,
+        }
+    }
+
+    /// Creates a media-range metadata event without retaining media bytes.
+    pub const fn media(direction: DlnaReplayDirection, range_start: u64, range_bytes: u64) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: DlnaReplayKind::Media,
+            code: "dlna.media_range",
+            value_a: range_start,
+            value_b: range_bytes,
+        }
+    }
+}
+
+/// Bounded, deterministic, payload-free DLNA replay trace.
+#[derive(Clone, Debug)]
+pub struct DlnaReplayTrace {
+    capacity: usize,
+    next_sequence: u64,
+    events: VecDeque<DlnaReplayEvent>,
+}
+
+impl DlnaReplayTrace {
+    /// Creates a trace with an explicit bounded event capacity.
+    pub fn new(capacity: usize) -> Result<Self, DlnaError> {
+        if capacity == 0 || capacity > MAX_DLNA_REPLAY_EVENTS {
+            return Err(DlnaError::Invalid("DLNA replay capacity"));
+        }
+        Ok(Self {
+            capacity,
+            next_sequence: 0,
+            events: VecDeque::with_capacity(capacity),
+        })
+    }
+
+    /// Returns the configured trace capacity.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Records one event and evicts the oldest event at capacity.
+    pub fn record(&mut self, mut event: DlnaReplayEvent) {
+        event.sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        if self.events.len() == self.capacity {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    /// Returns events in chronological order.
+    pub fn events(&self) -> impl Iterator<Item = &DlnaReplayEvent> {
+        self.events.iter()
+    }
+
+    /// Returns an owned snapshot for a caller-owned exporter.
+    pub fn snapshot(&self) -> Vec<DlnaReplayEvent> {
+        self.events.iter().copied().collect()
+    }
+
+    /// Renders deterministic tab-separated redacted trace text.
+    pub fn render_text(&self) -> String {
+        let mut output = String::new();
+        for event in &self.events {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                output,
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                event.sequence,
+                dlna_replay_direction_name(event.direction),
+                dlna_replay_kind_name(event.kind),
+                event.code,
+                event.value_a,
+                event.value_b
+            );
+        }
+        output
+    }
+}
+
+const fn dlna_replay_direction_name(direction: DlnaReplayDirection) -> &'static str {
+    match direction {
+        DlnaReplayDirection::Inbound => "in",
+        DlnaReplayDirection::Outbound => "out",
+        DlnaReplayDirection::Internal => "internal",
+    }
+}
+
+const fn dlna_replay_kind_name(kind: DlnaReplayKind) -> &'static str {
+    match kind {
+        DlnaReplayKind::Ssdp => "ssdp",
+        DlnaReplayKind::Http => "http",
+        DlnaReplayKind::Soap => "soap",
+        DlnaReplayKind::Media => "media",
     }
 }
 
@@ -3487,6 +3670,55 @@ fn gena_property_set(properties: &BTreeMap<String, String>) -> Result<String, Dl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_dlna_replay_trace_bounds_and_evicts_without_payloads() {
+        assert!(matches!(
+            DlnaReplayTrace::new(0),
+            Err(DlnaError::Invalid("DLNA replay capacity"))
+        ));
+        assert!(matches!(
+            DlnaReplayTrace::new(MAX_DLNA_REPLAY_EVENTS + 1),
+            Err(DlnaError::Invalid("DLNA replay capacity"))
+        ));
+        let mut trace = DlnaReplayTrace::new(2).unwrap();
+        trace.record(DlnaReplayEvent::http(
+            DlnaReplayDirection::Inbound,
+            200,
+            512,
+        ));
+        trace.record(DlnaReplayEvent::media(
+            DlnaReplayDirection::Outbound,
+            4096,
+            1024,
+        ));
+        trace.record(DlnaReplayEvent::soap(DlnaReplayDirection::Internal, 7, 64));
+        let events = trace.snapshot();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[1].code, "dlna.soap");
+        let text = trace.render_text();
+        assert!(text.contains("media\tdlna.media_range\t4096\t1024"));
+        assert!(text.contains("internal\tsoap\tdlna.soap"));
+        assert!(!text.contains("CurrentURI"));
+        assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn redacted_dlna_replay_trace_is_deterministic_and_counter_only() {
+        let mut trace = DlnaReplayTrace::new(4).unwrap();
+        trace.record(DlnaReplayEvent::ssdp(
+            DlnaReplayDirection::Outbound,
+            200,
+            256,
+        ));
+        trace.record(DlnaReplayEvent::soap(DlnaReplayDirection::Inbound, 13, 48));
+        assert_eq!(
+            trace.render_text(),
+            "0\tout\tssdp\tdlna.ssdp\t200\t256\n1\tin\tsoap\tdlna.soap\t13\t48\n"
+        );
+        assert!(trace.events().all(|event| event.code.starts_with("dlna.")));
+    }
 
     #[derive(Debug)]
     struct ProbeScriptStream {
