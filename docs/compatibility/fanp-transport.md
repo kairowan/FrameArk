@@ -94,6 +94,9 @@ resources, and unsupported URL schemes are rejected before state mutation.
 The experimental `frameark-airplay` crate provides bounded RTSP/1.0 and strict
 RTP audio packet contracts, XML Property List metadata, plus an explicit ANNOUNCE SDP and
 OPTIONS/ANNOUNCE/SETUP/RECORD/FLUSH/TEARDOWN RAOP session state machine. It
+classifies RAOP SDP protection attributes without retaining key/IV values and
+returns stable diagnostics for the experimental clear path versus AES-CTR or
+other protected media. It
 also validates bounded H.264 mirror access units, orientation, and a 90 kHz
 clock policy. `MirrorRtspTcpServer` supplies a one-request-per-connection,
 read-deadline and request-budget bounded TCP adapter for the mirror session;
