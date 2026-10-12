@@ -57,6 +57,9 @@ AirPlay/RAOP interoperability.
 - a redaction-safe mirror compatibility report that explicitly classifies
   clear-IP, AWDL, FairPlay/DRM, unknown transport, and unverified-pairing
   inputs instead of silently attempting an unsupported path.
+- a bounded payload-free AirPlay replay trace that records stable RTSP/RTP
+  counters and compatibility decisions for support bundles without retaining
+  packet bytes, URLs, addresses, credentials, keys, or media identifiers.
 
 The RTSP session does not own a TCP socket, and the RTP socket adapter does not
 join multicast groups or enforce the negotiated peer, SSRC, payload type, or
