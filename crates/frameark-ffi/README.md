@@ -79,7 +79,13 @@ through `nativePollPeerProof`. Android returns the request id with
 `nativeDecidePeerProof`; only an explicit approval lets the temporary FANP
 session continue. The queue waits at most 30 seconds and clears on stop or
 restart. The Kotlin bridge validates the envelope and exposes the copied key to
-a caller-owned approval UI; it does not automatically persist trust or invoke
-`VerifiedPeerApprovalQueue` while the receiver is running. Proof verification
-and one-session admission stay in Rust. PIN-only mode remains the default for
-compatibility with senders that do not implement the optional proof handshake.
+a caller-owned approval UI. A peer explicitly enrolled in the Rust `FTR1`
+registry before startup is automatically admitted on later proof-verified
+reconnects when both its stable device id and derived public-key fingerprint
+match exactly. Unknown peers, rotated keys, and malformed identities still use
+the bounded explicit-approval path. The listener uses a startup trust snapshot
+for the running lifecycle, so Android trust mutations remain stopped-only and a
+revocation takes effect on the next restart. Proof verification, reconnect
+admission, and session teardown stay in Rust. PIN-only mode remains the default
+for compatibility with senders that do not implement the optional proof
+handshake.
