@@ -3352,8 +3352,23 @@ mod tests {
     fn multicast_notify_emits_alive_and_byebye_packets() {
         let publisher =
             SsdpPublisher::bind("127.0.0.1:0".parse().unwrap(), advertisement()).unwrap();
-        assert!(publisher.notify_multicast(true).unwrap() > 0);
+        let alive = match publisher.notify_multicast(true) {
+            Ok(bytes) => bytes,
+            Err(DlnaError::Io(kind)) if multicast_unavailable(kind) => return,
+            Err(error) => panic!("unexpected multicast failure: {error}"),
+        };
+        assert!(alive > 0);
         assert!(publisher.notify_multicast(false).unwrap() > 0);
+    }
+
+    fn multicast_unavailable(kind: std::io::ErrorKind) -> bool {
+        matches!(
+            kind,
+            std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::NetworkDown
+                | std::io::ErrorKind::NetworkUnreachable
+                | std::io::ErrorKind::PermissionDenied
+        )
     }
 
     #[test]
