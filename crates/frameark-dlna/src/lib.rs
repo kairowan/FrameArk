@@ -2691,7 +2691,15 @@ impl MediaRendererHttpService {
                     return Err(SoapFault::new(710, "Seek mode not supported"));
                 }
                 let target = action.required_arg("Target")?;
-                self.state.position_seconds = parse_upnp_time(target)?;
+                let position = parse_upnp_time(target)?;
+                if self
+                    .state
+                    .duration_seconds
+                    .is_some_and(|duration| position > duration)
+                {
+                    return Err(SoapFault::new(711, "Seek target outside duration"));
+                }
+                self.state.position_seconds = position;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
             "GetTransportInfo" => {
@@ -4264,6 +4272,15 @@ mod tests {
             "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>00:00:12</Target>",
         );
         assert_eq!(service.handle(&seek).status, 200);
+        assert_eq!(service.state().position_seconds, 12);
+
+        let out_of_bounds_seek = soap_request(
+            "/upnp/control/avtransport",
+            AVTRANSPORT_SERVICE,
+            "Seek",
+            "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>00:01:03</Target>",
+        );
+        assert_eq!(service.handle(&out_of_bounds_seek).status, 500);
         assert_eq!(service.state().position_seconds, 12);
 
         let volume = soap_request(
