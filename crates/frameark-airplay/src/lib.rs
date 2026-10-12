@@ -85,6 +85,8 @@ pub const MAX_HLS_URI_BYTES: usize = 2 * 1024;
 pub const MAX_HLS_CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum entries retained by the optional HLS segment cache.
 pub const MAX_HLS_CACHE_ENTRIES: usize = 32;
+/// Maximum redacted AirPlay replay events retained by one trace.
+pub const MAX_AIRPLAY_REPLAY_EVENTS: usize = 512;
 /// Maximum addresses accepted from one caller-provided HLS DNS result.
 pub const MAX_HLS_RESOLVED_ADDRESSES: usize = 16;
 /// Maximum trust anchors accepted by the explicit-root HLS connector.
@@ -112,6 +114,197 @@ pub enum AirplayError {
     InvalidField(&'static str),
     /// The operating system rejected a bounded RTP socket operation.
     Io(ErrorKind),
+}
+
+/// Direction of a redacted AirPlay replay event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AirplayReplayDirection {
+    /// Bytes or packets observed from the sender.
+    Inbound,
+    /// Bytes or packets emitted by the receiver.
+    Outbound,
+    /// A local admission or lifecycle decision.
+    Internal,
+}
+
+/// Protocol family represented by a redacted replay event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AirplayReplayKind {
+    /// RTSP control-plane metadata only.
+    Rtsp,
+    /// RAOP audio RTP metadata only.
+    RtpAudio,
+    /// Screen-mirror video RTP metadata only.
+    RtpVideo,
+    /// Compatibility/admission decision metadata only.
+    Compatibility,
+}
+
+/// One payload-free AirPlay replay event.
+///
+/// The event retains sequence/timing/size counters and a stable code, never
+/// packet bytes, URLs, addresses, credentials, keys, or media identifiers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AirplayReplayEvent {
+    /// Monotonic trace sequence assigned by [`AirplayReplayTrace`].
+    pub sequence: u64,
+    /// Event direction relative to the receiver.
+    pub direction: AirplayReplayDirection,
+    /// Protocol family represented by the event.
+    pub kind: AirplayReplayKind,
+    /// Stable redacted event code.
+    pub code: &'static str,
+    /// Protocol-specific counter, such as CSeq or RTP sequence.
+    pub value_a: u64,
+    /// Protocol-specific counter, such as timestamp or payload length.
+    pub value_b: u64,
+}
+
+impl AirplayReplayEvent {
+    /// Creates an RTSP metadata event. `body_bytes` is a size counter only.
+    pub const fn rtsp(direction: AirplayReplayDirection, cseq: u64, body_bytes: usize) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: AirplayReplayKind::Rtsp,
+            code: "airplay.rtsp",
+            value_a: cseq,
+            value_b: body_bytes as u64,
+        }
+    }
+
+    /// Creates an audio RTP metadata event without retaining the payload.
+    pub const fn rtp_audio(
+        direction: AirplayReplayDirection,
+        sequence: u16,
+        timestamp: u32,
+        payload_bytes: usize,
+    ) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: AirplayReplayKind::RtpAudio,
+            code: "airplay.rtp_audio",
+            value_a: sequence as u64,
+            value_b: ((timestamp as u64) << 32) | payload_bytes as u64,
+        }
+    }
+
+    /// Creates a mirror RTP metadata event without retaining the payload.
+    pub const fn rtp_video(
+        direction: AirplayReplayDirection,
+        sequence: u16,
+        timestamp: u32,
+        payload_bytes: usize,
+    ) -> Self {
+        Self {
+            sequence: 0,
+            direction,
+            kind: AirplayReplayKind::RtpVideo,
+            code: "airplay.rtp_video",
+            value_a: sequence as u64,
+            value_b: ((timestamp as u64) << 32) | payload_bytes as u64,
+        }
+    }
+
+    /// Creates a compatibility decision event without retaining peer identity.
+    pub const fn compatibility(decision: MirrorCompatibilityDecision) -> Self {
+        Self {
+            sequence: 0,
+            direction: AirplayReplayDirection::Internal,
+            kind: AirplayReplayKind::Compatibility,
+            code: decision.reason_code(),
+            value_a: 0,
+            value_b: 0,
+        }
+    }
+}
+
+/// Bounded, deterministic, payload-free AirPlay replay trace.
+///
+/// The trace is suitable for support bundles and state-machine regression
+/// diagnostics. It is deliberately not a packet capture and cannot be used to
+/// reconstruct protected media or credentials.
+#[derive(Clone, Debug)]
+pub struct AirplayReplayTrace {
+    capacity: usize,
+    next_sequence: u64,
+    events: VecDeque<AirplayReplayEvent>,
+}
+
+impl AirplayReplayTrace {
+    /// Creates a trace with an explicit bounded event capacity.
+    pub fn new(capacity: usize) -> Result<Self, AirplayError> {
+        if capacity == 0 || capacity > MAX_AIRPLAY_REPLAY_EVENTS {
+            return Err(AirplayError::Invalid("AirPlay replay capacity"));
+        }
+        Ok(Self {
+            capacity,
+            next_sequence: 0,
+            events: VecDeque::with_capacity(capacity),
+        })
+    }
+
+    /// Returns the configured trace capacity.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Records one event and evicts the oldest event at capacity.
+    pub fn record(&mut self, mut event: AirplayReplayEvent) {
+        event.sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        if self.events.len() == self.capacity {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    /// Returns events in chronological order.
+    pub fn events(&self) -> impl Iterator<Item = &AirplayReplayEvent> {
+        self.events.iter()
+    }
+
+    /// Returns an owned snapshot for a caller-owned exporter.
+    pub fn snapshot(&self) -> Vec<AirplayReplayEvent> {
+        self.events.iter().copied().collect()
+    }
+
+    /// Renders a deterministic tab-separated redacted trace.
+    pub fn render_text(&self) -> String {
+        let mut output = String::new();
+        for event in &self.events {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                output,
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                event.sequence,
+                replay_direction_name(event.direction),
+                replay_kind_name(event.kind),
+                event.code,
+                event.value_a,
+                event.value_b
+            );
+        }
+        output
+    }
+}
+
+const fn replay_direction_name(direction: AirplayReplayDirection) -> &'static str {
+    match direction {
+        AirplayReplayDirection::Inbound => "in",
+        AirplayReplayDirection::Outbound => "out",
+        AirplayReplayDirection::Internal => "internal",
+    }
+}
+
+const fn replay_kind_name(kind: AirplayReplayKind) -> &'static str {
+    match kind {
+        AirplayReplayKind::Rtsp => "rtsp",
+        AirplayReplayKind::RtpAudio => "rtp-audio",
+        AirplayReplayKind::RtpVideo => "rtp-video",
+        AirplayReplayKind::Compatibility => "compatibility",
+    }
 }
 
 impl Display for AirplayError {
@@ -4478,6 +4671,67 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, AirplayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_replay_trace_bounds_and_evicts_without_payloads() {
+        assert!(matches!(
+            AirplayReplayTrace::new(0),
+            Err(AirplayError::Invalid("AirPlay replay capacity"))
+        ));
+        assert!(matches!(
+            AirplayReplayTrace::new(MAX_AIRPLAY_REPLAY_EVENTS + 1),
+            Err(AirplayError::Invalid("AirPlay replay capacity"))
+        ));
+        let mut trace = AirplayReplayTrace::new(2).unwrap();
+        trace.record(AirplayReplayEvent::rtsp(
+            AirplayReplayDirection::Inbound,
+            4,
+            128,
+        ));
+        trace.record(AirplayReplayEvent::rtp_audio(
+            AirplayReplayDirection::Inbound,
+            7,
+            90_000,
+            2048,
+        ));
+        trace.record(AirplayReplayEvent::compatibility(
+            MirrorCompatibilityDecision::UnsupportedFairPlay,
+        ));
+        let events = trace.snapshot();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[1].code, "mirror.unsupported_fairplay");
+        let text = trace.render_text();
+        assert!(text.contains("rtp-audio"));
+        assert!(text.contains("mirror.unsupported_fairplay"));
+        assert!(text.contains("386547056642048"));
+        assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn redacted_replay_trace_keeps_deterministic_metadata_only() {
+        let mut trace = AirplayReplayTrace::new(4).unwrap();
+        trace.record(AirplayReplayEvent::rtp_video(
+            AirplayReplayDirection::Outbound,
+            9,
+            180_000,
+            64,
+        ));
+        trace.record(AirplayReplayEvent::rtsp(
+            AirplayReplayDirection::Outbound,
+            10,
+            16,
+        ));
+        assert_eq!(
+            trace.render_text(),
+            "0\tout\trtp-video\tairplay.rtp_video\t9\t773094113280064\n1\tout\trtsp\tairplay.rtsp\t10\t16\n"
+        );
+        assert!(
+            trace
+                .events()
+                .all(|event| event.code.starts_with("airplay."))
+        );
+    }
 
     #[test]
     fn rtsp_round_trip_preserves_cseq_and_body() {
