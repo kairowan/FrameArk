@@ -4,11 +4,13 @@
 //! audio/video packets. It intentionally does not implement Apple pairing, FairPlay,
 //! AES-CTR audio decryption, ALAC/AAC decoding, or device interoperability.
 
+use rustls::pki_types::ServerName;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Maximum RTSP message size accepted before parsing.
@@ -83,6 +85,21 @@ pub const MAX_HLS_URI_BYTES: usize = 2 * 1024;
 pub const MAX_HLS_CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum entries retained by the optional HLS segment cache.
 pub const MAX_HLS_CACHE_ENTRIES: usize = 32;
+/// Maximum addresses accepted from one caller-provided HLS DNS result.
+pub const MAX_HLS_RESOLVED_ADDRESSES: usize = 16;
+/// Maximum trust anchors accepted by the explicit-root HLS connector.
+pub const MAX_HLS_TLS_ROOT_CERTIFICATES: usize = 128;
+
+/// Network class required by the explicit-root HLS connector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HlsNetworkPolicy {
+    /// Permit any usable resolved address when the caller explicitly accepts it.
+    AllowAny,
+    /// Permit only private, unique-local, link-local, or loopback addresses.
+    LocalNetworkOnly,
+    /// Permit only addresses outside private, local, loopback, multicast, and unspecified ranges.
+    PublicNetworkOnly,
+}
 
 /// Errors raised by bounded RTSP/RTP parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1258,6 +1275,136 @@ pub struct HlsSegmentResponse {
     pub body: Vec<u8>,
 }
 
+/// Rustls-backed HTTPS stream returned by the HLS connector.
+pub type HlsTlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+/// Opens one bounded HLS HTTPS connection with explicit roots and caller DNS.
+///
+/// The caller supplies the authority, timeout, trust anchors, and resolver.
+/// The resolver is invoked once for hostnames; the bounded address set is then
+/// checked against `network_policy` and used for connection attempts. No
+/// system trust store, redirect, or implicit DNS lookup is performed.
+pub fn connect_hls_https_with_roots<F>(
+    authority: &str,
+    timeout: Duration,
+    roots: &rustls::RootCertStore,
+    network_policy: HlsNetworkPolicy,
+    resolve: F,
+) -> Result<HlsTlsStream, AirplayError>
+where
+    F: FnOnce(&str) -> Result<Vec<IpAddr>, AirplayError>,
+{
+    if timeout.is_zero() {
+        return Err(AirplayError::Invalid("HLS TLS timeout"));
+    }
+    if roots.is_empty() || roots.len() > MAX_HLS_TLS_ROOT_CERTIFICATES {
+        return Err(AirplayError::Invalid("HLS TLS root store"));
+    }
+    let (host, port) = split_hls_authority(authority)?;
+    let addresses = match host.parse::<IpAddr>() {
+        Ok(address) => vec![address],
+        Err(_) => resolve(&host)?,
+    };
+    if addresses.is_empty() || addresses.len() > MAX_HLS_RESOLVED_ADDRESSES {
+        return Err(AirplayError::Invalid("HLS DNS result"));
+    }
+    if addresses
+        .iter()
+        .any(|address| !usable_hls_address(*address))
+    {
+        return Err(AirplayError::Invalid("HLS address"));
+    }
+    let permitted = match network_policy {
+        HlsNetworkPolicy::AllowAny => true,
+        HlsNetworkPolicy::LocalNetworkOnly => {
+            addresses.iter().all(|address| local_hls_address(*address))
+        }
+        HlsNetworkPolicy::PublicNetworkOnly => {
+            addresses.iter().all(|address| public_hls_address(*address))
+        }
+    };
+    if !permitted {
+        return Err(AirplayError::Invalid("HLS network policy"));
+    }
+    let mut stream = None;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&SocketAddr::new(address, port), timeout) {
+            Ok(candidate) => {
+                stream = Some(candidate);
+                break;
+            }
+            Err(error) => last_error = Some(error.kind()),
+        }
+    }
+    let stream = stream
+        .ok_or_else(|| AirplayError::Io(last_error.unwrap_or(ErrorKind::ConnectionRefused)))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| AirplayError::Io(error.kind()))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| AirplayError::Io(error.kind()))?;
+    let server_name = ServerName::try_from(host.clone())
+        .map_err(|_| AirplayError::Invalid("HLS TLS server name"))?;
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots.clone())
+        .with_no_client_auth();
+    let connection = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|_| AirplayError::Invalid("HLS TLS configuration"))?;
+    let mut tls = rustls::StreamOwned::new(connection, stream);
+    while tls.conn.is_handshaking() {
+        tls.conn
+            .complete_io(&mut tls.sock)
+            .map_err(|_| AirplayError::Invalid("HLS TLS handshake"))?;
+    }
+    Ok(tls)
+}
+
+/// Fetches an HTTPS HLS playlist using the explicit-root Rustls connector.
+pub fn fetch_hls_playlist_with_roots<F>(
+    playlist_url: &str,
+    timeout: Duration,
+    roots: &rustls::RootCertStore,
+    network_policy: HlsNetworkPolicy,
+    resolve: F,
+) -> Result<HlsPlaylistResponse, AirplayError>
+where
+    F: FnOnce(&str) -> Result<Vec<IpAddr>, AirplayError>,
+{
+    fetch_hls_playlist_with_connector(playlist_url, timeout, |scheme, authority, _, _| {
+        if scheme != "https" {
+            return Err(AirplayError::Invalid("HLS TLS scheme"));
+        }
+        connect_hls_https_with_roots(authority, timeout, roots, network_policy, resolve)
+    })
+}
+
+/// Fetches an HTTPS HLS segment using the explicit-root Rustls connector.
+pub fn fetch_hls_segment_with_roots<F>(
+    playlist_url: &str,
+    segment_uri: &str,
+    timeout: Duration,
+    roots: &rustls::RootCertStore,
+    network_policy: HlsNetworkPolicy,
+    resolve: F,
+) -> Result<HlsSegmentResponse, AirplayError>
+where
+    F: FnOnce(&str) -> Result<Vec<IpAddr>, AirplayError>,
+{
+    fetch_hls_segment_with_connector(
+        playlist_url,
+        segment_uri,
+        timeout,
+        |scheme, authority, _, _| {
+            if scheme != "https" {
+                return Err(AirplayError::Invalid("HLS TLS scheme"));
+            }
+            connect_hls_https_with_roots(authority, timeout, roots, network_policy, resolve)
+        },
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HlsCacheEntry {
     uri: String,
@@ -1637,6 +1784,51 @@ fn split_hls_playlist_url(url: &str) -> Result<(String, String, String), Airplay
         return Err(AirplayError::Invalid("HLS playlist URL"));
     }
     Ok((scheme, authority.to_string(), target))
+}
+
+fn split_hls_authority(authority: &str) -> Result<(String, u16), AirplayError> {
+    validate_hls_authority(authority)?;
+    if let Some(rest) = authority.strip_prefix('[') {
+        let close = rest
+            .find(']')
+            .ok_or(AirplayError::Invalid("HLS playlist authority"))?;
+        let host = &rest[..close];
+        let port = rest[close + 1..]
+            .strip_prefix(':')
+            .map(str::parse)
+            .transpose()
+            .map_err(|_| AirplayError::Invalid("HLS playlist authority"))?
+            .unwrap_or(443);
+        return Ok((host.to_string(), port));
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    let port = port
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| AirplayError::Invalid("HLS playlist authority"))?
+        .unwrap_or(443);
+    Ok((host.to_string(), port))
+}
+
+fn usable_hls_address(address: IpAddr) -> bool {
+    !address.is_unspecified() && !address.is_multicast()
+}
+
+fn local_hls_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_private() || address.is_loopback() || address.is_link_local()
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback() || address.is_unique_local() || address.is_unicast_link_local()
+        }
+    }
+}
+
+fn public_hls_address(address: IpAddr) -> bool {
+    usable_hls_address(address) && !local_hls_address(address)
 }
 
 fn validate_hls_authority(authority: &str) -> Result<(), AirplayError> {
@@ -5068,6 +5260,136 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    fn hls_tls_fixture(
+        content_type: &'static str,
+        body: &'static [u8],
+    ) -> (
+        u16,
+        rustls::pki_types::CertificateDer<'static>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("fixture certificate");
+        let certificate_der =
+            rustls::pki_types::CertificateDer::from(certificate.cert.der().to_vec());
+        let private_key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der());
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key.into())
+            .expect("fixture server config");
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("fixture listener");
+        let port = listener.local_addr().expect("fixture address").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let connection = rustls::ServerConnection::new(std::sync::Arc::new(config))
+                .expect("fixture connection");
+            let mut tls = rustls::StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 2048];
+            let _ = tls.read(&mut request);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = tls.write_all(header.as_bytes());
+            let _ = tls.write_all(body);
+            let _ = tls.flush();
+        });
+        (port, certificate_der, handle)
+    }
+
+    #[test]
+    fn hls_explicit_root_tls_connector_fetches_playlist_and_segment() {
+        let playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:3.5,\nsegment.ts\n";
+        let (port, certificate, handle) =
+            hls_tls_fixture("application/vnd.apple.mpegurl", playlist);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("fixture root");
+        let result = fetch_hls_playlist_with_roots(
+            &format!("https://localhost:{port}/live/index.m3u8"),
+            Duration::from_secs(2),
+            &roots,
+            HlsNetworkPolicy::AllowAny,
+            |host| {
+                assert_eq!(host, "localhost");
+                Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)])
+            },
+        )
+        .expect("fixture playlist");
+        assert_eq!(result.playlist.segments.len(), 1);
+        handle.join().expect("fixture server");
+
+        let (port, certificate, handle) = hls_tls_fixture("video/mp2t", b"segment");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("fixture root");
+        let result = fetch_hls_segment_with_roots(
+            &format!("https://localhost:{port}/live/index.m3u8"),
+            "segment.ts",
+            Duration::from_secs(2),
+            &roots,
+            HlsNetworkPolicy::AllowAny,
+            |_| Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]),
+        )
+        .expect("fixture segment");
+        assert_eq!(result.body, b"segment");
+        handle.join().expect("fixture server");
+    }
+
+    #[test]
+    fn hls_explicit_root_tls_connector_rejects_http_wrong_root_and_sni() {
+        let (port, _certificate, handle) = hls_tls_fixture("video/mp2t", b"segment");
+        let wrong = rcgen::generate_simple_self_signed(vec!["wrong.local".to_string()])
+            .expect("wrong certificate");
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                wrong.cert.der().to_vec(),
+            ))
+            .expect("wrong root");
+        let result = connect_hls_https_with_roots(
+            &format!("localhost:{port}"),
+            Duration::from_secs(2),
+            &roots,
+            HlsNetworkPolicy::AllowAny,
+            |_| Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]),
+        );
+        assert!(matches!(
+            result,
+            Err(AirplayError::Invalid("HLS TLS handshake"))
+        ));
+        handle.join().expect("fixture server");
+
+        assert!(matches!(
+            fetch_hls_playlist_with_roots(
+                "http://localhost:443/live/index.m3u8",
+                Duration::from_secs(2),
+                &roots,
+                HlsNetworkPolicy::AllowAny,
+                |_| panic!("plain HTTP must not resolve"),
+            ),
+            Err(AirplayError::Invalid("HLS TLS scheme"))
+        ));
+
+        let (port, certificate, handle) = hls_tls_fixture("video/mp2t", b"segment");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("fixture root");
+        let result = connect_hls_https_with_roots(
+            &format!("127.0.0.1:{port}"),
+            Duration::from_secs(2),
+            &roots,
+            HlsNetworkPolicy::AllowAny,
+            |_| panic!("literal IP must not resolve"),
+        );
+        assert!(matches!(
+            result,
+            Err(AirplayError::Invalid("HLS TLS handshake"))
+        ));
+        handle.join().expect("fixture server");
     }
 
     #[test]

@@ -41,9 +41,14 @@ AirPlay/RAOP interoperability.
 - a caller-owned HTTP/HTTPS HLS playlist and segment connector boundary with
   bounded response headers/body, content-length checks, MIME validation, and
   explicit no-redirect behavior;
+- an explicit-root Rustls HTTPS HLS connector with caller-provided DNS and
+  local/public address policy, SNI verification, bounded roots, socket
+  timeouts, and playlist/segment convenience fetchers;
 - an optional bounded FIFO HLS segment cache with URI validation, duplicate
-  replacement, entry/byte budgets, and oldest-entry eviction; DNS, TLS,
-  redirects, authentication, and decoding remain caller-owned.
+  replacement, entry/byte budgets, and oldest-entry eviction; redirects,
+  authentication, and decoding remain caller-owned. The Rustls connector
+  never loads the system trust store, follows redirects, or performs implicit
+  DNS; callers provide trust anchors and a resolver explicitly.
 - caller-owned peer authorization hooks on the RAOP and mirror RTSP TCP
   adapters, evaluated before request bytes enter the session state machine.
 - a redaction-safe RAOP SDP encryption classifier that distinguishes the
