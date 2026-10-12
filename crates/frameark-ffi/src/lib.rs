@@ -1427,6 +1427,145 @@ mod tests {
     }
 
     #[test]
+    fn network_runtime_repeats_short_loopback_sessions_without_stale_state() {
+        let _guard = test_guard();
+
+        for cycle in 0..3 {
+            {
+                let mut state = receiver_state().lock().unwrap();
+                state.session = Some(Session::new(
+                    SessionId::try_from(format!("loopback-receiver-{cycle}")).unwrap(),
+                    DeviceId::try_from("loopback-device").unwrap(),
+                ));
+                state.media_queue.clear();
+                state.video_config = None;
+                state.audio_config = None;
+                state.network = None;
+            }
+
+            let network = NetworkRuntime::start_with_approval(
+                DeviceId::try_from("loopback-device").expect("valid test identity"),
+                false,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap_or_else(|error| panic!("loopback cycle {cycle} startup: {error}"));
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
+            let pairing = PairingCode::parse(format!("{:06}", network.pairing_code))
+                .expect("generated pairing code is six digits");
+            let certificate = network.certificate_der.clone();
+            std::thread::sleep(Duration::from_millis(50));
+
+            let report = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("loopback runtime")
+                .block_on(async {
+                    let transport = PairingClient::connect(
+                        address,
+                        "localhost",
+                        &certificate,
+                        pairing,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .expect("loopback FANP pairing");
+                    let mut sender = NativeSender::new(
+                        transport,
+                        Session::new(
+                            SessionId::try_from(format!("loopback-session-{cycle}")).unwrap(),
+                            DeviceId::try_from("loopback-sender").unwrap(),
+                        ),
+                    )
+                    .unwrap();
+                    sender
+                        .offer(
+                            SessionOffer {
+                                video: Some(VideoConfig {
+                                    codec: MediaCodec::H264,
+                                    width: 1280,
+                                    height: 720,
+                                    frame_rate_numerator: 30,
+                                    frame_rate_denominator: 1,
+                                }),
+                                audio: Some(AudioConfig {
+                                    codec: MediaCodec::Opus,
+                                    sample_rate: 48_000,
+                                    channels: 2,
+                                }),
+                                latency_ms: 120,
+                            },
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        .expect("loopback offer");
+                    sender
+                        .start(Duration::from_secs(5))
+                        .await
+                        .expect("loopback start");
+
+                    let video = VideoFrame::new(
+                        TrackId::new("video-0").unwrap(),
+                        1,
+                        MediaTimestamp::new(0, TimeBase::new(90_000, 1).unwrap()),
+                        None,
+                        true,
+                        vec![0, 0, 0, 1, 0x65, cycle],
+                    )
+                    .unwrap();
+                    let audio = AudioPacket::new(
+                        TrackId::new("audio-0").unwrap(),
+                        1,
+                        MediaTimestamp::new(0, TimeBase::new(48_000, 1).unwrap()),
+                        960,
+                        vec![0xF8, 0xFF, cycle],
+                    )
+                    .unwrap();
+                    let mut media = sender.open_media_stream().await.unwrap();
+                    media
+                        .send_frame(
+                            &media_wire::encode(&MediaPacket::Video(video)).unwrap(),
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        .expect("loopback video");
+                    media
+                        .send_frame(
+                            &media_wire::encode(&MediaPacket::Audio(audio)).unwrap(),
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        .expect("loopback audio");
+                    media.finish().unwrap();
+                    sender
+                        .stop(Duration::from_secs(5))
+                        .await
+                        .expect("loopback stop")
+                });
+
+            assert_eq!(report.state, SessionState::Closed);
+            network.stop();
+
+            let mut state = receiver_state().lock().unwrap();
+            assert_eq!(state.video_config.unwrap().width, 1280);
+            assert_eq!(state.audio_config.unwrap().sample_rate, 48_000);
+            assert_eq!(state.media_queue.len(), 2);
+            assert_eq!(
+                state.media_queue.pop_front().unwrap().kind,
+                MEDIA_KIND_VIDEO
+            );
+            assert_eq!(
+                state.media_queue.pop_front().unwrap().kind,
+                MEDIA_KIND_AUDIO
+            );
+            state.session = None;
+            state.video_config = None;
+            state.audio_config = None;
+            state.media_queue.clear();
+            state.network = None;
+        }
+    }
+
+    #[test]
     fn lifecycle_state_is_bounded_and_idempotent() {
         let _guard = test_guard();
         let state = receiver_state();
