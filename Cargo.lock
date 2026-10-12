@@ -149,6 +149,10 @@ dependencies = [
 [[package]]
 name = "frameark-dlna"
 version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+]
 
 [[package]]
 name = "frameark-ffi"

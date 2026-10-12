@@ -85,8 +85,12 @@ metadata generation, GENA subscription/event policy, callback notification,
 and a sequential request-batch accept loop.
 
 It does not yet join multicast groups, run a concurrent production scheduler,
-provide built-in HTTPS/TLS, validate full DIDL-Lite metadata, inspect a
-decoder, or claim named-client DLNA interoperability. Caller-owned known-length
+validate full DIDL-Lite metadata, inspect a decoder, or claim named-client
+DLNA interoperability. The protocol layer now includes an explicit-root
+Rustls HTTPS connector for media URIs: callers provide bounded DNS results,
+trust anchors, and network policy; the connector verifies SNI, installs
+socket timeouts, and never follows redirects or loads system roots.
+Caller-owned known-length
 URL streaming now schedules bounded contiguous `206 Content-Range` chunks;
 chunked HTTP, redirects, multiple or unsatisfiable ranges, unknown-length
 resources, and unsupported URL schemes are rejected before state mutation.

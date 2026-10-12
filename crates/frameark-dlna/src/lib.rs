@@ -12,7 +12,10 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use rustls::pki_types::ServerName;
 
 /// Maximum complete SSDP message accepted by the parser.
 pub const MAX_SSDP_BYTES: usize = 64 * 1024;
@@ -66,6 +69,8 @@ pub const MAX_MEDIA_FETCH_BYTES: usize = MAX_HTTP_BYTES - 4096;
 pub const MAX_MEDIA_STREAM_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum range requests in one caller-owned remote media stream.
 pub const MAX_MEDIA_STREAM_CHUNKS: u64 = 4096;
+/// Maximum trust anchors accepted by the bounded HTTPS connector.
+pub const MAX_MEDIA_TLS_ROOT_CERTIFICATES: usize = 128;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -1592,6 +1597,135 @@ pub struct MediaRangeStreamOptions {
     pub timeout: Duration,
 }
 
+/// Rustls-backed HTTPS stream returned by [`connect_https_with_roots`].
+///
+/// The caller still owns URL/network policy and supplies the trust anchors;
+/// this alias only makes the connector usable with the existing `Read + Write`
+/// media helpers.
+pub type DlnaTlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+/// Opens one bounded HTTPS connection with explicit roots and caller DNS.
+///
+/// The authority is validated using the same host/port grammar as media URLs.
+/// The resolver is called once for the hostname and its bounded result is used
+/// for TCP connection attempts; no system DNS or redirect is performed here.
+/// TLS verifies the authority as SNI and rejects an empty or oversized root
+/// store. Read/write timeouts are installed before the handshake and the
+/// handshake is completed before the stream is returned.
+pub fn connect_https_with_roots<F>(
+    authority: &str,
+    timeout: Duration,
+    roots: &rustls::RootCertStore,
+    resolve: F,
+) -> Result<DlnaTlsStream, DlnaError>
+where
+    F: FnOnce(&str) -> Result<Vec<IpAddr>, DlnaError>,
+{
+    if timeout.is_zero() {
+        return Err(DlnaError::Invalid("TLS timeout"));
+    }
+    if roots.is_empty() || roots.len() > MAX_MEDIA_TLS_ROOT_CERTIFICATES {
+        return Err(DlnaError::Invalid("TLS root store"));
+    }
+    let (host, port) = split_media_authority(authority)?;
+    let addresses = match host.parse::<IpAddr>() {
+        Ok(address) => vec![address],
+        Err(_) => resolve(&host)?,
+    };
+    if addresses.is_empty() || addresses.len() > MAX_MEDIA_RESOLVED_ADDRESSES {
+        return Err(DlnaError::Invalid("TLS DNS result"));
+    }
+    if addresses
+        .iter()
+        .any(|address| !usable_media_address(*address))
+    {
+        return Err(DlnaError::Invalid("TLS address"));
+    }
+    let mut stream = None;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&SocketAddr::new(address, port), timeout) {
+            Ok(candidate) => {
+                stream = Some(candidate);
+                break;
+            }
+            Err(error) => last_error = Some(error.kind()),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        DlnaError::Io(last_error.unwrap_or(std::io::ErrorKind::ConnectionRefused))
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| DlnaError::Io(error.kind()))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| DlnaError::Io(error.kind()))?;
+    let server_name =
+        ServerName::try_from(host.clone()).map_err(|_| DlnaError::Invalid("TLS server name"))?;
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots.clone())
+        .with_no_client_auth();
+    let connection = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|_| DlnaError::Invalid("TLS configuration"))?;
+    let mut tls = rustls::StreamOwned::new(connection, stream);
+    while tls.conn.is_handshaking() {
+        tls.conn
+            .complete_io(&mut tls.sock)
+            .map_err(|_| DlnaError::Invalid("TLS handshake"))?;
+    }
+    Ok(tls)
+}
+
+/// Opens an HTTPS media URI after applying the caller's DNS/network policy.
+///
+/// This convenience layer rejects plain HTTP before any socket is opened. It
+/// resolves hostnames once, validates every returned address against the
+/// supplied policy, and passes that same bounded address set to the TLS
+/// connector. Redirects, system trust stores, and implicit DNS are not used.
+pub fn connect_https_media_uri_with_roots<F>(
+    uri: &str,
+    network_policy: MediaUriNetworkPolicy,
+    timeout: Duration,
+    roots: &rustls::RootCertStore,
+    resolve: F,
+) -> Result<DlnaTlsStream, DlnaError>
+where
+    F: FnOnce(&str) -> Result<Vec<IpAddr>, DlnaError>,
+{
+    let (scheme, authority, _) = split_media_uri(uri)?;
+    if scheme != "https" {
+        return Err(DlnaError::Invalid("TLS scheme"));
+    }
+    let host = media_uri_host(uri)?;
+    let addresses = match host.parse::<IpAddr>() {
+        Ok(address) => vec![address],
+        Err(_) => resolve(host)?,
+    };
+    if addresses.is_empty() || addresses.len() > MAX_MEDIA_RESOLVED_ADDRESSES {
+        return Err(DlnaError::Invalid("media URI DNS result"));
+    }
+    if addresses
+        .iter()
+        .any(|address| !usable_media_address(*address))
+    {
+        return Err(DlnaError::Invalid("media URI address"));
+    }
+    let permitted = match network_policy {
+        MediaUriNetworkPolicy::AllowAny => true,
+        MediaUriNetworkPolicy::LocalNetworkOnly => addresses
+            .iter()
+            .all(|address| local_media_address(*address)),
+        MediaUriNetworkPolicy::PublicNetworkOnly => addresses
+            .iter()
+            .all(|address| public_media_address(*address)),
+    };
+    if !permitted {
+        return Err(DlnaError::Invalid("media URI network policy"));
+    }
+    connect_https_with_roots(&authority, timeout, roots, |_| Ok(addresses))
+}
+
 /// Fetches one bounded media chunk through a caller-owned connector.
 ///
 /// `range` is an inclusive byte range. When supplied, the origin must return
@@ -3046,6 +3180,35 @@ fn split_media_uri(uri: &str) -> Result<(String, String, String), DlnaError> {
         return Err(DlnaError::Invalid("media URI"));
     }
     Ok((scheme, authority.to_string(), target))
+}
+
+fn split_media_authority(authority: &str) -> Result<(String, u16), DlnaError> {
+    if !validate_media_authority(authority) {
+        return Err(DlnaError::Invalid("TLS authority"));
+    }
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let close = bracketed
+            .find(']')
+            .ok_or(DlnaError::Invalid("TLS authority"))?;
+        let host = &bracketed[..close];
+        let suffix = &bracketed[close + 1..];
+        let port = suffix
+            .strip_prefix(':')
+            .map(str::parse)
+            .transpose()
+            .map_err(|_| DlnaError::Invalid("TLS port"))?
+            .unwrap_or(443);
+        return Ok((host.to_string(), port));
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    let port = port
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| DlnaError::Invalid("TLS port"))?
+        .unwrap_or(443);
+    Ok((host.to_string(), port))
 }
 
 fn validate_media_authority(authority: &str) -> bool {
@@ -4761,5 +4924,122 @@ mod tests {
             ),
             Err(DlnaError::Invalid("media URI network policy"))
         );
+    }
+
+    fn tls_fixture() -> (
+        u16,
+        rustls::pki_types::CertificateDer<'static>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("fixture certificate");
+        let certificate_der =
+            rustls::pki_types::CertificateDer::from(certificate.cert.der().to_vec());
+        let private_key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der());
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key.into())
+            .expect("fixture server config");
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("fixture listener");
+        let port = listener.local_addr().expect("fixture address").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let connection = rustls::ServerConnection::new(std::sync::Arc::new(config))
+                .expect("fixture connection");
+            let mut tls = rustls::StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 1024];
+            let _ = tls.read(&mut request);
+            let _ = tls.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
+            );
+            let _ = tls.flush();
+        });
+        (port, certificate_der, handle)
+    }
+
+    #[test]
+    fn https_connector_requires_explicit_roots_and_rejects_plain_http() {
+        let (port, certificate, handle) = tls_fixture();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("fixture root");
+        let uri = format!("https://localhost:{port}/media.mp4");
+        let mut stream = connect_https_media_uri_with_roots(
+            &uri,
+            MediaUriNetworkPolicy::AllowAny,
+            Duration::from_secs(2),
+            &roots,
+            |host| {
+                assert_eq!(host, "localhost");
+                Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)])
+            },
+        )
+        .expect("explicit-root TLS connection");
+        stream
+            .write_all(b"GET /media.mp4 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("fixture request");
+        stream.flush().expect("fixture flush");
+        let response = read_http_response(&mut stream).expect("fixture response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        handle.join().expect("fixture server");
+
+        assert!(matches!(
+            connect_https_media_uri_with_roots(
+                "http://localhost:443/media.mp4",
+                MediaUriNetworkPolicy::AllowAny,
+                Duration::from_secs(2),
+                &roots,
+                |_| panic!("plain HTTP must not resolve"),
+            ),
+            Err(DlnaError::Invalid("TLS scheme"))
+        ));
+        assert!(matches!(
+            connect_https_with_roots(
+                "localhost:443",
+                Duration::from_secs(2),
+                &rustls::RootCertStore::empty(),
+                |_| Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]),
+            ),
+            Err(DlnaError::Invalid("TLS root store"))
+        ));
+    }
+
+    #[test]
+    fn https_connector_rejects_wrong_root_and_sni_mismatch() {
+        let (port, _certificate, handle) = tls_fixture();
+        let wrong = rcgen::generate_simple_self_signed(vec!["wrong.local".to_string()])
+            .expect("wrong certificate");
+        let mut wrong_roots = rustls::RootCertStore::empty();
+        wrong_roots
+            .add(rustls::pki_types::CertificateDer::from(
+                wrong.cert.der().to_vec(),
+            ))
+            .expect("wrong root");
+        let result = connect_https_media_uri_with_roots(
+            &format!("https://localhost:{port}/media.mp4"),
+            MediaUriNetworkPolicy::AllowAny,
+            Duration::from_secs(2),
+            &wrong_roots,
+            |_| Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]),
+        );
+        assert!(matches!(result, Err(DlnaError::Invalid("TLS handshake"))));
+        handle.join().expect("fixture server");
+
+        let (port, certificate, handle) = tls_fixture();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("fixture root");
+        let result = connect_https_media_uri_with_roots(
+            &format!("https://127.0.0.1:{port}/media.mp4"),
+            MediaUriNetworkPolicy::AllowAny,
+            Duration::from_secs(2),
+            &roots,
+            |_| panic!("literal IP must not resolve"),
+        );
+        assert!(matches!(result, Err(DlnaError::Invalid("TLS handshake"))));
+        handle.join().expect("fixture server");
     }
 }
