@@ -577,6 +577,22 @@ struct NetworkRuntime {
     certificate_der: Vec<u8>,
 }
 
+/// Checks a verified FANP proof against the Rust-owned public trust registry.
+///
+/// The proof has already passed challenge/signature verification before this
+/// helper is called. A matching stable device id and derived fingerprint are
+/// required; malformed identities fail closed and remain on the explicit
+/// approval path.
+fn proof_matches_trusted_registry(registry: &TrustRegistry, proof: &PeerIdentityProof) -> bool {
+    let Ok(device_id) = DeviceId::try_from(proof.device_id.clone()) else {
+        return false;
+    };
+    let Ok(fingerprint) = DeviceFingerprint::from_public_key(&proof.public_key) else {
+        return false;
+    };
+    registry.is_trusted(&device_id, &fingerprint)
+}
+
 struct DiscoveryRuntime {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -653,6 +669,7 @@ impl NetworkRuntime {
             pairing_approval,
             PeerProofBridge::default(),
             false,
+            Arc::new(Mutex::new(TrustRegistry::default())),
         )
     }
 
@@ -662,6 +679,7 @@ impl NetworkRuntime {
         pairing_approval: Arc<AtomicBool>,
         peer_proof_bridge: PeerProofBridge,
         peer_proof_required: bool,
+        trusted_registry: Arc<Mutex<TrustRegistry>>,
     ) -> Result<Self, String> {
         let pairing_code = PairingCode::generate();
         let pairing_value = pairing_code
@@ -671,6 +689,7 @@ impl NetworkRuntime {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let peer_proof_bridge_thread = peer_proof_bridge.clone();
+        let trusted_registry_thread = Arc::clone(&trusted_registry);
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("frameark-fanp-receiver".to_string())
@@ -717,15 +736,27 @@ impl NetworkRuntime {
                 runtime.block_on(async move {
                     while !stop_thread.load(Ordering::Acquire) {
                         let pairing_approval = Arc::clone(&pairing_approval);
+                        let trusted_registry_attempt = Arc::clone(&trusted_registry_thread);
                         let accepted = tokio::time::timeout(Duration::from_millis(250), async {
                             if peer_proof_required {
                                 let bridge = peer_proof_bridge_thread.clone();
+                                let trusted_registry = Arc::clone(&trusted_registry_attempt);
                                 server
                                     .accept_pairing_with_peer_proof(
                                         NETWORK_OPERATION_TIMEOUT,
                                         move |proof| {
                                             let bridge = bridge.clone();
+                                            let trusted_registry = Arc::clone(&trusted_registry);
                                             async move {
+                                                if trusted_registry.lock().ok().is_some_and(
+                                                    |registry| {
+                                                        proof_matches_trusted_registry(
+                                                            &registry, &proof,
+                                                        )
+                                                    },
+                                                ) {
+                                                    return true;
+                                                }
                                                 let Some(request_id) = bridge.enqueue(&proof)
                                                 else {
                                                     return false;
@@ -1000,6 +1031,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
         Arc::clone(&state.pairing_approval),
         state.peer_proof_bridge.clone(),
         state.peer_proof_required,
+        Arc::new(Mutex::new(state.trust_registry.clone())),
     ) else {
         return -4;
     };
@@ -1405,6 +1437,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             bridge.clone(),
             true,
+            Arc::new(Mutex::new(TrustRegistry::default())),
         )
         .unwrap_or_else(|error| panic!("{error}"));
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
@@ -1413,7 +1446,7 @@ mod tests {
         let certificate = network.certificate_der.clone();
         let key_pair =
             ring::signature::Ed25519KeyPair::from_seed_unchecked(&[11_u8; 32]).expect("test key");
-        let public_key = key_pair
+        let public_key: [u8; 32] = key_pair
             .public_key()
             .as_ref()
             .try_into()
@@ -1461,6 +1494,102 @@ mod tests {
                 .await
                 .expect("proof client task")
                 .expect("proof accepted");
+            client.close();
+        });
+        network.stop();
+    }
+
+    #[test]
+    fn proof_policy_auto_accepts_only_an_exact_pretrusted_identity() {
+        let mut registry = TrustRegistry::new(2).expect("bounded registry");
+        let key = [17_u8; 32];
+        let device_id = DeviceId::try_from("trusted-sender").expect("valid device id");
+        registry
+            .trust_public_key(device_id.clone(), &key, "Trusted sender")
+            .expect("trust key");
+        let trusted = PeerIdentityProof {
+            device_id: device_id.to_string(),
+            public_key: key,
+            signature: [0_u8; 64],
+        };
+        assert!(proof_matches_trusted_registry(&registry, &trusted));
+
+        let rotated = PeerIdentityProof {
+            public_key: [18_u8; 32],
+            ..trusted.clone()
+        };
+        assert!(!proof_matches_trusted_registry(&registry, &rotated));
+        let renamed = PeerIdentityProof {
+            device_id: "other-sender".to_string(),
+            ..trusted
+        };
+        assert!(!proof_matches_trusted_registry(&registry, &renamed));
+    }
+
+    #[test]
+    fn proof_enabled_network_runtime_auto_accepts_pretrusted_peer() {
+        let _guard = test_guard();
+        let bridge = PeerProofBridge::default();
+        let key_pair =
+            ring::signature::Ed25519KeyPair::from_seed_unchecked(&[19_u8; 32]).expect("test key");
+        let public_key: [u8; 32] = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("ed25519 public key");
+        let mut registry = TrustRegistry::new(4).expect("bounded registry");
+        registry
+            .trust_public_key(
+                DeviceId::try_from("trusted-sender").expect("valid device id"),
+                &public_key,
+                "Trusted sender",
+            )
+            .expect("pre-enroll trusted sender");
+        let network = NetworkRuntime::start_with_approval_and_proof(
+            DeviceId::try_from("proof-receiver").expect("valid receiver identity"),
+            false,
+            Arc::new(AtomicBool::new(false)),
+            bridge.clone(),
+            true,
+            Arc::new(Mutex::new(registry)),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
+        let pairing = PairingCode::parse(format!("{:06}", network.pairing_code))
+            .expect("generated pairing code is six digits");
+        let certificate = network.certificate_der.clone();
+        std::thread::sleep(Duration::from_millis(50));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("proof runtime");
+        runtime.block_on(async {
+            let client_task = tokio::spawn(async move {
+                PairingClient::connect_with_identity(
+                    address,
+                    "localhost",
+                    &certificate,
+                    pairing,
+                    PeerIdentity {
+                        device_id: "trusted-sender".to_string(),
+                        public_key,
+                    },
+                    move |transcript| {
+                        let signature = key_pair.sign(transcript);
+                        let mut output = [0_u8; 64];
+                        output.copy_from_slice(signature.as_ref());
+                        Ok(output)
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+            });
+            let client = tokio::time::timeout(Duration::from_secs(5), client_task)
+                .await
+                .expect("trusted proof client timeout")
+                .expect("trusted proof client task")
+                .expect("trusted proof should be accepted");
+            assert!(bridge.pop().is_none());
             client.close();
         });
         network.stop();

@@ -59,6 +59,16 @@ request available for retry. The queue does not authenticate its inputs and is
 never persisted in FTR1, so a transport adapter must verify key possession
 before enqueueing a request and must keep its UI binding access-controlled.
 
+The optional FANP proof listener may take a startup snapshot of the Rust trust
+registry. After the fresh Ed25519 challenge is verified, an exact device-id and
+derived public-key fingerprint match is admitted without another prompt; a
+rotated key, renamed device, malformed identity, or missing record falls back
+to the bounded explicit-approval queue. Android trust mutations remain
+stopped-only, so revocation takes effect on the next receiver lifecycle rather
+than racing an active listener. This policy is reconnect admission, not Apple
+pairing, certificate pinning, or proof of a private key beyond the verified
+challenge.
+
 Capability offers are exchanged only after the pinned TLS handshake. The
 current schema requires an exact version match and rejects unknown or duplicate
 entries before allocation; it does not silently downgrade or authorize media,
