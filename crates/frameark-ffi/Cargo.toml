@@ -21,5 +21,8 @@ frameark-trust = { path = "../frameark-trust" }
 jni.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+ring.workspace = true
+
 [lints]
 workspace = true

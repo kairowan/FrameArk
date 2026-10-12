@@ -18,6 +18,7 @@ third-party sender has yet been included in a compatibility matrix.
 | Capability offer intersection | Pass; common capabilities are selected and exposed to core session mapping | `capability_intersection_advances_the_shared_core_session` |
 | Optional Ed25519 sender proof | Pass on loopback; a fresh challenge is signed, verified before capability negotiation, and exposed only on the temporary server session | `peer_identity_proof_is_challenge_bound_and_exposed_to_policy` |
 | No common capability | Pass; both peers report a negotiation rejection | `no_common_capability_is_rejected` |
+| Optional Rust→Android proof approval seam | Pass on loopback; proof mode verifies the sender in Rust, queues one bounded `FAPR` public-key event, waits for an explicit request-id decision, and only then accepts the FANP session | `frameark-ffi::proof_enabled_network_runtime_surfaces_verified_event_before_acceptance`, `FrameArkNativeTest` |
 | Malformed/oversized frame or capability payload | Parser rejects before payload interpretation | `frame_header_rejects_bad_magic_versions_and_lengths`, `malformed_and_duplicate_entries_are_rejected` |
 | Native Offer → Start → Status → Stop lifecycle | Pass on a fake backend; prepare/start/reset and core states are asserted | `frameark-native::native_control_reaches_prepare_start_status_and_stop` |
 | FAM1 video/audio media-frame round trip | Pass with bounded exact-boundary parser tests | `frameark-native::media_wire::video_round_trip_preserves_timestamps_and_keyframe`, `audio_round_trip_and_malformed_inputs_are_bounded` |

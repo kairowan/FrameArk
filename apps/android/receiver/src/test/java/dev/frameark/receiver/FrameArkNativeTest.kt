@@ -165,6 +165,52 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun decodes_bounded_rust_verified_peer_proof_event_and_forwards_decision() {
+        val deviceId = "sender-proof"
+        val requestId = 42L
+        val key = ByteArray(32) { it.toByte() }
+        val envelope = ByteBuffer.allocate(14 + deviceId.length + key.size)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put(byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'P'.code.toByte(), 'R'.code.toByte()))
+            .put(1)
+            .putLong(requestId)
+            .put(deviceId.length.toByte())
+            .put(deviceId.toByteArray())
+            .put(key)
+            .array()
+        var decision: Pair<Long, Boolean>? = null
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            peerProofRequiredProvider = { 0 },
+            pollPeerProofProvider = { envelope },
+            peerProofDecisionProvider = { id, approved -> decision = id to approved; 0 },
+        )
+
+        assertTrue(bridge.setPeerProofRequired(true))
+        val event = bridge.pollPeerProof()
+        assertEquals(requestId, event?.requestId)
+        assertEquals(deviceId, event?.peer?.deviceId)
+        assertEquals(key.toList(), event?.peer?.publicKey?.toList())
+        assertEquals("FANP sender proof", event?.peer?.label)
+        assertTrue(bridge.decidePeerProof(requestId, true))
+        assertEquals(requestId to true, decision)
+    }
+
+    @Test
+    fun rejects_malformed_peer_proof_event_and_invalid_decision_id() {
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            pollPeerProofProvider = { byteArrayOf('F'.code.toByte(), 'A'.code.toByte()) },
+            peerProofDecisionProvider = { _, _ -> 0 },
+        )
+
+        assertNull(bridge.pollPeerProof())
+        assertFalse(bridge.decidePeerProof(0, true))
+    }
+
+    @Test
     fun reports_a_loaded_matching_abi() {
         var requestedLibrary = ""
         val bridge = FrameArkNative(

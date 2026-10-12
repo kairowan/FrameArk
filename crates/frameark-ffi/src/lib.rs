@@ -7,7 +7,7 @@
 
 #![allow(unsafe_code)]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,7 +24,7 @@ use frameark_native::media_session::MediaSession;
 use frameark_native::{
     MediaRendererFactory, NativeMediaControlReceiver, ReceiverPolicy, SessionBackend, SessionOffer,
 };
-use frameark_transport::{PairingCode, PairingServer};
+use frameark_transport::{PairingCode, PairingServer, PeerIdentityProof};
 use frameark_trust::{DeviceFingerprint, TrustError, TrustRegistry};
 use jni::{
     JNIEnv,
@@ -36,12 +36,18 @@ use jni::{
 pub const MAX_JNI_MEDIA_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum encoded frames retained before the producer receives backpressure.
 pub const MAX_JNI_MEDIA_QUEUE_FRAMES: usize = 16;
+/// Maximum verified sender-proof requests retained across the JNI boundary.
+pub const MAX_JNI_PROOF_EVENTS: usize = 16;
 const MEDIA_FRAME_MAGIC: &[u8; 4] = b"FAMF";
 const MEDIA_FRAME_VERSION: u8 = 1;
 const MEDIA_KIND_VIDEO: u8 = 1;
 const MEDIA_KIND_AUDIO: u8 = 2;
 const MEDIA_CONFIG_MAGIC: &[u8; 4] = b"FAMC";
 const MEDIA_CONFIG_VERSION: u8 = 1;
+const PROOF_EVENT_MAGIC: &[u8; 4] = b"FAPR";
+const PROOF_EVENT_VERSION: u8 = 1;
+const PROOF_EVENT_HEADER_BYTES: usize = 14;
+const PROOF_DECISION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NETWORK_SERVER_NAME: &str = "frameark.local";
 const DISCOVERY_INSTANCE_NAME: &str = "FrameArk Receiver";
 const DISCOVERY_HOST_NAME: &str = "frameark.local.";
@@ -292,6 +298,73 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeApproveNe
     0
 }
 
+/// Enables or disables the optional Rust-verified sender-proof approval flow.
+/// Return values: 0 accepted while stopped, -2 active receiver, -3 lock
+/// failure. When enabled, the next network session requires a FANP Ed25519
+/// proof and exposes only a bounded public-key event to Android.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetPeerProofRequired(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    required: jboolean,
+) -> jint {
+    let Ok(mut state) = receiver_state().lock() else {
+        return -3;
+    };
+    if state.session.is_some() || state.network.is_some() {
+        return -2;
+    }
+    state.peer_proof_required = required != 0;
+    state.peer_proof_bridge.clear();
+    0
+}
+
+/// Polls one Rust-verified sender-proof event. The bounded `FAPR1` envelope
+/// contains only a request id, device id, and raw Ed25519 public key; proof
+/// signatures, addresses, pairing codes, and private material never cross JNI.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePollPeerProof(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jbyteArray {
+    let Some(event) = receiver_state()
+        .lock()
+        .ok()
+        .and_then(|state| state.peer_proof_bridge.pop())
+    else {
+        return std::ptr::null_mut();
+    };
+    env.byte_array_from_slice(&encode_peer_proof_event(&event))
+        .map(|array| array.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Resolves one proof request after Android has shown the copied public key to
+/// the user. Return values: 0 accepted, -2 unknown/expired request, -3 lock
+/// failure or malformed request id.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeDecidePeerProof(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    request_id: jlong,
+    approved: jboolean,
+) -> jint {
+    if request_id <= 0 {
+        return -3;
+    }
+    let Ok(state) = receiver_state().lock() else {
+        return -3;
+    };
+    if state
+        .peer_proof_bridge
+        .decide(request_id as u64, approved != 0)
+    {
+        0
+    } else {
+        -2
+    }
+}
+
 fn export_trust_snapshot(state: &NativeReceiverState) -> Option<Vec<u8>> {
     state.trust_registry.encode().ok()
 }
@@ -365,6 +438,119 @@ fn valid_identity_fingerprint(value: &str) -> bool {
         })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingPeerProof {
+    request_id: u64,
+    device_id: String,
+    public_key: [u8; 32],
+}
+
+#[derive(Default)]
+struct PeerProofBridgeState {
+    next_request_id: u64,
+    queued: VecDeque<PendingPeerProof>,
+    pending: BTreeMap<u64, PendingPeerProof>,
+    decisions: BTreeMap<u64, bool>,
+}
+
+#[derive(Clone, Default)]
+struct PeerProofBridge {
+    state: Arc<Mutex<PeerProofBridgeState>>,
+}
+
+impl PeerProofBridge {
+    fn enqueue(&self, proof: &PeerIdentityProof) -> Option<u64> {
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        if proof.device_id.is_empty()
+            || proof.device_id.len() > 128
+            || state.pending.len() >= MAX_JNI_PROOF_EVENTS
+            || state
+                .pending
+                .values()
+                .any(|pending| pending.device_id == proof.device_id)
+            || state
+                .queued
+                .iter()
+                .any(|pending| pending.device_id == proof.device_id)
+        {
+            return None;
+        }
+        state.next_request_id = state.next_request_id.wrapping_add(1).max(1);
+        let event = PendingPeerProof {
+            request_id: state.next_request_id,
+            device_id: proof.device_id.clone(),
+            public_key: proof.public_key,
+        };
+        state.pending.insert(event.request_id, event.clone());
+        state.queued.push_back(event.clone());
+        Some(event.request_id)
+    }
+
+    fn pop(&self) -> Option<PendingPeerProof> {
+        self.state.lock().ok()?.queued.pop_front()
+    }
+
+    fn decide(&self, request_id: u64, approved: bool) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.pending.contains_key(&request_id) {
+            return false;
+        }
+        state.decisions.insert(request_id, approved);
+        true
+    }
+
+    async fn wait_for_decision(&self, request_id: u64, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(decision) = state.decisions.remove(&request_id) {
+                    state.pending.remove(&request_id);
+                    return decision;
+                }
+            } else {
+                return false;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.remove(request_id);
+                return false;
+            }
+            tokio::time::sleep(PROOF_DECISION_POLL_INTERVAL).await;
+        }
+    }
+
+    fn remove(&self, request_id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pending.remove(&request_id);
+            state.decisions.remove(&request_id);
+            state.queued.retain(|event| event.request_id != request_id);
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.queued.clear();
+            state.pending.clear();
+            state.decisions.clear();
+        }
+    }
+}
+
+fn encode_peer_proof_event(event: &PendingPeerProof) -> Vec<u8> {
+    let device_id = event.device_id.as_bytes();
+    let mut encoded = Vec::with_capacity(PROOF_EVENT_HEADER_BYTES + device_id.len() + 32);
+    encoded.extend_from_slice(PROOF_EVENT_MAGIC);
+    encoded.push(PROOF_EVENT_VERSION);
+    encoded.extend_from_slice(&event.request_id.to_be_bytes());
+    encoded.push(device_id.len() as u8);
+    encoded.extend_from_slice(device_id);
+    encoded.extend_from_slice(&event.public_key);
+    encoded
+}
+
 #[derive(Default)]
 struct NativeReceiverState {
     session: Option<Session>,
@@ -377,6 +563,8 @@ struct NativeReceiverState {
     trust_registry: TrustRegistry,
     pairing_approval_required: bool,
     pairing_approval: Arc<AtomicBool>,
+    peer_proof_required: bool,
+    peer_proof_bridge: PeerProofBridge,
     network: Option<NetworkRuntime>,
 }
 
@@ -453,10 +641,27 @@ fn unregister_discovery(registration: PublishedRegistration, discovery: MdnsDisc
 }
 
 impl NetworkRuntime {
+    #[cfg(test)]
     fn start_with_approval(
         device_id: DeviceId,
         approval_required: bool,
         pairing_approval: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::start_with_approval_and_proof(
+            device_id,
+            approval_required,
+            pairing_approval,
+            PeerProofBridge::default(),
+            false,
+        )
+    }
+
+    fn start_with_approval_and_proof(
+        device_id: DeviceId,
+        approval_required: bool,
+        pairing_approval: Arc<AtomicBool>,
+        peer_proof_bridge: PeerProofBridge,
+        peer_proof_required: bool,
     ) -> Result<Self, String> {
         let pairing_code = PairingCode::generate();
         let pairing_value = pairing_code
@@ -465,6 +670,7 @@ impl NetworkRuntime {
             .map_err(|_| "FANP pairing code".to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let peer_proof_bridge_thread = peer_proof_bridge.clone();
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("frameark-fanp-receiver".to_string())
@@ -511,16 +717,41 @@ impl NetworkRuntime {
                 runtime.block_on(async move {
                     while !stop_thread.load(Ordering::Acquire) {
                         let pairing_approval = Arc::clone(&pairing_approval);
-                        let accepted = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            server.accept_pairing_with_approval(
-                                NETWORK_OPERATION_TIMEOUT,
-                                move |_| async move {
-                                    !approval_required
-                                        || pairing_approval.swap(false, Ordering::AcqRel)
-                                },
-                            ),
-                        )
+                        let accepted = tokio::time::timeout(Duration::from_millis(250), async {
+                            if peer_proof_required {
+                                let bridge = peer_proof_bridge_thread.clone();
+                                server
+                                    .accept_pairing_with_peer_proof(
+                                        NETWORK_OPERATION_TIMEOUT,
+                                        move |proof| {
+                                            let bridge = bridge.clone();
+                                            async move {
+                                                let Some(request_id) = bridge.enqueue(&proof)
+                                                else {
+                                                    return false;
+                                                };
+                                                bridge
+                                                    .wait_for_decision(
+                                                        request_id,
+                                                        NETWORK_OPERATION_TIMEOUT,
+                                                    )
+                                                    .await
+                                            }
+                                        },
+                                    )
+                                    .await
+                            } else {
+                                server
+                                    .accept_pairing_with_approval(
+                                        NETWORK_OPERATION_TIMEOUT,
+                                        move |_| async move {
+                                            !approval_required
+                                                || pairing_approval.swap(false, Ordering::AcqRel)
+                                        },
+                                    )
+                                    .await
+                            }
+                        })
                         .await;
                         let transport = match accepted {
                             Ok(Ok(transport)) => transport,
@@ -762,10 +993,13 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
         Ok(session) => session,
         Err(code) => return code,
     };
-    let Ok(network) = NetworkRuntime::start_with_approval(
+    state.peer_proof_bridge.clear();
+    let Ok(network) = NetworkRuntime::start_with_approval_and_proof(
         session.device_id().clone(),
         state.pairing_approval_required,
         Arc::clone(&state.pairing_approval),
+        state.peer_proof_bridge.clone(),
+        state.peer_proof_required,
     ) else {
         return -4;
     };
@@ -792,6 +1026,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStopRecei
     state.media_queue.clear();
     state.video_config = None;
     state.audio_config = None;
+    state.peer_proof_bridge.clear();
     let network = state.network.take();
     let transition_failed = session.transition(SessionState::Closed).is_err();
     drop(state);
@@ -1073,7 +1308,8 @@ mod tests {
     };
     use frameark_media::{AudioPacket, MediaPacket, MediaTimestamp, VideoFrame};
     use frameark_native::{NativeSender, media_wire};
-    use frameark_transport::{PairingClient, PairingCode};
+    use frameark_transport::{PairingClient, PairingCode, PeerIdentity};
+    use ring::signature::KeyPair;
 
     use super::*;
 
@@ -1098,6 +1334,136 @@ mod tests {
         assert!(!valid_identity_fingerprint(
             "ab-cd-ef-01-23-45-67-89-ab-cd-ef-01-23-45-67-89-ab-cd-ef-01-23-45-67-89-ab-cd-ef-01-23-45-67-89"
         ));
+    }
+
+    #[test]
+    fn peer_proof_bridge_bounds_events_and_keeps_public_key_only() {
+        let bridge = PeerProofBridge::default();
+        let proof = PeerIdentityProof {
+            device_id: "sender-proof".to_string(),
+            public_key: [7_u8; 32],
+            signature: [9_u8; 64],
+        };
+        let request_id = bridge.enqueue(&proof).expect("proof request queued");
+        let event = bridge.pop().expect("proof event available");
+        assert_eq!(event.request_id, request_id);
+        assert_eq!(event.device_id, proof.device_id);
+        assert_eq!(event.public_key, proof.public_key);
+        assert_eq!(
+            encode_peer_proof_event(&event).len(),
+            14 + proof.device_id.len() + 32
+        );
+        assert!(!bridge.decide(request_id + 1, true));
+        assert!(bridge.decide(request_id, false));
+        bridge.clear();
+
+        for index in 0..MAX_JNI_PROOF_EVENTS {
+            let proof = PeerIdentityProof {
+                device_id: format!("sender-{index}"),
+                public_key: [index as u8; 32],
+                signature: [0_u8; 64],
+            };
+            assert!(bridge.enqueue(&proof).is_some());
+        }
+        let overflow = PeerIdentityProof {
+            device_id: "sender-overflow".to_string(),
+            public_key: [1_u8; 32],
+            signature: [0_u8; 64],
+        };
+        assert!(bridge.enqueue(&overflow).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_proof_bridge_waits_for_android_decision() {
+        let bridge = PeerProofBridge::default();
+        let proof = PeerIdentityProof {
+            device_id: "sender-approval".to_string(),
+            public_key: [3_u8; 32],
+            signature: [0_u8; 64],
+        };
+        let request_id = bridge.enqueue(&proof).expect("proof request queued");
+        let waiter = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .wait_for_decision(request_id, Duration::from_secs(1))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(bridge.decide(request_id, true));
+        assert!(waiter.await.expect("proof waiter"));
+    }
+
+    #[test]
+    fn proof_enabled_network_runtime_surfaces_verified_event_before_acceptance() {
+        let _guard = test_guard();
+        let bridge = PeerProofBridge::default();
+        let network = NetworkRuntime::start_with_approval_and_proof(
+            DeviceId::try_from("proof-receiver").expect("valid receiver identity"),
+            false,
+            Arc::new(AtomicBool::new(false)),
+            bridge.clone(),
+            true,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), network.port);
+        let pairing = PairingCode::parse(format!("{:06}", network.pairing_code))
+            .expect("generated pairing code is six digits");
+        let certificate = network.certificate_der.clone();
+        let key_pair =
+            ring::signature::Ed25519KeyPair::from_seed_unchecked(&[11_u8; 32]).expect("test key");
+        let public_key = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("ed25519 public key");
+        std::thread::sleep(Duration::from_millis(50));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("proof runtime");
+        runtime.block_on(async {
+            let client_task = tokio::spawn(async move {
+                PairingClient::connect_with_identity(
+                    address,
+                    "localhost",
+                    &certificate,
+                    pairing,
+                    PeerIdentity {
+                        device_id: "proof-sender".to_string(),
+                        public_key,
+                    },
+                    move |transcript| {
+                        let signature = key_pair.sign(transcript);
+                        let mut output = [0_u8; 64];
+                        output.copy_from_slice(signature.as_ref());
+                        Ok(output)
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+            });
+            let event = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(event) = bridge.pop() {
+                        break event;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("proof event timeout");
+            assert_eq!(event.device_id, "proof-sender");
+            assert_eq!(event.public_key, public_key);
+            assert!(bridge.decide(event.request_id, true));
+            let client = client_task
+                .await
+                .expect("proof client task")
+                .expect("proof accepted");
+            client.close();
+        });
+        network.stop();
     }
 
     #[test]
@@ -1598,6 +1964,8 @@ mod tests {
             trust_registry: TrustRegistry::default(),
             pairing_approval_required: false,
             pairing_approval: Arc::new(AtomicBool::new(false)),
+            peer_proof_required: false,
+            peer_proof_bridge: PeerProofBridge::default(),
             network: None,
         };
         assert_eq!(
