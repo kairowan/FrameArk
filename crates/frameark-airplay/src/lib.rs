@@ -1950,6 +1950,156 @@ pub enum PlistValue {
     Dictionary(BTreeMap<String, Self>),
 }
 
+/// Transport used by a screen-mirroring session before the bounded RTP layer.
+///
+/// The protocol crate does not discover or establish these transports. The
+/// caller supplies the observed transport so the admission decision can be
+/// explicit instead of silently falling through to an unsupported path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorTransportKind {
+    /// A caller-owned IP socket path (for example, a local network TCP/UDP path).
+    Ip,
+    /// Apple Wireless Direct Link, which requires a platform-specific adapter.
+    AwDl,
+    /// A transport that has not been classified by the caller.
+    Unknown,
+}
+
+/// Content-protection state observed for a mirror stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorContentProtection {
+    /// No content protection was negotiated or observed.
+    Clear,
+    /// FairPlay-protected content, which this project does not decrypt.
+    FairPlay,
+    /// A different DRM scheme, including an unknown encrypted payload.
+    Drm,
+    /// Protection was reported but could not be classified safely.
+    UnknownProtected,
+}
+
+/// Pairing/identity state supplied by the caller-owned authorization layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorPairingState {
+    /// The caller has completed its authorization and identity checks.
+    Verified,
+    /// The peer still requires pairing or approval.
+    Required,
+    /// The peer was observed without a verifiable pairing result.
+    Unverified,
+}
+
+/// Inputs used to produce a redaction-safe mirror capability decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorCompatibilityInput {
+    /// Transport classified by the caller-owned network adapter.
+    pub transport: MirrorTransportKind,
+    /// Content-protection state classified by the caller-owned session layer.
+    pub protection: MirrorContentProtection,
+    /// Pairing state from the caller-owned authorization layer.
+    pub pairing: MirrorPairingState,
+}
+
+/// Explicit admission result for the experimental mirror implementation.
+///
+/// `ExperimentalClearIp` means only that the bounded, unencrypted IP protocol
+/// contracts may be used after caller policy checks. It does not claim Apple
+/// pairing, decoder output, or device interoperability. Every other result is
+/// an intentional boundary and must be surfaced to the user or diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirrorCompatibilityDecision {
+    /// Continue with the bounded clear-IP contracts under caller supervision.
+    ExperimentalClearIp,
+    /// AWDL needs a platform-owned adapter and is not handled by this crate.
+    ConditionalAwDl,
+    /// FairPlay payloads are outside the implementation boundary.
+    UnsupportedFairPlay,
+    /// Other or unknown protected payloads are outside the implementation boundary.
+    UnsupportedDrm,
+    /// Pairing/identity verification must happen before mirror admission.
+    UnsupportedApplePairing,
+    /// The transport is not one of the bounded paths understood by the crate.
+    UnsupportedTransport,
+}
+
+impl MirrorCompatibilityDecision {
+    /// Stable, redaction-safe code suitable for diagnostics and support logs.
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::ExperimentalClearIp => "mirror.experimental_clear_ip",
+            Self::ConditionalAwDl => "mirror.conditional_awdl",
+            Self::UnsupportedFairPlay => "mirror.unsupported_fairplay",
+            Self::UnsupportedDrm => "mirror.unsupported_drm",
+            Self::UnsupportedApplePairing => "mirror.unsupported_pairing",
+            Self::UnsupportedTransport => "mirror.unsupported_transport",
+        }
+    }
+
+    /// Stable user-facing explanation that contains no peer or media identity.
+    pub const fn user_message(self) -> &'static str {
+        match self {
+            Self::ExperimentalClearIp => {
+                "Experimental clear-IP mirroring may proceed under caller authorization"
+            }
+            Self::ConditionalAwDl => {
+                "AWDL mirroring requires a platform adapter and is not handled here"
+            }
+            Self::UnsupportedFairPlay => "FairPlay-protected mirroring is not supported",
+            Self::UnsupportedDrm => "DRM-protected mirroring is not supported",
+            Self::UnsupportedApplePairing => "Apple pairing or peer verification is required",
+            Self::UnsupportedTransport => "The mirror transport is not supported",
+        }
+    }
+}
+
+/// Redaction-safe report for mirror admission and compatibility diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorCompatibilityReport {
+    decision: MirrorCompatibilityDecision,
+}
+
+impl MirrorCompatibilityReport {
+    /// Classifies a mirror request without inspecting or retaining peer/media identifiers.
+    pub const fn assess(input: MirrorCompatibilityInput) -> Self {
+        let decision = match input.pairing {
+            MirrorPairingState::Required | MirrorPairingState::Unverified => {
+                MirrorCompatibilityDecision::UnsupportedApplePairing
+            }
+            MirrorPairingState::Verified => match input.protection {
+                MirrorContentProtection::FairPlay => {
+                    MirrorCompatibilityDecision::UnsupportedFairPlay
+                }
+                MirrorContentProtection::Drm | MirrorContentProtection::UnknownProtected => {
+                    MirrorCompatibilityDecision::UnsupportedDrm
+                }
+                MirrorContentProtection::Clear => match input.transport {
+                    MirrorTransportKind::Ip => MirrorCompatibilityDecision::ExperimentalClearIp,
+                    MirrorTransportKind::AwDl => MirrorCompatibilityDecision::ConditionalAwDl,
+                    MirrorTransportKind::Unknown => {
+                        MirrorCompatibilityDecision::UnsupportedTransport
+                    }
+                },
+            },
+        };
+        Self { decision }
+    }
+
+    /// Returns the explicit admission decision.
+    pub const fn decision(self) -> MirrorCompatibilityDecision {
+        self.decision
+    }
+
+    /// Returns the stable diagnostics code for the decision.
+    pub const fn reason_code(self) -> &'static str {
+        self.decision.reason_code()
+    }
+
+    /// Returns a stable, redaction-safe user-facing message.
+    pub const fn user_message(self) -> &'static str {
+        self.decision.user_message()
+    }
+}
+
 /// Screen orientation signaled by a mirror session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirrorOrientation {
@@ -5162,6 +5312,88 @@ mod tests {
             MirrorOrientation::Deg180
         );
         assert!(MirrorOrientation::try_from(45).is_err());
+    }
+
+    #[test]
+    fn mirror_compatibility_report_explains_supported_clear_ip_boundary() {
+        let report = MirrorCompatibilityReport::assess(MirrorCompatibilityInput {
+            transport: MirrorTransportKind::Ip,
+            protection: MirrorContentProtection::Clear,
+            pairing: MirrorPairingState::Verified,
+        });
+
+        assert_eq!(
+            report.decision(),
+            MirrorCompatibilityDecision::ExperimentalClearIp
+        );
+        assert_eq!(report.reason_code(), "mirror.experimental_clear_ip");
+        assert!(report.user_message().contains("clear-IP"));
+    }
+
+    #[test]
+    fn mirror_compatibility_report_rejects_protection_pairing_and_unknown_transport() {
+        let cases = [
+            (
+                MirrorContentProtection::FairPlay,
+                MirrorTransportKind::Ip,
+                MirrorPairingState::Verified,
+                MirrorCompatibilityDecision::UnsupportedFairPlay,
+                "mirror.unsupported_fairplay",
+            ),
+            (
+                MirrorContentProtection::Drm,
+                MirrorTransportKind::Ip,
+                MirrorPairingState::Verified,
+                MirrorCompatibilityDecision::UnsupportedDrm,
+                "mirror.unsupported_drm",
+            ),
+            (
+                MirrorContentProtection::UnknownProtected,
+                MirrorTransportKind::Ip,
+                MirrorPairingState::Verified,
+                MirrorCompatibilityDecision::UnsupportedDrm,
+                "mirror.unsupported_drm",
+            ),
+            (
+                MirrorContentProtection::Clear,
+                MirrorTransportKind::AwDl,
+                MirrorPairingState::Verified,
+                MirrorCompatibilityDecision::ConditionalAwDl,
+                "mirror.conditional_awdl",
+            ),
+            (
+                MirrorContentProtection::Clear,
+                MirrorTransportKind::Unknown,
+                MirrorPairingState::Verified,
+                MirrorCompatibilityDecision::UnsupportedTransport,
+                "mirror.unsupported_transport",
+            ),
+            (
+                MirrorContentProtection::Clear,
+                MirrorTransportKind::Ip,
+                MirrorPairingState::Required,
+                MirrorCompatibilityDecision::UnsupportedApplePairing,
+                "mirror.unsupported_pairing",
+            ),
+            (
+                MirrorContentProtection::FairPlay,
+                MirrorTransportKind::AwDl,
+                MirrorPairingState::Unverified,
+                MirrorCompatibilityDecision::UnsupportedApplePairing,
+                "mirror.unsupported_pairing",
+            ),
+        ];
+
+        for (protection, transport, pairing, expected, code) in cases {
+            let report = MirrorCompatibilityReport::assess(MirrorCompatibilityInput {
+                transport,
+                protection,
+                pairing,
+            });
+            assert_eq!(report.decision(), expected);
+            assert_eq!(report.reason_code(), code);
+            assert!(!report.user_message().contains("rtsp://"));
+        }
     }
 
     #[test]
