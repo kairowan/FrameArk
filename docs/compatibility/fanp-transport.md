@@ -84,10 +84,11 @@ metadata generation, GENA subscription/event policy, callback notification,
 and a sequential request-batch accept loop.
 
 It does not yet join multicast groups, run a concurrent production scheduler,
-provide HTTPS/TLS, validate full DIDL-Lite metadata, fetch URLs, or claim
-named-client DLNA interoperability. Chunked HTTP,
-multiple or unsatisfiable ranges, and unsupported URL schemes are rejected
-before state mutation.
+provide built-in HTTPS/TLS, validate full DIDL-Lite metadata, inspect a
+decoder, or claim named-client DLNA interoperability. Caller-owned known-length
+URL streaming now schedules bounded contiguous `206 Content-Range` chunks;
+chunked HTTP, redirects, multiple or unsatisfiable ranges, unknown-length
+resources, and unsupported URL schemes are rejected before state mutation.
 
 The experimental `frameark-airplay` crate provides bounded RTSP/1.0 and strict
 RTP audio packet contracts, XML Property List metadata, plus an explicit ANNOUNCE SDP and

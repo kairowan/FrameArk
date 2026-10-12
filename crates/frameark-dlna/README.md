@@ -32,6 +32,9 @@ DLNA/UPnP MediaRenderer work.
 - a caller-injected bounded remote media range fetch that validates DNS/network
   policy, requires a matching `206 Content-Range` for requested chunks, rejects
   redirects and range-ignoring origins, and returns at most one bounded body;
+- a caller-injected bounded remote media range stream that schedules exact
+  inclusive chunks up to a 512 MiB resource/4096-request budget without
+  buffering the complete object;
 - explicit transport, position, URI, metadata, and volume state with cleanup
   left to the caller-owned connection/session lifecycle.
 - a caller-injected, bounded DNS-aware media URI policy for public-only or
@@ -56,7 +59,7 @@ unbracketed IPv6 authorities. FrameArk does not fetch URLs or bypass DRM.
 
 HTTP chunked transfer, callback connection retries and built-in HTTPS/TLS, full
 DIDL-Lite parsing,
-multicast lease scheduling, network URL fetching, real decoder integration,
+multicast lease scheduling, built-in network URL fetching, real decoder integration,
 and named client interoperability are not implemented yet. File streaming is
 opt-in: a daemon must explicitly register a regular file and still provide
 authorization, lifecycle, and media format policy. The TCP adapter is
@@ -71,11 +74,12 @@ client but does not open callback sockets or retry failures.
 `send_gena_callback_with_connector` reuses the bounded request and response
 parser with a vetted TLS stream, but does not implement TLS or prove peer
 authentication. `MediaFormatProbe` is metadata-only. The
-`fetch_media_range_with_connector` helper adds one bounded range request for a
-caller-owned playback pipeline, but it does not provide unbounded URL
-streaming, follow redirects, inspect a decoder, or override authorization and
-DNS policy. The caller must schedule additional ranges and own cancellation,
-TLS, authentication, buffering, and output.
+`fetch_media_range_with_connector` adds one bounded range request and
+`stream_media_ranges_with_connector` schedules a known-length sequence of
+bounded ranges. Neither follows redirects, implements TLS, authenticates an
+origin, inspects a decoder, or overrides authorization and DNS policy. The
+caller owns cancellation, connector security, buffering, and output; unknown
+resource lengths are rejected rather than fetched until exhaustion.
 `GenaCallbackClient` supplies plain-HTTP socket I/O. Subscriptions expire on
 monotonic deadlines; subscribe, renew, publish, request handling, and event
 draining reap stale records. An optional host timer can call
