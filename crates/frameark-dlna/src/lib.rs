@@ -62,6 +62,10 @@ pub const MAX_MEDIA_FORMAT_FIELD_BYTES: usize = 256;
 /// this helper deliberately never turns an untrusted URL into an unbounded
 /// in-memory download.
 pub const MAX_MEDIA_FETCH_BYTES: usize = MAX_HTTP_BYTES - 4096;
+/// Maximum total bytes one caller-owned remote media stream may request.
+pub const MAX_MEDIA_STREAM_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum range requests in one caller-owned remote media stream.
+pub const MAX_MEDIA_STREAM_CHUNKS: u64 = 4096;
 
 /// Standard UPnP service type used by the renderer control plane.
 pub const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
@@ -1577,6 +1581,17 @@ pub struct MediaFetchChunk {
     pub body: Vec<u8>,
 }
 
+/// Bounded options for one known-length remote media range stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MediaRangeStreamOptions {
+    /// Exact resource length supplied by the caller or a prior probe.
+    pub total_bytes: u64,
+    /// Inclusive range size for each connector request.
+    pub chunk_bytes: u64,
+    /// Timeout applied to each connector request.
+    pub timeout: Duration,
+}
+
 /// Fetches one bounded media chunk through a caller-owned connector.
 ///
 /// `range` is an inclusive byte range. When supplied, the origin must return
@@ -1612,12 +1627,27 @@ where
     }
     validate_media_uri_network(uri, network_policy, resolve)?;
     let (scheme, authority, target) = split_media_uri(uri)?;
+    fetch_media_range_parts(&scheme, &authority, &target, range, timeout, connector)
+}
+
+fn fetch_media_range_parts<F, S>(
+    scheme: &str,
+    authority: &str,
+    target: &str,
+    range: Option<ByteRange>,
+    timeout: Duration,
+    connector: F,
+) -> Result<MediaFetchChunk, DlnaError>
+where
+    F: FnOnce(&str, &str, &str, Duration) -> Result<S, DlnaError>,
+    S: Read + Write,
+{
     let range_header = range.map(|value| format!("Range: bytes={}-{}\r\n", value.start, value.end));
     let request = format!(
         "GET {target} HTTP/1.1\r\nAccept: */*\r\n{}Host: {authority}\r\nConnection: close\r\n\r\n",
         range_header.as_deref().unwrap_or_default()
     );
-    let mut stream = connector(&scheme, &authority, &target, timeout)?;
+    let mut stream = connector(scheme, authority, target, timeout)?;
     stream
         .write_all(request.as_bytes())
         .and_then(|_| stream.flush())
@@ -1657,6 +1687,70 @@ where
         content_range,
         body: response.body,
     })
+}
+
+/// Streams a bounded remote media resource as exact inclusive HTTP ranges.
+///
+/// The caller supplies the known resource length and a connector that owns DNS,
+/// TLS verification, socket timeouts, authentication, and connection reuse.
+/// Each response must be `206 Partial Content` with an exact matching
+/// `Content-Range`; redirects and origins that ignore ranges are rejected. The
+/// protocol crate never buffers more than one bounded chunk at a time.
+pub fn stream_media_ranges_with_connector<R, F, S, C>(
+    uri: &str,
+    network_policy: MediaUriNetworkPolicy,
+    resolve: R,
+    options: MediaRangeStreamOptions,
+    mut connector: C,
+    mut consume: F,
+) -> Result<u64, DlnaError>
+where
+    R: FnOnce(&str) -> Result<Vec<IpAddr>, DlnaError>,
+    F: FnMut(MediaFetchChunk) -> Result<(), DlnaError>,
+    C: FnMut(&str, &str, &str, Duration) -> Result<S, DlnaError>,
+    S: Read + Write,
+{
+    if options.timeout.is_zero() {
+        return Err(DlnaError::Invalid("media stream timeout"));
+    }
+    if options.total_bytes == 0 || options.total_bytes > MAX_MEDIA_STREAM_TOTAL_BYTES {
+        return Err(DlnaError::TooLarge("media stream length"));
+    }
+    if options.chunk_bytes == 0 || options.chunk_bytes > MAX_MEDIA_FETCH_BYTES as u64 {
+        return Err(DlnaError::TooLarge("media stream chunk"));
+    }
+    let chunk_count = options.total_bytes.div_ceil(options.chunk_bytes);
+    if chunk_count > MAX_MEDIA_STREAM_CHUNKS {
+        return Err(DlnaError::TooLarge("media stream chunks"));
+    }
+    validate_media_uri_network(uri, network_policy, resolve)?;
+    let (scheme, authority, target) = split_media_uri(uri)?;
+    let mut consumed = 0_u64;
+    for start_u64 in (0..options.total_bytes).step_by(options.chunk_bytes as usize) {
+        let end_u64 = start_u64
+            .saturating_add(options.chunk_bytes.saturating_sub(1))
+            .min(options.total_bytes.saturating_sub(1));
+        let start =
+            usize::try_from(start_u64).map_err(|_| DlnaError::TooLarge("media stream range"))?;
+        let end =
+            usize::try_from(end_u64).map_err(|_| DlnaError::TooLarge("media stream range"))?;
+        let chunk = fetch_media_range_parts(
+            &scheme,
+            &authority,
+            &target,
+            Some(ByteRange { start, end }),
+            options.timeout,
+            &mut connector,
+        )?;
+        consumed = consumed
+            .checked_add(chunk.body.len() as u64)
+            .ok_or(DlnaError::TooLarge("media stream length"))?;
+        consume(chunk)?;
+    }
+    if consumed != options.total_bytes {
+        return Err(DlnaError::Invalid("media stream byte count"));
+    }
+    Ok(consumed)
 }
 
 impl MediaFormatProbe {
@@ -4385,6 +4479,72 @@ mod tests {
             },
         );
         assert_eq!(result, Err(DlnaError::TooLarge("media fetch range")));
+        assert!(!called.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn media_range_stream_requests_exact_chunks_without_redirects_or_full_buffering() {
+        let responses = vec![
+            b"HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/8\r\n\r\nABCD".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nContent-Range: bytes 4-7/8\r\n\r\nEFGH".to_vec(),
+        ];
+        let request = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_sink = std::sync::Arc::clone(&request);
+        let mut responses = responses.into_iter();
+        let mut body = Vec::new();
+        let streamed = stream_media_ranges_with_connector(
+            "https://media.example.test/video.mp4",
+            MediaUriNetworkPolicy::PublicNetworkOnly,
+            |_host| Ok(vec!["93.184.216.34".parse().unwrap()]),
+            MediaRangeStreamOptions {
+                total_bytes: 8,
+                chunk_bytes: 4,
+                timeout: Duration::from_secs(2),
+            },
+            move |_scheme, _authority, _target, _timeout| {
+                Ok(CaptureScriptStream {
+                    response: std::io::Cursor::new(responses.next().unwrap()),
+                    request: std::sync::Arc::clone(&request_sink),
+                })
+            },
+            |chunk| {
+                body.extend_from_slice(&chunk.body);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(streamed, 8);
+        assert_eq!(body, b"ABCDEFGH");
+        let request = String::from_utf8(request.lock().unwrap().clone()).unwrap();
+        assert!(request.contains("Range: bytes=0-3\r\n"));
+        assert!(request.contains("Range: bytes=4-7\r\n"));
+        assert_eq!(MAX_MEDIA_STREAM_TOTAL_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_MEDIA_STREAM_CHUNKS, 4096);
+    }
+
+    #[test]
+    fn media_range_stream_rejects_unbounded_lengths_before_connecting() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = std::sync::Arc::clone(&called);
+        let result = stream_media_ranges_with_connector(
+            "http://media.example.test/video.mp4",
+            MediaUriNetworkPolicy::AllowAny,
+            |_host| Ok(vec!["192.0.2.10".parse().unwrap()]),
+            MediaRangeStreamOptions {
+                total_bytes: MAX_MEDIA_STREAM_TOTAL_BYTES + 1,
+                chunk_bytes: 1024,
+                timeout: Duration::from_secs(1),
+            },
+            move |_scheme, _authority, _target, _timeout| {
+                marker.store(true, std::sync::atomic::Ordering::Release);
+                Ok(ProbeScriptStream {
+                    response: std::io::Cursor::new(Vec::new()),
+                    request: Vec::new(),
+                })
+            },
+            |_chunk| Ok(()),
+        );
+        assert_eq!(result, Err(DlnaError::TooLarge("media stream length")));
         assert!(!called.load(std::sync::atomic::Ordering::Acquire));
     }
 
