@@ -4673,6 +4673,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_parser_fuzz_smoke_rejects_or_parses_without_panicking() {
+        let mut state = 0x6d2b_79f5_u32;
+        for _ in 0..512 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let length = (state as usize % 2048).min(MAX_RTSP_BYTES);
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            let _ = RtspMessage::parse(&bytes);
+            let _ = RtpAudioPacket::parse(&bytes);
+            let _ = HlsMediaPlaylist::parse(&bytes);
+            let _ = parse_xml_plist(&bytes);
+            let _ = parse_binary_plist(&bytes);
+        }
+    }
+
+    #[test]
     fn redacted_replay_trace_bounds_and_evicts_without_payloads() {
         assert!(matches!(
             AirplayReplayTrace::new(0),
