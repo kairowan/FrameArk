@@ -740,6 +740,78 @@ pub enum RaopCodec {
     Aac,
 }
 
+/// Protection attributes observed in a bounded RAOP ANNOUNCE SDP body.
+///
+/// The classifier records only the presence of protection attributes; it never
+/// copies keys, IVs, or other protected values. A clear result is still an
+/// experimental unencrypted contract, not a claim of Apple interoperability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RaopEncryptionStatus {
+    /// No recognized protection attribute was present.
+    Clear,
+    /// RAOP AES-CTR attributes (`rsaaeskey`/`aesiv`) were present.
+    AesCtr,
+    /// Another or unknown protection attribute was present.
+    OtherProtected,
+}
+
+impl RaopEncryptionStatus {
+    /// Stable redaction-safe diagnostics code.
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::Clear => "raop.experimental_clear",
+            Self::AesCtr => "raop.unsupported_aes_ctr",
+            Self::OtherProtected => "raop.unsupported_protection",
+        }
+    }
+
+    /// Stable user-facing explanation without SDP values or peer identity.
+    pub const fn user_message(self) -> &'static str {
+        match self {
+            Self::Clear => "Experimental unencrypted RAOP media may proceed",
+            Self::AesCtr => "RAOP AES-CTR media is not supported",
+            Self::OtherProtected => "Protected RAOP media is not supported",
+        }
+    }
+}
+
+/// Classifies RAOP protection attributes without retaining key or IV material.
+pub fn classify_raop_encryption(body: &[u8]) -> Result<RaopEncryptionStatus, AirplayError> {
+    if body.is_empty() || body.len() > MAX_SDP_BYTES {
+        return Err(AirplayError::TooLarge("SDP body"));
+    }
+    let text = std::str::from_utf8(body).map_err(|_| AirplayError::Invalid("SDP UTF-8"))?;
+    let mut lines = 0usize;
+    let mut aes_ctr = false;
+    let mut other_protection = false;
+    for line in text.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+        lines = lines.saturating_add(1);
+        if lines > MAX_SDP_LINES || line.len() > 2048 || !line.contains('=') {
+            return Err(if lines > MAX_SDP_LINES {
+                AirplayError::TooLarge("SDP lines")
+            } else {
+                AirplayError::Invalid("SDP line")
+            });
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("a=rsaaeskey:") || lower.starts_with("a=aesiv:") {
+            aes_ctr = true;
+        } else if lower.starts_with("a=crypto:")
+            || lower.starts_with("a=encryption:")
+            || lower.starts_with("a=fairplay:")
+        {
+            other_protection = true;
+        }
+    }
+    Ok(if aes_ctr {
+        RaopEncryptionStatus::AesCtr
+    } else if other_protection {
+        RaopEncryptionStatus::OtherProtected
+    } else {
+        RaopEncryptionStatus::Clear
+    })
+}
+
 /// Negotiated RAOP audio parameters from one ANNOUNCE SDP body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RaopAudioFormat {
@@ -4727,6 +4799,33 @@ mod tests {
         session.handle(&request("TEARDOWN", 6, &[], &[])).unwrap();
         assert_eq!(session.state(), RaopSessionState::Closed);
         assert!(session.audio_format().is_none());
+    }
+
+    #[test]
+    fn raop_encryption_classifier_exposes_clear_and_protected_boundaries() {
+        assert_eq!(
+            classify_raop_encryption(&announce().body).unwrap(),
+            RaopEncryptionStatus::Clear
+        );
+        assert_eq!(
+            RaopEncryptionStatus::Clear.reason_code(),
+            "raop.experimental_clear"
+        );
+        let aes = b"v=0\r\nm=audio 0 RTP/AVP 96\r\na=rsaaeskey:REDACTED\r\na=aesiv:REDACTED\r\n";
+        assert_eq!(
+            classify_raop_encryption(aes).unwrap(),
+            RaopEncryptionStatus::AesCtr
+        );
+        assert_eq!(
+            RaopEncryptionStatus::AesCtr.user_message(),
+            "RAOP AES-CTR media is not supported"
+        );
+        let other = b"v=0\r\nm=audio 0 RTP/AVP 96\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:REDACTED\r\n";
+        assert_eq!(
+            classify_raop_encryption(other).unwrap(),
+            RaopEncryptionStatus::OtherProtected
+        );
+        assert!(classify_raop_encryption(&[0xff]).is_err());
     }
 
     #[test]

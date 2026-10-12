@@ -46,6 +46,9 @@ AirPlay/RAOP interoperability.
   redirects, authentication, and decoding remain caller-owned.
 - caller-owned peer authorization hooks on the RAOP and mirror RTSP TCP
   adapters, evaluated before request bytes enter the session state machine.
+- a redaction-safe RAOP SDP encryption classifier that distinguishes the
+  experimental clear path from AES-CTR and other protected attributes without
+  retaining key or IV values.
 - a redaction-safe mirror compatibility report that explicitly classifies
   clear-IP, AWDL, FairPlay/DRM, unknown transport, and unverified-pairing
   inputs instead of silently attempting an unsupported path.
