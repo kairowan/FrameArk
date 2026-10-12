@@ -101,3 +101,7 @@ It does not implement Apple pairing, FairPlay/AES-CTR decryption, audio/video
 decoding, timing/retransmission, or Apple-device compatibility. The mirror
 media coordinator filters the negotiated peer IP/SSRC and resets its bounded
 pipelines, but socket ownership and RTSP authorization remain with the caller.
+`MirrorCompatibilityReport` makes this boundary explicit: only a verified,
+clear-IP request is admitted to the experimental contracts; FairPlay/DRM,
+unverified pairing, unknown transports, and AWDL return stable redaction-safe
+diagnostic codes (`mirror.unsupported_*` or `mirror.conditional_awdl`).

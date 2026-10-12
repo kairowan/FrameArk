@@ -46,6 +46,9 @@ AirPlay/RAOP interoperability.
   redirects, authentication, and decoding remain caller-owned.
 - caller-owned peer authorization hooks on the RAOP and mirror RTSP TCP
   adapters, evaluated before request bytes enter the session state machine.
+- a redaction-safe mirror compatibility report that explicitly classifies
+  clear-IP, AWDL, FairPlay/DRM, unknown transport, and unverified-pairing
+  inputs instead of silently attempting an unsupported path.
 
 The RTSP session does not own a TCP socket, and the RTP socket adapter does not
 join multicast groups or enforce the negotiated peer, SSRC, payload type, or
@@ -54,7 +57,10 @@ decode audio or perform Apple pairing; it is a deterministic protocol contract
 that a future daemon can connect to platform audio and timing adapters.
 
 FairPlay, AES-CTR decryption, pairing, DMAP metadata, AirPlay 2, platform
-decoding, and Apple device compatibility are not implemented or implied. H.265
+decoding, and Apple device compatibility are not implemented or implied. The
+compatibility report is an admission/diagnostics boundary only; it is not an
+Apple pairing implementation and it never authorizes protected content.
+H.265
 RTP assembly is a bounded conditional protocol capability only: an explicit
 H.265 SETUP is accepted, but callers must still provide authenticated RTSP
 policy and a platform decoder. The
