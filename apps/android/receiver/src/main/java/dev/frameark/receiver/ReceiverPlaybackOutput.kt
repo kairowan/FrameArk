@@ -15,8 +15,12 @@ object ReceiverPlaybackOutput {
     private val audio = AudioDecoderRenderer(onPcm = { audioRendered.incrementAndGet() })
 
     @Synchronized fun attach(value: Surface) { reset(); surface = value }
-    @Synchronized fun detach(value: Surface) {
-        if (surface === value) { try { reset() } finally { surface = null } }
+    /** Idle ticket exchange may leave the listener alive, active playback may not. */
+    @Synchronized fun detach(value: Surface): Boolean {
+        if (surface !== value) return false
+        val active = !outputsReleased()
+        try { reset() } finally { surface = null }
+        return active
     }
 
     @Synchronized fun consume(event: FrameArkNative.PlaybackEvent) {

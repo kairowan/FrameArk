@@ -17,3 +17,5 @@ dependencyResolutionManagement {
 rootProject.name = "FrameArk"
 include(":receiver")
 project(":receiver").projectDir = file("apps/android/receiver")
+include(":sender")
+project(":sender").projectDir = file("apps/android/sender")

@@ -9,9 +9,16 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 
 ## Project status / 项目状态
 
-**Pre-alpha: M3 protocol foundations in development.** The repository now contains the initial Rust contracts, bounded FANP control/media transport, a Rust media-to-renderer bridge, an experimental fixture sender CLI, the Android Receiver shell, and an experimental bounded DLNA SSDP/HTTP/SOAP MediaRenderer slice. It is not yet a user-facing receiver or sender; protocol support listed below describes the roadmap and the verified compatibility document.
+**Pre-alpha: M0–M5 experimental foundations, not completed milestones.** Native
+Receiver now has foreground Android H.264/AAC output and a matching installable
+reference Sender for 30-second 720p30/1080p30 generated pattern/tone tests over
+pinned QUIC. This is not screen capture, a hardware compatibility claim or a
+complete casting product. DLNA and AirPlay remain bounded protocol foundations.
 
-**预览前阶段：M1 Native 基础开发中。** 当前仓库已经包含初始 Rust 契约、受限 FANP 控制/媒体传输、Rust 媒体渲染桥、实验性的 fixture 发送 CLI 和 Android Receiver 壳；还不是面向普通用户的完整接收端或发送端。下方协议表和兼容性文档共同说明已验证范围与路线边界。
+**实验性预览：M1 Native 播放链路开发中。** Android Receiver 已有真实编解码输出，
+配套参考 Sender APK 发送 30 秒测试画面和提示音，可选择 720p30/1080p30。
+它不采集手机屏幕；真机结果必须由设备持有人安装并反馈，不把模拟器等同真机。
+两端安装与操作见[参考发送器测试说明](docs/testing/ANDROID_REFERENCE_SENDER.md)。
 
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或

@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">FrameArk Sender</string>
+    <string name="title">FrameArk 参考发送器 · Experimental</string>
+    <string name="instructions">同一局域网：在 Receiver 启动接收并分享连接信息，粘贴到下方。先核对两端完整 TLS 指纹，再输入接收端 PIN。保持两端前台、降低接收端媒体音量。此工具发送 30 秒测试画面和短提示音，不采集屏幕或麦克风。</string>
+    <string name="ticket_hint">粘贴接收端连接信息（不含 PIN）</string>
+    <string name="inspect">检查连接信息</string>
+    <string name="confirm">我已核对接收端地址与完整 TLS 指纹</string>
+    <string name="pin_hint">接收端 6 位 PIN</string>
+    <string name="full_hd">1080p30（未选则 720p30）</string>
+    <string name="start">发送 30 秒测试流</string>
+    <string name="stop">取消发送</string>
+    <string name="invalid">连接信息无效，或指纹尚未确认，或 PIN 不是 6 位数字。</string>
+    <string name="unavailable">Rust 库未加载，无法发送。请检查 APK 架构。</string>
+    <string name="connecting">正在连接并协商…</string>
+    <string name="progress">编码并提交：视频 %1$d 帧，音频 %2$d 包。发送完成不等于接收端验收通过。</string>
+    <string name="complete">发送并结束成功。请核对接收端画面、声音及资源释放。</string>
+    <string name="cancelled">已取消；返回前台后需手动重新发送。</string>
+    <string name="failed">发送失败（%1$s）。检查 PIN、TLS 指纹、接收端授权及编码支持，重新生成连接信息后重试。未降级加密。</string>
+</resources>

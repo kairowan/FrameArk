@@ -1,4 +1,11 @@
 <resources>
+    <string name="connection_share">分享连接信息（不含 PIN）</string>
+    <string name="connection_select">选择发送设备可访问的局域网地址</string>
+    <string name="connection_idle_only">请先结束播放，再分享连接信息。</string>
+    <string name="connection_unavailable">请启动接收，并连接具有私有 IPv4 地址的局域网。</string>
+    <string name="connection_warning">仅分享给你信任的发送设备。两端核对完整 TLS 指纹，PIN 单独输入。这里是本次接收服务的临时证书，不是 Keystore 身份。重启服务后旧信息失效。分享后返回此页面再发送，保持两端前台。</string>
+    <string name="connection_send">选择分享方式</string>
+    <string name="connection_copy">复制连接信息</string>
     <string name="app_name">FrameArk Receiver</string>
     <string name="receiver_status">FrameArk M2\n\n%1$s</string>
     <string name="receiver_network_info">FrameArk M2\n\nFANP frameark.local:%1$d\nPairing code: %2$06d</string>

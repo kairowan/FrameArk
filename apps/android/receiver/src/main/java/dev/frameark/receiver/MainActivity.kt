@@ -1,6 +1,9 @@
 package dev.frameark.receiver
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.SurfaceTexture
 import android.os.Bundle
@@ -8,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -42,6 +46,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val native = FrameArkNative()
         val trustStore = AndroidTrustSnapshotStore(filesDir.resolve("frameark-trust.fats"), native)
@@ -98,6 +103,48 @@ class MainActivity : Activity() {
         val refresh = Button(this).apply {
             text = getString(R.string.receiver_refresh)
             setOnClickListener { refreshStatus() }
+        }
+        val shareConnection = Button(this).apply {
+            text = getString(R.string.connection_share)
+            filterTouchesWhenObscured = true
+            setOnClickListener {
+                if (!ReceiverPlaybackOutput.outputsReleased()) {
+                    mutationStatus.text = getString(R.string.connection_idle_only)
+                    return@setOnClickListener
+                }
+                val addresses = runCatching {
+                    java.net.NetworkInterface.getNetworkInterfaces().toList()
+                        .filter { it.isUp && !it.isLoopback }
+                        .flatMap { it.inetAddresses.toList() }
+                        .filterIsInstance<java.net.Inet4Address>()
+                        .mapNotNull { address -> address.hostAddress?.let { native.pairingTicket(it) } }
+                        .distinct().take(16)
+                }.getOrDefault(emptyList())
+                if (addresses.isEmpty()) {
+                    mutationStatus.text = getString(R.string.connection_unavailable)
+                } else {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle(R.string.connection_select)
+                        .setItems(addresses.map { native.ticketSummary(it)?.substringBefore('\n') ?: "" }.toTypedArray()) { _, index ->
+                            val ticket = addresses[index]
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle(R.string.connection_share)
+                                .setMessage(getString(R.string.connection_warning) + "\n\n" + native.ticketSummary(ticket))
+                                .setPositiveButton(R.string.connection_send) { _, _ ->
+                                    startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, ticket)
+                                    }, getString(R.string.connection_share)))
+                                }
+                                .setNeutralButton(R.string.connection_copy) { _, _ ->
+                                    val clip = ClipData.newPlainText("FrameArk connection", ticket)
+                                    clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+                                    getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+                                }
+                                .setNegativeButton(android.R.string.cancel, null).show()
+                        }.show()
+                }
+            }
         }
         val requirePairingApproval = Button(this).apply {
             text = getString(R.string.pairing_require_approval)
@@ -200,8 +247,7 @@ class MainActivity : Activity() {
                     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
                     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-                        releaseVideoSurface()
-                        stopService(Intent(this@MainActivity, FrameArkReceiverService::class.java))
+                        if (releaseVideoSurface()) stopService(Intent(this@MainActivity, FrameArkReceiverService::class.java))
                         return true
                     }
                 }
@@ -215,6 +261,7 @@ class MainActivity : Activity() {
             addView(start)
             addView(stop)
             addView(refresh)
+            addView(shareConnection)
             addView(requirePairingApproval)
             addView(approveNextPairing)
             addView(requireProof)
@@ -264,15 +311,16 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         proofHandler.removeCallbacksAndMessages(null)
         dismissProof()
-        releaseVideoSurface()
+        if (releaseVideoSurface()) stopService(Intent(this, FrameArkReceiverService::class.java))
         super.onDestroy()
     }
 
-    private fun releaseVideoSurface() {
-        videoSurface?.let { surface ->
+    private fun releaseVideoSurface(): Boolean {
+        val active = videoSurface?.let { surface ->
             try { ReceiverPlaybackOutput.detach(surface) } finally { surface.release() }
         }
         videoSurface = null
+        return active == true
     }
 
     private companion object {

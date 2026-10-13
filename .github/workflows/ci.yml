@@ -112,10 +112,12 @@ jobs:
         if: steps.detect.outputs.present == 'true'
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace lint test assembleDebug :receiver:assembleDebugAndroidTest
+          ./gradlew --no-daemon --stacktrace lint test assembleDebug :receiver:assembleDebugAndroidTest :sender:assembleDebugAndroidTest
       - name: Verify JNI library is packaged
         if: steps.detect.outputs.present == 'true'
-        run: python scripts/verify_android_native_package.py --apk apps/android/receiver/build/outputs/apk/debug/receiver-debug.apk
+        run: |
+          python scripts/verify_android_native_package.py --apk apps/android/receiver/build/outputs/apk/debug/receiver-debug.apk
+          python scripts/verify_android_native_package.py --apk apps/android/sender/build/outputs/apk/debug/sender-debug.apk
 
   platform:
     name: platform-${{ matrix.os }}

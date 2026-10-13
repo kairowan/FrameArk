@@ -600,6 +600,12 @@ class FrameArkNative(
 
     private external fun nativeReceiverCertificate(): ByteArray?
 
+    /** Explicit user export; Rust validates numeric private-LAN address and ticket bounds. */
+    fun pairingTicket(address: String): String? = if (loadedAbiVersion != null) nativePairingTicket(address) else null
+    fun ticketSummary(ticket: String): String? = if (loadedAbiVersion != null) nativeTicketSummary(ticket) else null
+    private external fun nativePairingTicket(address: String): String?
+    private external fun nativeTicketSummary(ticket: String): String?
+
     private external fun nativeSubmitVideoFrame(payload: ByteArray, pts: Long, keyframe: Boolean): Int
 
     private external fun nativeSubmitAudioFrame(payload: ByteArray, pts: Long): Int

@@ -334,6 +334,26 @@ remembered peer authorization; the existing pinned TLS/PIN boundary is unchanged
 
 ## Disclosure and fixes
 
+The experimental Android reference Sender accepts only explicitly pasted,
+bounded private-IPv4 pairing tickets and a separately entered PIN. Tickets
+contain an ephemeral **public** TLS certificate and endpoint, not a secret key,
+PIN or Keystore identity. Operators must obtain them through a trusted channel
+and compare the entire TLS SHA-256 on both devices. Sender confirmation binds
+the exact inspected ticket and uses fixed-name certificate-pinned TLS; no DNS,
+public-address destination, automatic intent/clipboard connection, insecure
+fallback, persisted ticket or stored PIN is supported. Clipboard/share targets
+are OS/user controlled and may retain public network metadata. Restarting the
+Receiver invalidates a ticket. The reference Sender is PIN-only and cannot
+satisfy proof-required mode. See [ADR 0120](docs/adr/0120-android-reference-sender.md)
+for resource/time limits, generation ownership and explicit trust limitations.
+
+The synthetic source does not capture microphone/screen. Sender cancels on
+pause; Receiver may retain only its idle listener during ticket sharing.
+Active surface loss stops reception and missing-surface configuration fails.
+Test-only two-emulator fixtures briefly store ephemeral credentials in private
+test files and remove them in teardown; never collect these as evidence or ship
+instrumentation/probe-enabled APKs to users.
+
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
 
 Sanitized regression fixtures may be retained after disclosure. Raw secrets, personal media, and identifying packet captures must not enter the repository.
