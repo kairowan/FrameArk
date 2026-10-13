@@ -35,6 +35,7 @@ class FrameArkNative(
     peerProofRequiredProvider: ((Boolean) -> Int)? = null,
     pollPeerProofProvider: (() -> ByteArray?)? = null,
     peerProofDecisionProvider: ((Long, Boolean) -> Int)? = null,
+    peerProofPendingProvider: ((Long) -> Int)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
@@ -98,6 +99,8 @@ class FrameArkNative(
             nativeDecidePeerProof(requestId, approved)
         }
     private var loadedAbiVersion: Int? = null
+    private val bridgePeerProofPendingProvider: (Long) -> Int =
+        peerProofPendingProvider ?: { requestId -> nativePeerProofPending(requestId) }
 
     /** Result of one native-library load attempt. */
     sealed interface LoadResult {
@@ -350,7 +353,7 @@ class FrameArkNative(
         if (idLength !in 1..128 || keyStart + 32 != envelope.size) return null
         val deviceId = envelope.copyOfRange(14, keyStart).toString(Charsets.UTF_8)
         if (deviceId.isBlank() || deviceId.length > 128 ||
-            deviceId.any { !(it.isLetterOrDigit() || it == '-' || it == '_' || it == '.') }
+            deviceId.any { !(it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '-' || it == '_' || it == '.') }
         ) return null
         return VerifiedPeerProofEvent(
             requestId = requestId,
@@ -365,6 +368,10 @@ class FrameArkNative(
     /** Resolves one Rust proof request after the user approves or rejects it. */
     fun decidePeerProof(requestId: Long, approved: Boolean): Boolean =
         isLoaded() && requestId > 0 && bridgePeerProofDecisionProvider(requestId, approved) == 0
+
+    /** Rust is the authority for request expiry, cancellation, and first decision. */
+    fun isPeerProofPending(requestId: Long): Boolean =
+        isLoaded() && requestId > 0 && bridgePeerProofPendingProvider(requestId) == 1
 
     /** Starts the Rust-owned lifecycle after verifying the ABI. */
     fun startReceiver(): ReceiverResult {
@@ -543,6 +550,8 @@ class FrameArkNative(
     private external fun nativePollPeerProof(): ByteArray?
 
     private external fun nativeDecidePeerProof(requestId: Long, approved: Boolean): Int
+
+    private external fun nativePeerProofPending(requestId: Long): Int
 
     private external fun nativeStartReceiver(): Int
 
