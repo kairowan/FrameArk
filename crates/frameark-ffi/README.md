@@ -75,10 +75,16 @@ The optional proof mode is enabled while stopped through
 `nativeSetPeerProofRequired(true)`. In that mode the Rust listener uses the
 verified FANP Ed25519 proof handshake, places at most 16 copied public-key
 requests in a process-local queue, and exposes each as a bounded `FAPR` event
-through `nativePollPeerProof`. Android returns the request id with
-`nativeDecidePeerProof`; only an explicit approval lets the temporary FANP
-session continue. The queue waits at most 30 seconds and clears on stop or
-restart. The Kotlin bridge validates the envelope and exposes the copied key to
+through `nativePollPeerProof`. For unknown identities, Android returns the
+request id with `nativeDecidePeerProof`; only an explicit approval lets the
+temporary FANP session continue. Each request expires 30 seconds after creation,
+using Rust's monotonic clock. Decisions are single-use; `nativePeerProofPending`
+reports whether a request is still actionable. Cancellation, timeout, stop and
+restart remove both queued events and pending decisions. The listener polls for
+shutdown without restarting an active handshake; stop also cancels a pending
+media session. A delayed-approval loopback regression covers a 750ms human-like
+delay, and the tests check duplicate decisions, expiry and cancellation cleanup.
+The Kotlin bridge validates the envelope and exposes the copied key to
 a caller-owned approval UI. A peer explicitly enrolled in the Rust `FTR1`
 registry before startup is automatically admitted on later proof-verified
 reconnects when both its stable device id and derived public-key fingerprint

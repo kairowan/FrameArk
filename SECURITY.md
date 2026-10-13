@@ -69,6 +69,14 @@ than racing an active listener. This policy is reconnect admission, not Apple
 pairing, certificate pinning, or proof of a private key beyond the verified
 challenge.
 
+FANP proof approval request IDs are process-monotonic and never reused on
+listener restart. Rust enforces a 30-second monotonic deadline and accepts only
+the first decision; a pending-query JNI call is advisory and the actual decision
+rechecks expiry. Async waiter cancellation removes the request and event. Stop
+cancels handshakes and media waits without granting approval or retaining a
+request for a later sender. This is local session lifecycle handling, not a
+persistent trust grant.
+
 Capability offers are exchanged only after the pinned TLS handshake. The
 current schema requires an exact version match and rejects unknown or duplicate
 entries before allocation; it does not silently downgrade or authorize media,
