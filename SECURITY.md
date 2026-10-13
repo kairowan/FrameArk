@@ -290,7 +290,13 @@ gate, not sender authorization or a substitute for Rust trust approval.
 
 The Android JNI trust calls delegate peer add/refresh, explicit revoke, and
 fingerprint matching to the bounded Rust `TrustRegistry`. A changed fingerprint
-is rejected until revocation; capacity and labels remain bounded. The snapshot
+is rejected until revocation; capacity and labels remain bounded. Rust itself
+rejects add/refresh, raw-key enrollment and revoke while running or stopping,
+under the same lock used by startup. A lifecycle remains active until the old
+listener is joined, preventing restart or trust mutation against a stale
+startup snapshot. Callers must stop successfully before revoking; a rejected
+revoke never means the running connection has been deauthorized. Live session
+revocation is not implemented. The snapshot
 JNI calls expose only bounded public `FTR1` bytes and reject replacement during
 an active session. `AndroidTrustSnapshotStore` encrypts those bytes with an
 Android Keystore AES-GCM key and atomically replaces an app-private file. The

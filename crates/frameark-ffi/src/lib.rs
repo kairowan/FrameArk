@@ -93,7 +93,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetDevice
 
 /// Adds or refreshes one explicitly approved peer in Rust's bounded registry.
 /// Return values: 0 accepted, -2 key changed, -3 malformed/lock failure,
-/// -4 registry capacity exhausted.
+/// -4 registry capacity exhausted, -5 receiver running/stopping.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeer(
     mut env: JNIEnv<'_>,
@@ -121,19 +121,16 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeer
     let Ok(mut state) = receiver_state().lock() else {
         return -3;
     };
-    match state.trust_registry.trust(device_id, fingerprint, label) {
-        Ok(_) => 0,
-        Err(TrustError::IdentityChanged) => -2,
-        Err(TrustError::Capacity) => -4,
-        Err(_) => -3,
-    }
+    mutate_trust_registry(&mut state, |registry| {
+        registry.trust(device_id, fingerprint, label).map(|_| ())
+    })
 }
 
 /// Adds or refreshes an explicitly approved peer from its verified raw public
 /// key. The proof/signature check and user approval happen before this JNI
 /// entry point; Rust only derives the canonical trust fingerprint here.
 /// Return values: 0 accepted, -2 key changed, -3 malformed/lock failure,
-/// -4 registry capacity exhausted.
+/// -4 registry capacity exhausted, -5 receiver running/stopping.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeerPublicKey(
     mut env: JNIEnv<'_>,
@@ -158,19 +155,16 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeer
     let Ok(mut state) = receiver_state().lock() else {
         return -3;
     };
-    match state
-        .trust_registry
-        .trust_public_key(device_id, &public_key, label)
-    {
-        Ok(_) => 0,
-        Err(TrustError::IdentityChanged) => -2,
-        Err(TrustError::Capacity) => -4,
-        Err(_) => -3,
-    }
+    mutate_trust_registry(&mut state, |registry| {
+        registry
+            .trust_public_key(device_id, &public_key, label)
+            .map(|_| ())
+    })
 }
 
 /// Explicitly revokes one trusted peer. Return values: 0 revoked, -3 unknown
-/// or malformed/lock failure.
+/// or malformed/lock failure, -5 receiver running/stopping. A rejected call
+/// never reports that a live listener's startup trust snapshot was revoked.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeRevokePeer(
     mut env: JNIEnv<'_>,
@@ -186,11 +180,9 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeRevokePee
     let Ok(mut state) = receiver_state().lock() else {
         return -3;
     };
-    if state.trust_registry.revoke(&device_id).is_ok() {
-        0
-    } else {
-        -3
-    }
+    mutate_trust_registry(&mut state, |registry| {
+        registry.revoke(&device_id).map(|_| ())
+    })
 }
 
 /// Checks one peer/fingerprint pair without exposing the registry contents.
@@ -273,7 +265,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetPairin
     let Ok(mut state) = receiver_state().lock() else {
         return -3;
     };
-    if state.session.is_some() || state.network.is_some() {
+    if state.is_active() {
         return -2;
     }
     state.pairing_approval_required = required != 0;
@@ -312,7 +304,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetPeerPr
     let Ok(mut state) = receiver_state().lock() else {
         return -3;
     };
-    if state.session.is_some() || state.network.is_some() {
+    if state.is_active() {
         return -2;
     }
     state.peer_proof_required = required != 0;
@@ -383,6 +375,21 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePeerProof
     i32::from(state.peer_proof_bridge.is_pending(request_id as u64))
 }
 
+fn mutate_trust_registry(
+    state: &mut NativeReceiverState,
+    mutation: impl FnOnce(&mut TrustRegistry) -> Result<(), TrustError>,
+) -> jint {
+    if state.is_active() {
+        return -5;
+    }
+    match mutation(&mut state.trust_registry) {
+        Ok(()) => 0,
+        Err(TrustError::IdentityChanged) => -2,
+        Err(TrustError::Capacity) => -4,
+        Err(_) => -3,
+    }
+}
+
 fn export_trust_snapshot(state: &NativeReceiverState) -> Option<Vec<u8>> {
     state.trust_registry.encode().ok()
 }
@@ -391,7 +398,7 @@ fn import_trust_snapshot(state: &mut NativeReceiverState, bytes: &[u8]) -> jint 
     let Ok(registry) = TrustRegistry::decode(bytes) else {
         return -3;
     };
-    if state.session.is_some() || state.network.is_some() {
+    if state.is_active() {
         return -2;
     }
     state.trust_registry = registry;
@@ -423,7 +430,7 @@ fn install_device_identity(
     {
         return 0;
     }
-    if state.session.is_some() || state.network.is_some() {
+    if state.is_active() {
         return -2;
     }
     state.identity_alias = Some(alias.to_owned());
@@ -433,6 +440,9 @@ fn install_device_identity(
 }
 
 fn prepare_receiver_session(state: &NativeReceiverState) -> Result<Session, jint> {
+    if state.stopping {
+        return Err(-2);
+    }
     let device_id = state.device_id.clone().ok_or(-5)?;
     if state.identity_fingerprint.is_none() {
         return Err(-5);
@@ -627,6 +637,9 @@ fn encode_peer_proof_event(event: &PendingPeerProof) -> Vec<u8> {
 
 #[derive(Default)]
 struct NativeReceiverState {
+    // Remains true while shutdown joins outside the state lock. This prevents
+    // mutations/restart from racing the old listener's trust/media snapshot.
+    stopping: bool,
     session: Option<Session>,
     media_queue: VecDeque<NativeMediaFrame>,
     video_config: Option<VideoConfig>,
@@ -640,6 +653,49 @@ struct NativeReceiverState {
     peer_proof_required: bool,
     peer_proof_bridge: PeerProofBridge,
     network: Option<NetworkRuntime>,
+}
+
+impl NativeReceiverState {
+    fn is_active(&self) -> bool {
+        self.stopping || self.session.is_some() || self.network.is_some()
+    }
+}
+
+struct ReceiverShutdown {
+    network: Option<NetworkRuntime>,
+    transition_failed: bool,
+}
+
+fn begin_receiver_stop(state: &mut NativeReceiverState) -> Result<Option<ReceiverShutdown>, jint> {
+    if state.stopping {
+        return Err(-2);
+    }
+    if !state.is_active() {
+        return Ok(None);
+    }
+    state.stopping = true;
+    let transition_failed = state
+        .session
+        .take()
+        .is_some_and(|mut session| session.transition(SessionState::Closed).is_err());
+    state.media_queue.clear();
+    state.video_config = None;
+    state.audio_config = None;
+    state.peer_proof_bridge.clear();
+    Ok(Some(ReceiverShutdown {
+        network: state.network.take(),
+        transition_failed,
+    }))
+}
+
+fn finish_receiver_stop(state: &mut NativeReceiverState) {
+    // A listener callback may have completed after begin_stop released the
+    // lock. It has now been joined; remove all leftovers before reopening.
+    state.media_queue.clear();
+    state.video_config = None;
+    state.audio_config = None;
+    state.peer_proof_bridge.clear();
+    state.stopping = false;
 }
 
 struct NetworkRuntime {
@@ -1101,7 +1157,8 @@ fn receiver_state() -> &'static Mutex<NativeReceiverState> {
 /// Starts the Rust-owned receiver lifecycle and returns 0 on success.
 ///
 /// A return value of 1 means the receiver is already started; negative values
-/// indicate an internal failure (-1), network startup failure (-4), or missing
+/// indicate an internal failure (-1), shutdown still in progress (-2),
+/// network startup failure (-4), or missing
 /// platform identity (-5). An identity is required before any sockets open.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartReceiver(
@@ -1137,7 +1194,8 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
     0
 }
 
-/// Stops the Rust-owned receiver lifecycle and returns 0 on success.
+/// Stops the Rust-owned receiver lifecycle and returns 0 after the listener
+/// has joined. Returns -2 if another caller is already stopping it.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStopReceiver(
     _env: JNIEnv<'_>,
@@ -1146,26 +1204,26 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStopRecei
     let Ok(mut state) = receiver_state().lock() else {
         return -1;
     };
-    let Some(mut session) = state.session.take() else {
-        return 0;
+    let shutdown = match begin_receiver_stop(&mut state) {
+        Ok(Some(shutdown)) => shutdown,
+        Ok(None) => return 0,
+        Err(code) => return code,
     };
-    state.media_queue.clear();
-    state.video_config = None;
-    state.audio_config = None;
-    state.peer_proof_bridge.clear();
-    let network = state.network.take();
-    let transition_failed = session.transition(SessionState::Closed).is_err();
     drop(state);
-    if let Some(network) = network {
+    if let Some(network) = shutdown.network {
         network.stop();
     }
-    if transition_failed {
+    let Ok(mut state) = receiver_state().lock() else {
+        return -1;
+    };
+    finish_receiver_stop(&mut state);
+    if shutdown.transition_failed {
         return -1;
     }
     0
 }
 
-/// Returns 1 while the Rust receiver lifecycle is active, otherwise 0.
+/// Returns 1 while the Rust receiver lifecycle is active or stopping, otherwise 0.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeReceiverRunning(
     _env: JNIEnv<'_>,
@@ -1174,7 +1232,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeReceiverR
     let Ok(state) = receiver_state().lock() else {
         return -1;
     };
-    if state.session.is_some() { 1 } else { 0 }
+    i32::from(state.is_active())
 }
 
 /// Returns the ephemeral FANP listener port, or zero when the receiver is stopped.
@@ -1850,6 +1908,104 @@ mod tests {
     }
 
     #[test]
+    fn running_receiver_rejects_trust_mutation_before_touching_the_registry() {
+        let mut state = NativeReceiverState::default();
+        let device_id = DeviceId::try_from("sender-running").unwrap();
+        let key = [4; 32];
+        assert_eq!(
+            mutate_trust_registry(&mut state, |registry| {
+                registry
+                    .trust_public_key(device_id.clone(), &key, "Sender")
+                    .map(|_| ())
+            }),
+            0
+        );
+        let snapshot = export_trust_snapshot(&state).unwrap();
+        state.session = Some(network_session(DeviceId::try_from("receiver").unwrap()));
+        assert_eq!(
+            mutate_trust_registry(&mut state, |registry| {
+                registry.revoke(&device_id).map(|_| ())
+            }),
+            -5
+        );
+        assert_eq!(export_trust_snapshot(&state).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn stopping_keeps_trust_and_restart_closed_until_listener_join_finishes() {
+        let _guard = test_guard();
+        let mut state = NativeReceiverState::default();
+        let first = vec!["ab"; 32].join(":");
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &first),
+            0
+        );
+        let device_id = DeviceId::try_from("sender-shutdown").unwrap();
+        assert_eq!(
+            mutate_trust_registry(&mut state, |registry| {
+                registry
+                    .trust_public_key(device_id.clone(), &[8; 32], "Sender")
+                    .map(|_| ())
+            }),
+            0
+        );
+        let snapshot = export_trust_snapshot(&state).unwrap();
+        // A live listener alone must also close the mutation gate.
+        state.network = Some(
+            NetworkRuntime::start_with_approval(
+                state.device_id.clone().unwrap(),
+                false,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap(),
+        );
+        assert!(state.is_active());
+        assert_eq!(
+            mutate_trust_registry(&mut state, |_| panic!("must not mutate while listening")),
+            -5
+        );
+        state.session = Some(prepare_receiver_session(&state).unwrap());
+        let shutdown = begin_receiver_stop(&mut state).unwrap().unwrap();
+        assert!(!shutdown.transition_failed);
+        assert!(state.session.is_none() && state.network.is_none());
+        assert!(state.is_active());
+        assert_eq!(
+            mutate_trust_registry(&mut state, |_| panic!("must not mutate during join")),
+            -5
+        );
+        assert_eq!(import_trust_snapshot(&mut state, &snapshot), -2);
+        assert_eq!(prepare_receiver_session(&state).unwrap_err(), -2);
+        assert_eq!(
+            install_device_identity(&mut state, "frameark-device", &vec!["cd"; 32].join(":")),
+            -2
+        );
+        assert!(begin_receiver_stop(&mut state).is_err_and(|code| code == -2));
+        shutdown.network.unwrap().stop();
+        // Lock reacquisition is part of stop completion, not just taking the handle.
+        assert_eq!(
+            mutate_trust_registry(&mut state, |_| panic!("stop not yet published")),
+            -5
+        );
+        state.audio_config = Some(AudioConfig {
+            codec: MediaCodec::Opus,
+            sample_rate: 48_000,
+            channels: 2,
+        });
+        finish_receiver_stop(&mut state);
+        assert!(!state.is_active());
+        assert!(state.audio_config.is_none());
+        assert_eq!(export_trust_snapshot(&state).unwrap(), snapshot);
+        assert_eq!(
+            mutate_trust_registry(&mut state, |registry| registry
+                .revoke(&device_id)
+                .map(|_| ())),
+            0
+        );
+        assert!(prepare_receiver_session(&state).is_ok());
+        assert!(begin_receiver_stop(&mut state).unwrap().is_none());
+    }
+
+    #[test]
     fn trust_registry_bridge_keeps_key_rotation_explicit_and_revocation_bounded() {
         let mut state = NativeReceiverState::default();
         let device_id = DeviceId::try_from("sender-1").unwrap();
@@ -2254,6 +2410,7 @@ mod tests {
     fn media_queue_applies_backpressure_and_preserves_envelope() {
         let _guard = test_guard();
         let mut state = NativeReceiverState {
+            stopping: false,
             session: Some(Session::new(
                 SessionId::try_from("media-session").unwrap(),
                 DeviceId::try_from("media-device").unwrap(),

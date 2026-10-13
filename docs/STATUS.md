@@ -16,6 +16,12 @@ Current compatibility labels remain in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Current interpretation
 
+The Android trust lifecycle now has a Rust-enforced mutation gate through
+listener shutdown; this closes the JNI/settings-policy mismatch, not the live
+revocation or playback gates. Device testing is operator-run using the
+[manual APK checklist](testing/ANDROID_MANUAL_TESTING.md). APK delivery is not
+counted as a successful physical-device test until results are returned.
+
 The repository has a substantial M0–M5 experimental foundation, but no M0–M5
 milestone is closed because every row still has an exit-gate item above. The
 remaining work is primarily real platform interoperability, decoder/output

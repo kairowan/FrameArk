@@ -14,6 +14,13 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 
 ## Current status
 
+Android trust mutation is enforced as stopped-only in Rust, including the
+listener join interval ([ADR 0118](adr/0118-native-trust-lifecycle-gate.md)).
+Regression evidence covers active revoke rejection without snapshot changes
+and successful mutation after shutdown, not live revocation of an active peer.
+User-run device checks follow the [manual APK checklist](testing/ANDROID_MANUAL_TESTING.md);
+no physical-device result is assumed from package delivery alone.
+
 | Protocol or capability | Current status | Evidence |
 |---|---|---|
 | FrameArk DNS-SD discovery (`_frameark._udp.local.`) | Experimental | `frameark-discovery` validation/event-mapping tests plus bounded CLI browse command; multicast smoke coverage is host-dependent |
