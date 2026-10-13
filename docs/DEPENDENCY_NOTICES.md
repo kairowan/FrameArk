@@ -28,6 +28,10 @@ and compiler-wide NOTICE are retained for context; this does not mean the compil
 is bundled. Annotations 13.0 preserves all four distinct source-header copyrights,
 including Sascha Weinreuter. Both exact runtime JAR hashes are checked. Supplements
 have provenance and SHA-256 values; a version bump requires renewed review.
+Checked-in supplements normalize line endings, final newline and trailing
+whitespace without changing their words. Policy `sha256` pins the stored bytes;
+`upstreamLfSha256` separately records the upstream LF-normalized text before
+trailing-whitespace removal, when present. These hashes may therefore differ.
 
 Rust's shipped `COPYRIGHT-library.html` contains the standard-library and bundled
 dependency terms. The original HTML and Apache/MIT texts are retained; a plain-text

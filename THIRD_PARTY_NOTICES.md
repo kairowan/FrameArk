@@ -10,8 +10,9 @@ published beside the two signed APKs:
 - `third-party-index.json`: component identities, selected Rust license options,
   provenance and file hashes; no local cache paths.
 - `third-party-licenses.zip`: original legal files and the same index. Rust crate
-  files retain their archived bytes; reviewed supplemental texts normalize LF and
-  final newline only, with hashes and pinned upstream sources recorded in policy.
+  files retain their archived bytes; reviewed supplemental texts normalize LF,
+  final newline and trailing whitespace only. Stored-file hashes, upstream
+  LF-normalized hashes and pinned sources are recorded separately in policy.
 
 The generator covers the **complete Rust lockfile superset**, the **resolved
 release runtime of each Android app**, Rust standard-library notices and the
