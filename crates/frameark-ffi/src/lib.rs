@@ -8,11 +8,12 @@
 #![allow(unsafe_code)]
 
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use frameark_api::{AudioFrame, AudioRenderer, EncodedMediaSink, VideoFrame, VideoRenderer};
 use frameark_core::{
@@ -365,6 +366,23 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeDecidePee
     }
 }
 
+/// Returns 1 only while this request can still receive its first decision.
+/// Expiry, cancellation, stop and already-decided requests return 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePeerProofPending(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    request_id: jlong,
+) -> jint {
+    if request_id <= 0 {
+        return -3;
+    }
+    let Ok(state) = receiver_state().lock() else {
+        return -3;
+    };
+    i32::from(state.peer_proof_bridge.is_pending(request_id as u64))
+}
+
 fn export_trust_snapshot(state: &NativeReceiverState) -> Option<Vec<u8>> {
     state.trust_registry.encode().ok()
 }
@@ -443,6 +461,7 @@ struct PendingPeerProof {
     request_id: u64,
     device_id: String,
     public_key: [u8; 32],
+    expires_at: Instant,
 }
 
 #[derive(Default)]
@@ -458,11 +477,41 @@ struct PeerProofBridge {
     state: Arc<Mutex<PeerProofBridgeState>>,
 }
 
+// Removing a request must also happen when its async waiter is dropped.
+struct PeerProofWaitGuard<'a> {
+    bridge: &'a PeerProofBridge,
+    request_id: u64,
+}
+
+impl Drop for PeerProofWaitGuard<'_> {
+    fn drop(&mut self) {
+        self.bridge.remove(self.request_id);
+    }
+}
+
+impl PeerProofBridgeState {
+    fn expire(&mut self) {
+        let now = Instant::now();
+        self.pending.retain(|_, request| request.expires_at > now);
+        self.queued
+            .retain(|request| self.pending.contains_key(&request.request_id));
+        self.decisions.retain(|id, _| self.pending.contains_key(id));
+    }
+}
+
 impl PeerProofBridge {
     fn enqueue(&self, proof: &PeerIdentityProof) -> Option<u64> {
+        self.enqueue_with_timeout(proof, NETWORK_OPERATION_TIMEOUT)
+    }
+
+    fn enqueue_with_timeout(&self, proof: &PeerIdentityProof, ttl: Duration) -> Option<u64> {
+        if ttl.is_zero() || ttl > NETWORK_OPERATION_TIMEOUT {
+            return None;
+        }
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
+        state.expire();
         if proof.device_id.is_empty()
             || proof.device_id.len() > 128
             || state.pending.len() >= MAX_JNI_PROOF_EVENTS
@@ -477,11 +526,16 @@ impl PeerProofBridge {
         {
             return None;
         }
-        state.next_request_id = state.next_request_id.wrapping_add(1).max(1);
+        // JNI carries signed ids. Never wrap/reuse an id after stop or expiry.
+        state.next_request_id = state.next_request_id.checked_add(1)?;
+        if state.next_request_id > i64::MAX as u64 {
+            return None;
+        }
         let event = PendingPeerProof {
             request_id: state.next_request_id,
             device_id: proof.device_id.clone(),
             public_key: proof.public_key,
+            expires_at: Instant::now() + ttl,
         };
         state.pending.insert(event.request_id, event.clone());
         state.queued.push_back(event.clone());
@@ -489,24 +543,44 @@ impl PeerProofBridge {
     }
 
     fn pop(&self) -> Option<PendingPeerProof> {
-        self.state.lock().ok()?.queued.pop_front()
+        let mut state = self.state.lock().ok()?;
+        state.expire();
+        state.queued.pop_front()
+    }
+
+    fn is_pending(&self, request_id: u64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        state.expire();
+        state.pending.contains_key(&request_id) && !state.decisions.contains_key(&request_id)
     }
 
     fn decide(&self, request_id: u64, approved: bool) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if !state.pending.contains_key(&request_id) {
+        state.expire();
+        if !state.pending.contains_key(&request_id) || state.decisions.contains_key(&request_id) {
             return false;
         }
         state.decisions.insert(request_id, approved);
+        state.queued.retain(|event| event.request_id != request_id);
         true
     }
 
     async fn wait_for_decision(&self, request_id: u64, timeout: Duration) -> bool {
+        let _cleanup = PeerProofWaitGuard {
+            bridge: self,
+            request_id,
+        };
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Ok(mut state) = self.state.lock() {
+                state.expire();
+                if !state.pending.contains_key(&request_id) {
+                    return false;
+                }
                 if let Some(decision) = state.decisions.remove(&request_id) {
                     state.pending.remove(&request_id);
                     return decision;
@@ -737,7 +811,7 @@ impl NetworkRuntime {
                     while !stop_thread.load(Ordering::Acquire) {
                         let pairing_approval = Arc::clone(&pairing_approval);
                         let trusted_registry_attempt = Arc::clone(&trusted_registry_thread);
-                        let accepted = tokio::time::timeout(Duration::from_millis(250), async {
+                        let accepted = until_stopped(&stop_thread, async {
                             if peer_proof_required {
                                 let bridge = peer_proof_bridge_thread.clone();
                                 let trusted_registry = Arc::clone(&trusted_registry_attempt);
@@ -785,8 +859,9 @@ impl NetworkRuntime {
                         })
                         .await;
                         let transport = match accepted {
-                            Ok(Ok(transport)) => transport,
-                            Ok(Err(_)) | Err(_) => continue,
+                            Some(Ok(transport)) => transport,
+                            Some(Err(_)) => continue,
+                            None => break,
                         };
                         let receiver = match NativeMediaControlReceiver::new(
                             transport,
@@ -798,8 +873,14 @@ impl NetworkRuntime {
                             Ok(receiver) => receiver,
                             Err(_) => continue,
                         };
-                        let _ = receiver.serve(NETWORK_OPERATION_TIMEOUT).await;
+                        if until_stopped(&stop_thread, receiver.serve(NETWORK_OPERATION_TIMEOUT))
+                            .await
+                            .is_none()
+                        {
+                            break;
+                        }
                     }
+                    peer_proof_bridge_thread.clear();
                     server.close();
                 });
             })
@@ -819,13 +900,26 @@ impl NetworkRuntime {
     }
 
     fn stop(mut self) {
+        self.stop.store(true, Ordering::Release);
         if let Some(discovery) = self.discovery.take() {
             discovery.stop();
         }
-        self.stop.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+}
+
+/// Poll stop without restarting an in-progress handshake or media future.
+async fn until_stopped<F: Future>(stop: &AtomicBool, work: F) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        () = async {
+            while !stop.load(Ordering::Acquire) {
+                tokio::time::sleep(PROOF_DECISION_POLL_INTERVAL).await;
+            }
+        } => None,
+        output = work => Some(output),
     }
 }
 
@@ -1427,6 +1521,82 @@ mod tests {
         assert!(waiter.await.expect("proof waiter"));
     }
 
+    #[tokio::test]
+    async fn proof_decisions_are_single_use_expiring_and_cancellation_safe() {
+        let bridge = PeerProofBridge::default();
+        let proof = PeerIdentityProof {
+            device_id: "sender-lifecycle".to_string(),
+            public_key: [9; 32],
+            signature: [0; 64],
+        };
+        let id = bridge.enqueue(&proof).unwrap();
+        assert!(bridge.is_pending(id));
+        assert!(bridge.decide(id, false));
+        assert!(!bridge.decide(id, true));
+        assert!(!bridge.is_pending(id));
+        assert!(bridge.pop().is_none());
+        assert!(!bridge.wait_for_decision(id, Duration::from_secs(1)).await);
+        assert!(bridge.state.lock().unwrap().pending.is_empty());
+
+        let expired = bridge
+            .enqueue_with_timeout(&proof, Duration::from_millis(10))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!bridge.decide(expired, true));
+        assert!(!bridge.is_pending(expired));
+        assert!(bridge.pop().is_none());
+
+        let cancelled = bridge.enqueue(&proof).unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                bridge.wait_for_decision(cancelled, Duration::from_secs(1))
+            )
+            .await
+            .is_err()
+        );
+        assert!(!bridge.is_pending(cancelled));
+        assert!(!bridge.decide(cancelled, true));
+        assert!(bridge.pop().is_none());
+        let stopped = bridge.enqueue(&proof).unwrap();
+        bridge.clear();
+        assert!(
+            !bridge
+                .wait_for_decision(stopped, Duration::from_secs(1))
+                .await
+        );
+        let restarted = bridge.enqueue(&proof).unwrap();
+        assert!(restarted > stopped);
+        assert!(!bridge.decide(stopped, true));
+        assert!(bridge.is_pending(restarted));
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_pending_work_and_removes_proof_events() {
+        let bridge = PeerProofBridge::default();
+        let proof = PeerIdentityProof {
+            device_id: "sender-stop".to_string(),
+            public_key: [7; 32],
+            signature: [0; 64],
+        };
+        let id = bridge.enqueue(&proof).unwrap();
+        let stop = AtomicBool::new(false);
+        let (result, ()) = tokio::join!(
+            until_stopped(
+                &stop,
+                bridge.wait_for_decision(id, NETWORK_OPERATION_TIMEOUT)
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                stop.store(true, Ordering::Release);
+            }
+        );
+        assert_eq!(result, None);
+        assert!(bridge.pop().is_none());
+        assert!(!bridge.is_pending(id));
+        assert!(!bridge.decide(id, true));
+    }
+
     #[test]
     fn proof_enabled_network_runtime_surfaces_verified_event_before_acceptance() {
         let _guard = test_guard();
@@ -1489,6 +1659,8 @@ mod tests {
             .expect("proof event timeout");
             assert_eq!(event.device_id, "proof-sender");
             assert_eq!(event.public_key, public_key);
+            // A human decision must survive multiple UI polling intervals.
+            tokio::time::sleep(Duration::from_millis(750)).await;
             assert!(bridge.decide(event.request_id, true));
             let client = client_task
                 .await
@@ -1496,7 +1668,9 @@ mod tests {
                 .expect("proof accepted");
             client.close();
         });
+        let stopping = Instant::now();
         network.stop();
+        assert!(stopping.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
