@@ -334,6 +334,18 @@ remembered peer authorization; the existing pinned TLS/PIN boundary is unchanged
 
 ## Disclosure and fixes
 
+Android release signing uses the protected `android-release` environment, only
+after a no-secret build/test job. The owner supplies and backs up the production
+keystore through Environment secrets; no private key belongs in chat, source or
+artifacts. Both app certificates must match the environment's independent SHA-256
+pin. Passwords are passed by environment name, child environments are allowlisted,
+temporary files are cleaned on success/failure and partial output is not published.
+No production signing fallback to debug/unsigned is allowed. See the
+[release signing guide](docs/ANDROID_RELEASE_SIGNING.md) and
+[ADR 0122](docs/adr/0122-protected-dual-apk-release-signing.md). Fixture-key CI is
+not production-key, OIDC or public-release evidence; signature migration and key
+custody remain owner decisions.
+
 The experimental Android reference Sender accepts only explicitly pasted,
 bounded private-IPv4 pairing tickets and a separately entered PIN. Tickets
 contain an ephemeral **public** TLS certificate and endpoint, not a secret key,

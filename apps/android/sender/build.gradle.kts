@@ -11,8 +11,12 @@ android {
         applicationId = "dev.frameark.sender"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = providers.gradleProperty("framearkVersionCode").map { value ->
+            value.toInt().also { require(it in 1..2_100_000_000) { "Invalid Android release version code" } }
+        }.getOrElse(1)
+        versionName = providers.gradleProperty("framearkVersionName").getOrElse("0.1.0").also {
+            require(it.length in 1..100 && it.matches(Regex("[0-9A-Za-z.+-]+"))) { "Invalid Android release version name" }
+        }
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
         ndk { abiFilters += if (playbackProbe) listOf("x86_64") else listOf("arm64-v8a") }
     }

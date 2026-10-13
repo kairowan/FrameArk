@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Validate repository content
-        run: python scripts/check_repository.py --repo .
+        run: |
+          python scripts/check_repository.py --repo .
+          python -m unittest discover -s scripts -p 'test_*.py'
 
   rust:
     name: rust
@@ -121,6 +123,12 @@ jobs:
       - name: Compile isolated screen-capture fixtures
         if: steps.detect.outputs.present == 'true'
         run: ./gradlew --no-daemon -PframearkPlaybackProbe=true :sender:compileDebugKotlin :sender:compileDebugAndroidTestKotlin :receiver:compileDebugAndroidTestKotlin
+      - name: Exercise production dual-APK release signing with disposable fixture key
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          sdkmanager 'build-tools;35.0.0'
+          ./gradlew --no-daemon assembleRelease -PframearkVersionName=0.0.0-ci -PframearkVersionCode=2
+          python scripts/android_release_smoke.py --sdk-tools "$ANDROID_HOME/build-tools/35.0.0"
 
   platform:
     name: platform-${{ matrix.os }}

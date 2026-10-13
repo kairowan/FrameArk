@@ -43,4 +43,11 @@ Grant write permissions only to jobs that publish a reviewed artifact, advisory,
 
 ## Audit schedule
 
+Android release secrets live in `android-release`: required reviewer `kairowan`,
+administrator bypass disabled, and a tag-only `v*` deployment policy. The sole
+maintainer may approve their own deployment; require independent review when a
+second trusted maintainer joins. The workflow additionally checks exact annotated
+tag/checkout identity, reviewed main ancestry and successful main CI/security.
+Do not move or reuse published tags. See [signing setup](ANDROID_RELEASE_SIGNING.md).
+
 Review this configuration before every stable release and at least quarterly. Confirm that required check names still match workflow job names and that no broad bypass actor or write-token permission has been added.
