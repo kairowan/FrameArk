@@ -1,0 +1,16 @@
+IntelliJ IDEA Annotations 13.0
+
+Copyright notices retained from the source files in
+org.jetbrains:annotations:13.0:sources (all distinct file headers):
+
+Copyright 2000-2009 JetBrains s.r.o.
+Copyright 2000-2012 JetBrains s.r.o.
+Copyright 2000-2013 JetBrains s.r.o.
+Copyright 2006 Sascha Weinreuter
+
+All four headers declare the Apache License, Version 2.0. The full license is
+included with this component. No upstream source code was modified or copied
+into FrameArk's implementation.
+
+Source: https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0-sources.jar
+Source archive SHA-256: 42a5e144b8e81d50d6913d1007b695e62e614705268d8cf9f13dbdc478c2c68e

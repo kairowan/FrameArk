@@ -30,6 +30,9 @@ See [PLAN.md](PLAN.md) for the complete product definition, architecture, milest
 Maintainers: [protected dual-APK release signing](docs/ANDROID_RELEASE_SIGNING.md)
 documents environment secrets, owner approval, signed artifacts and the debug-to-release migration boundary.
 
+[Third-party notices](THIRD_PARTY_NOTICES.md) describe the verified license bundle
+embedded in both distributable APKs and published with them.
+
 ## Product direction / 产品方向
 
 FrameArk is built around three long-term pillars:

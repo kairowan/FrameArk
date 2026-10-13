@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "androidApplications": {
+    "receiver": ["org.jetbrains.kotlin:kotlin-stdlib:2.2.20", "org.jetbrains:annotations:13.0"],
+    "sender": ["org.jetbrains.kotlin:kotlin-stdlib:2.2.20", "org.jetbrains:annotations:13.0"]
+  },
+  "rustLicenseChoices": {
+    "MIT OR Apache-2.0": "MIT",
+    "Apache-2.0 OR MIT": "MIT",
+    "MIT": "MIT",
+    "Apache-2.0/MIT": "MIT",
+    "MIT/Apache-2.0": "MIT",
+    "Unlicense OR MIT": "MIT",
+    "Unlicense/MIT": "MIT",
+    "MIT OR Apache-2.0 OR LGPL-2.1-or-later": "MIT",
+    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT": "MIT",
+    "BSD-2-Clause OR Apache-2.0 OR MIT": "MIT",
+    "Apache-2.0 OR ISC OR MIT": "MIT",
+    "MIT OR BSD-3-Clause": "MIT",
+    "MIT OR Apache-2.0 OR Zlib": "MIT",
+    "Zlib OR Apache-2.0 OR MIT": "MIT",
+    "BSD-3-Clause": "BSD-3-Clause",
+    "ISC": "ISC",
+    "Apache-2.0 AND ISC": "Apache-2.0 AND ISC",
+    "(MIT OR Apache-2.0) AND Unicode-3.0": "MIT AND Unicode-3.0"
+  },
+  "rustSupplements": {
+    "jni-sys-macros@0.4.1": {
+      "vcs": "64d77b7a5f119d7b55b4e2c169a4668067ff59e6",
+      "files": [
+        "jni-sys-macros-0.4.1/LICENSE-MIT"
+      ]
+    },
+    "yasna@0.5.2": {
+      "vcs": "b7e65f9a4c317494cce2d18ea02b3d6eaaea7985",
+      "files": [
+        "yasna-0.5.2/LICENSE-MIT"
+      ]
+    }
+  },
+  "android": {
+    "org.jetbrains.kotlin:kotlin-stdlib:2.2.20": {
+      "sha256": "8836ccffd3585fadda9901244b20d42901d2f3cd581058d8434e2ffabcf3a3e7",
+      "declaredLicense": "Apache-2.0",
+      "noticeScope": "JVM/common stdlib, including GWT, Guava, ThreeTenBP and Boost notices. Upstream compiler-wide NOTICE/README retained for provenance; the compiler is not bundled.",
+      "files": [
+        "kotlin-stdlib-2.2.20/boost_LICENSE.txt",
+        "kotlin-stdlib-2.2.20/guava_license.txt",
+        "kotlin-stdlib-2.2.20/gwt_license.txt",
+        "kotlin-stdlib-2.2.20/LICENSE.txt",
+        "kotlin-stdlib-2.2.20/NOTICE.txt",
+        "kotlin-stdlib-2.2.20/threetenbp_license.txt",
+        "kotlin-stdlib-2.2.20/UPSTREAM-LICENSE-README.txt"
+      ]
+    },
+    "org.jetbrains:annotations:13.0": {
+      "sha256": "ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478",
+      "declaredLicense": "Apache-2.0",
+      "noticeScope": "All distinct copyright headers from the pinned source archive.",
+      "files": [
+        "annotations-13.0/COPYRIGHT.txt",
+        "kotlin-stdlib-2.2.20/LICENSE.txt"
+      ]
+    }
+  },
+  "files": {
+    "annotations-13.0/COPYRIGHT.txt": {
+      "sha256": "87b9b307e43579fa77017cbe9e2c0a82180ad7e097f91bc376d30be2e675cdce",
+      "source": "https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0-sources.jar",
+      "sourceSha256": "42a5e144b8e81d50d6913d1007b695e62e614705268d8cf9f13dbdc478c2c68e"
+    },
+    "jni-sys-macros-0.4.1/LICENSE-MIT": {
+      "sha256": "1d85bd754b04ceec93e98e890edd1fa3c6a22e81bcb32135806beeccefa51cd1",
+      "source": "https://raw.githubusercontent.com/jni-rs/jni-sys/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT",
+      "upstreamLfSha256": "1d85bd754b04ceec93e98e890edd1fa3c6a22e81bcb32135806beeccefa51cd1"
+    },
+    "kotlin-stdlib-2.2.20/boost_LICENSE.txt": {
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/third_party/boost_LICENSE.txt",
+      "upstreamLfSha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+    },
+    "kotlin-stdlib-2.2.20/guava_license.txt": {
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/third_party/guava_license.txt",
+      "upstreamLfSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "kotlin-stdlib-2.2.20/gwt_license.txt": {
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/third_party/gwt_license.txt",
+      "upstreamLfSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "kotlin-stdlib-2.2.20/LICENSE.txt": {
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/LICENSE.txt",
+      "upstreamLfSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "kotlin-stdlib-2.2.20/NOTICE.txt": {
+      "sha256": "0b09a83d3ef7795c7dec65e815866597c066c53898f2852a76599b8f5552941a",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/NOTICE.txt",
+      "upstreamLfSha256": "0b09a83d3ef7795c7dec65e815866597c066c53898f2852a76599b8f5552941a"
+    },
+    "kotlin-stdlib-2.2.20/threetenbp_license.txt": {
+      "sha256": "d1bc53b493a3ab387b42717ed5c4b1976a5048996f81154278100bff86d39331",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/third_party/threetenbp_license.txt",
+      "upstreamLfSha256": "d1bc53b493a3ab387b42717ed5c4b1976a5048996f81154278100bff86d39331"
+    },
+    "kotlin-stdlib-2.2.20/UPSTREAM-LICENSE-README.txt": {
+      "sha256": "840537e4de746f51866d71b2b0aa264d8c061e4654b4c7e217cea7f4e80be1cb",
+      "source": "https://raw.githubusercontent.com/JetBrains/kotlin/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/README.md",
+      "upstreamLfSha256": "840537e4de746f51866d71b2b0aa264d8c061e4654b4c7e217cea7f4e80be1cb"
+    },
+    "yasna-0.5.2/LICENSE-MIT": {
+      "sha256": "2a7df90e60fd5512b8bca35d3ce90e068f21c52d962855053fd1d9e2e7ca0f16",
+      "source": "https://raw.githubusercontent.com/qnighy/yasna.rs/b7e65f9a4c317494cce2d18ea02b3d6eaaea7985/LICENSE-MIT",
+      "upstreamLfSha256": "2a7df90e60fd5512b8bca35d3ce90e068f21c52d962855053fd1d9e2e7ca0f16"
+    }
+  }
+}

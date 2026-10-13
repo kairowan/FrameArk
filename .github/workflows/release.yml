@@ -66,7 +66,7 @@ jobs:
           VERSION_NAME: ${{ steps.identity.outputs.version_name }}
           VERSION_CODE: ${{ steps.identity.outputs.version_code }}
         run: |
-          rustup component add rustfmt clippy
+          rustup component add rustfmt clippy rust-docs
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
@@ -76,6 +76,8 @@ jobs:
           test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
           test -f "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
           chmod +x gradlew
+          ./gradlew --no-daemon writeReleaseRuntimeInventories
+          python scripts/third_party_notices.py --output build/third-party-notices/assets --ndk-root "$ANDROID_NDK_LATEST_HOME"
           ./gradlew --no-daemon --stacktrace lint test assembleRelease \
             -PframearkVersionName="$VERSION_NAME" -PframearkVersionCode="$VERSION_CODE"
       - name: Stage exact dual-APK inputs and source evidence

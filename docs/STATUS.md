@@ -20,11 +20,15 @@ Android release engineering now separates unsigned dual-APK build/test from
 protected environment signing and publication. Real disposable-key signing,
 certificate pinning, alignment and failure cleanup are exercised in CI. The
 `android-release` environment requires owner approval and tag-only deployment;
-production secrets are not configured by the agent. This closes the old
-single-APK/unsigned-filename pipeline defect, **not** production-key publishing,
-complete third-party notices/legal review, desktop signing or a milestone gate.
+production secrets are not configured by the agent. Both APKs now embed a verified
+third-party notice set, with complete lockfile coverage, actual Android runtime
+resolution and original legal texts; identical sidecars are published with them.
+This closes the old single-APK/unsigned-filename and missing-notice pipeline defects,
+**not** production-key publishing, legal/patent review, desktop signing or a milestone gate.
 See [release signing operations](ANDROID_RELEASE_SIGNING.md) and
 [ADR 0122](adr/0122-protected-dual-apk-release-signing.md).
+Notice coverage and its conservative-superset limits are documented in
+[dependency operations](DEPENDENCY_NOTICES.md) and [ADR 0123](adr/0123-verified-distribution-notices.md).
 
 Android Sender now also provides explicit MediaProjection screen capture and
 optional AudioPlaybackCapture on Android 10+, through the same Rust Native
