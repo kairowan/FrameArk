@@ -77,6 +77,13 @@ cancels handshakes and media waits without granting approval or retaining a
 request for a later sender. This is local session lifecycle handling, not a
 persistent trust grant.
 
+The Android proof prompt is foreground-only. It displays the claimed ID and
+key fingerprint for comparison, never treating a name as proof of identity.
+Only explicit button actions authorize the current request; leaving the page
+rejects its displayed request. Prompts are not saved or logged, approval ignores
+obscured touches, and no automatic trust enrollment occurs. The process-local
+proof-mode setting is not a durable security preference.
+
 Capability offers are exchanged only after the pinned TLS handshake. The
 current schema requires an exact version match and rejects unknown or duplicate
 entries before allocation; it does not silently downgrade or authorize media,

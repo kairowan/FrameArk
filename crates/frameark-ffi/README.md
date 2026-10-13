@@ -95,3 +95,10 @@ revocation takes effect on the next restart. Proof verification, reconnect
 admission, and session teardown stay in Rust. PIN-only mode remains the default
 for compatibility with senders that do not implement the optional proof
 handshake.
+
+The [Android receiver shell](../../apps/android/receiver/README.md) now consumes
+`FAPR` in its foreground Activity and queries `nativePeerProofPending` to remove
+stale prompts. It displays a SHA-256 public-key fingerprint for comparison and
+offers explicit one-session allow/deny buttons, without enrolling a trust record.
+Pausing the Activity rejects its displayed request. These JNI additions require
+the matching Kotlin and native builds; physical playback validation is separate.

@@ -3,6 +3,8 @@ package dev.frameark.receiver
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -11,12 +13,34 @@ import android.widget.TextView
 
 /** Minimal receiver shell used to verify startup and native ABI reporting. */
 class MainActivity : Activity() {
+    private val proofHandler = Handler(Looper.getMainLooper())
+    private var proofRequest: VerifiedPeerProofCoordinator.Prompt? = null
+    private lateinit var proofCoordinator: VerifiedPeerProofCoordinator
+    private lateinit var proofStatus: TextView
+    private lateinit var approveProof: Button
+    private lateinit var rejectProof: Button
+    private val pollProof = object : Runnable {
+        override fun run() {
+            val prompt = proofCoordinator.refresh()
+            if (prompt != proofRequest) {
+                proofStatus.text = if (prompt == null) getString(R.string.proof_waiting) else getString(
+                    R.string.proof_pending, prompt.deviceId, prompt.fingerprint,
+                )
+            }
+            proofRequest = prompt
+            approveProof.isEnabled = prompt != null
+            rejectProof.isEnabled = prompt != null
+            proofHandler.postDelayed(this, PROOF_POLL_DELAY_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val native = FrameArkNative()
         val trustStore = AndroidTrustSnapshotStore(filesDir.resolve("frameark-trust.fats"), native)
         val trustSettings = TrustSettingsController(native, trustStore)
+        proofCoordinator = VerifiedPeerProofCoordinator(native)
         val nativeStatus = when (val result = native.load()) {
             is FrameArkNative.LoadResult.Loaded ->
                 getString(R.string.native_loaded, result.abiVersion)
@@ -58,6 +82,7 @@ class MainActivity : Activity() {
         val stop = Button(this).apply {
             text = getString(R.string.receiver_stop)
             setOnClickListener {
+                dismissProof()
                 val intent = Intent(this@MainActivity, FrameArkReceiverService::class.java)
                     .setAction(ReceiverServicePolicy.ACTION_STOP)
                 startService(intent)
@@ -87,6 +112,42 @@ class MainActivity : Activity() {
                     getString(R.string.pairing_approval_rejected)
                 }
             }
+        }
+        val requireProof = Button(this).apply {
+            text = getString(R.string.proof_require)
+            setOnClickListener {
+                mutationStatus.text = if (native.setPeerProofRequired(true)) {
+                    getString(R.string.proof_required)
+                } else {
+                    getString(R.string.proof_mode_rejected)
+                }
+            }
+        }
+        val disableProof = Button(this).apply {
+            text = getString(R.string.proof_disable)
+            setOnClickListener {
+                mutationStatus.text = if (native.setPeerProofRequired(false)) {
+                    getString(R.string.proof_disabled)
+                } else {
+                    getString(R.string.proof_mode_rejected)
+                }
+            }
+        }
+        proofStatus = TextView(this).apply {
+            text = getString(R.string.proof_waiting)
+            setPadding(32, 16, 32, 16)
+        }
+        approveProof = Button(this).apply {
+            text = getString(R.string.proof_approve)
+            isEnabled = false
+            filterTouchesWhenObscured = true
+            setOnClickListener { decideProof(approved = true) }
+        }
+        rejectProof = Button(this).apply {
+            text = getString(R.string.proof_reject)
+            isEnabled = false
+            filterTouchesWhenObscured = true
+            setOnClickListener { decideProof(approved = false) }
         }
         val warning = TextView(this).apply {
             text = getString(R.string.pairing_warning) + "\n" + getString(R.string.trust_warning)
@@ -124,23 +185,67 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(statusView)
+            addView(mutationStatus)
+            addView(proofStatus)
+            addView(approveProof)
+            addView(rejectProof)
             addView(start)
             addView(stop)
             addView(refresh)
             addView(requirePairingApproval)
             addView(approveNextPairing)
+            addView(requireProof)
+            addView(disableProof)
             addView(warning)
             addView(peerId)
             addView(fingerprint)
             addView(label)
             addView(approve)
             addView(revoke)
-            addView(mutationStatus)
         }
         setContentView(ScrollView(this).apply { addView(content) })
     }
 
+    override fun onResume() {
+        super.onResume()
+        proofHandler.post(pollProof)
+    }
+
+    override fun onPause() {
+        proofHandler.removeCallbacksAndMessages(null)
+        dismissProof()
+        super.onPause()
+    }
+
+    private fun decideProof(approved: Boolean) {
+        val prompt = proofRequest ?: return
+        val accepted = proofCoordinator.decide(prompt.requestId, approved)
+        proofRequest = null
+        approveProof.isEnabled = false
+        rejectProof.isEnabled = false
+        proofStatus.text = getString(
+            if (!accepted) R.string.proof_decision_failed else if (approved) {
+                R.string.proof_approved
+            } else R.string.proof_session_rejected,
+        )
+    }
+
+    private fun dismissProof() {
+        proofCoordinator.dismiss()
+        proofRequest = null
+        approveProof.isEnabled = false
+        rejectProof.isEnabled = false
+        proofStatus.text = getString(R.string.proof_waiting)
+    }
+
+    override fun onDestroy() {
+        proofHandler.removeCallbacksAndMessages(null)
+        dismissProof()
+        super.onDestroy()
+    }
+
     private companion object {
         const val NETWORK_REFRESH_DELAY_MS = 500L
+        const val PROOF_POLL_DELAY_MS = 250L
     }
 }

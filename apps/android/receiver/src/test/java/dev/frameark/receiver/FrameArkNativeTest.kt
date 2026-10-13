@@ -211,6 +211,27 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun proof_pending_query_is_fail_closed_for_invalid_id_and_native_failure() {
+        var calls = 0
+        var status = 1
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            peerProofPendingProvider = { calls++; status },
+        )
+        assertFalse(bridge.isPeerProofPending(1))
+        bridge.load()
+        assertFalse(bridge.isPeerProofPending(0))
+        assertFalse(bridge.isPeerProofPending(-1))
+        assertEquals(0, calls)
+        assertTrue(bridge.isPeerProofPending(1))
+        status = -3
+        assertFalse(bridge.isPeerProofPending(1))
+        status = 0
+        assertFalse(bridge.isPeerProofPending(1))
+    }
+
+    @Test
     fun reports_a_loaded_matching_abi() {
         var requestedLibrary = ""
         val bridge = FrameArkNative(
