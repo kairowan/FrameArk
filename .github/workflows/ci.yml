@@ -126,7 +126,9 @@ jobs:
       - name: Exercise production dual-APK release signing with disposable fixture key
         if: steps.detect.outputs.present == 'true'
         run: |
-          sdkmanager 'build-tools;35.0.0'
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
           ./gradlew --no-daemon assembleRelease -PframearkVersionName=0.0.0-ci -PframearkVersionCode=2
           python scripts/android_release_smoke.py --sdk-tools "$ANDROID_HOME/build-tools/35.0.0"
 
