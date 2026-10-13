@@ -345,6 +345,8 @@ No production signing fallback to debug/unsigned is allowed. See the
 [ADR 0122](docs/adr/0122-protected-dual-apk-release-signing.md). Fixture-key CI is
 not production-key, OIDC or public-release evidence; signature migration and key
 custody remain owner decisions.
+Python release/repository tooling also receives security-extended CodeQL analysis,
+required by `security-gate`; workflow analysis alone does not cover signer code.
 
 The experimental Android reference Sender accepts only explicitly pasted,
 bounded private-IPv4 pairing tickets and a separately entered PIN. Tickets

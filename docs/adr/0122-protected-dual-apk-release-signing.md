@@ -56,7 +56,9 @@ Python policy tests and actual platform signing smoke are required by CI. The
 Windows smoke exposed a brief file-lock race on atomic directory rename; bounded
 permission-error retries preserve atomic publication and fail closed afterward.
 Linux CI exercises the full signing path independently. Main Rust/Android/security
-gates remain required. Genuine OIDC and production-key publishing need a chosen
+gates remain required. Python security-extended CodeQL analysis of release and
+repository tooling is a required dependency of `security-gate`, alongside
+Actions, Rust and Kotlin analysis. Genuine OIDC and production-key publishing need a chosen
 tag, owner secrets and deployment approval; fixture tests do not count as those.
 
 Rollback uses a reviewed PR. Keep signing disabled rather than restoring the old
