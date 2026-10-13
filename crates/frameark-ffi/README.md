@@ -90,8 +90,13 @@ registry before startup is automatically admitted on later proof-verified
 reconnects when both its stable device id and derived public-key fingerprint
 match exactly. Unknown peers, rotated keys, and malformed identities still use
 the bounded explicit-approval path. The listener uses a startup trust snapshot
-for the running lifecycle, so Android trust mutations remain stopped-only and a
-revocation takes effect on the next restart. Proof verification, reconnect
+for the running lifecycle. Rust rejects every trust mutation with `-5` while
+running or stopping, including callers outside the Android settings controller.
+Stop must finish before revocation; the next startup snapshots the updated
+registry. `nativeReceiverRunning` remains true during listener shutdown,
+concurrent stop/restart returns `-2`, and mode/identity/snapshot replacement
+stays closed until the listener has joined. This is not live session revocation.
+Proof verification, reconnect
 admission, and session teardown stay in Rust. PIN-only mode remains the default
 for compatibility with senders that do not implement the optional proof
 handshake.

@@ -211,6 +211,27 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun native_busy_trust_mutations_are_not_reported_as_success() {
+        var calls = 0
+        val bridge = FrameArkNative(
+            libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            trustPeerProvider = { _, _, _ -> calls++; -5 },
+            trustPeerPublicKeyProvider = { _, _, _ -> calls++; -5 },
+            revokePeerProvider = { _ -> calls++; -5 },
+        )
+        bridge.load()
+        assertFalse(bridge.trustPeer(FrameArkNative.TrustedPeer(
+            "sender", List(32) { "ab" }.joinToString(":"), "Sender",
+        )))
+        assertFalse(bridge.trustPeerPublicKey(FrameArkNative.VerifiedPeerKey(
+            "sender", ByteArray(32) { 8 }, "Sender",
+        )))
+        assertFalse(bridge.revokePeer("sender"))
+        assertEquals(3, calls)
+    }
+
+    @Test
     fun proof_pending_query_is_fail_closed_for_invalid_id_and_native_failure() {
         var calls = 0
         var status = 1

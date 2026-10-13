@@ -34,6 +34,14 @@ Persistent trust settings are separate and require the receiver to be stopped.
 Live trust revocation and a complete proof-capable sender UX remain follow-up
 work.
 
+Rust enforces this stopped-only rule even for direct JNI callers. Wait for
+stop to finish before changing trust; running/stopping mutations return failure,
+not a live revocation guarantee. See [ADR 0118](../../../docs/adr/0118-native-trust-lifecycle-gate.md).
+
+Device owners can follow the [manual APK checklist](../../../docs/testing/ANDROID_MANUAL_TESTING.md)
+without granting remote access. Actual device evidence is recorded only after
+their test results are received.
+
 ## Verification
 
 `./gradlew :receiver:testDebugUnitTest :receiver:lintDebug` covers the Kotlin

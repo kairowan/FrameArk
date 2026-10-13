@@ -248,7 +248,7 @@ class FrameArkNative(
         }.getOrDefault(false)
     }
 
-    /** Adds or refreshes an explicitly approved peer in Rust's trust registry. */
+    /** Adds or refreshes an explicitly approved peer; Rust requires a stopped receiver. */
     fun trustPeer(peer: TrustedPeer): Boolean {
         when (load()) {
             is LoadResult.Loaded -> Unit
@@ -266,6 +266,7 @@ class FrameArkNative(
     /**
      * Enrolls a proof-verified sender key through Rust's canonical fingerprint
      * bridge. This method does not verify the proof or request user approval.
+     * Rust rejects mutations while the receiver is running or stopping.
      */
     fun trustPeerPublicKey(peer: VerifiedPeerKey): Boolean {
         when (load()) {
@@ -282,7 +283,7 @@ class FrameArkNative(
         }.getOrDefault(false)
     }
 
-    /** Explicitly revokes a peer; Rust rejects unknown records. */
+    /** Revokes only while stopped; Rust rejects active lifecycles and unknown records. */
     fun revokePeer(deviceId: String): Boolean =
         isLoaded() && deviceId.isNotBlank() && bridgeRevokePeerProvider(deviceId) == 0
 
