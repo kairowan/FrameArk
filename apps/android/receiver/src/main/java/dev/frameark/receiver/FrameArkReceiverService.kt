@@ -46,10 +46,11 @@ class FrameArkReceiverService : Service() {
         playbackLoop = MediaPlaybackLoop(
             MediaPlaybackPump(
                 native,
-                ::onVideoFrame,
-                ::onAudioFrame,
-                videoConfigConsumer = ::onVideoConfig,
-                audioConfigConsumer = ::onAudioConfig,
+                { error("legacy video polling is disabled in the network player") },
+                { error("legacy audio polling is disabled in the network player") },
+                eventConsumer = ReceiverPlaybackOutput::consume,
+                drainOutput = ReceiverPlaybackOutput::drain,
+                resetOutput = ReceiverPlaybackOutput::reset,
             ),
             onError = {
                 Log.w(TAG, "media playback loop stopped after consumer failure")
@@ -61,20 +62,18 @@ class FrameArkReceiverService : Service() {
         networkObserver = ReceiverNetworkObserver(
             register = { listener ->
                 val manager = connectivityManager ?: error("connectivity service is unavailable")
+                val routes = DefaultNetworkTracker(manager.activeNetwork)
                 val callback = object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) = listener.onAvailable()
+                    override fun onAvailable(network: Network) {
+                        if (routes.available(network)) listener.onAvailable()
+                    }
 
-                    override fun onLost(network: Network) = listener.onLost()
-
-                    override fun onCapabilitiesChanged(
-                        network: Network,
-                        networkCapabilities: android.net.NetworkCapabilities,
-                    ) = listener.onCapabilitiesChanged()
-
-                    override fun onLinkPropertiesChanged(
-                        network: Network,
-                        linkProperties: android.net.LinkProperties,
-                    ) = listener.onLinkPropertiesChanged()
+                    override fun onLost(network: Network) {
+                        if (routes.lost(network)) listener.onLost()
+                    }
+                    // Registration/validation emits capability and link-property
+                    // callbacks without a route change. Restarting on those can
+                    // kill the very first authenticated playback session.
                 }
                 connectivityNetworkCallback = callback
                 manager.registerDefaultNetworkCallback(callback)
@@ -189,29 +188,6 @@ class FrameArkReceiverService : Service() {
     /** Persists an explicit Rust trust revocation through Keystore. */
     fun revokePeer(deviceId: String): Boolean =
         native.revokePeer(deviceId) && trustSnapshotStore.persist()
-
-    private fun onVideoFrame(frame: FrameArkNative.MediaFrame) {
-        // Surface/MediaCodec ownership is attached by the active UI session.
-        // Keep the service loop alive until that platform sink is configured.
-        check(frame.kind == FrameArkNative.MediaKind.VIDEO)
-    }
-
-    private fun onAudioFrame(frame: FrameArkNative.MediaFrame) {
-        // Audio decoder/AudioTrack ownership remains in the platform adapter.
-        check(frame.kind == FrameArkNative.MediaKind.AUDIO)
-    }
-
-    private fun onVideoConfig(config: FrameArkNative.VideoConfig) {
-        Log.i(
-            TAG,
-            "video config ${config.codec} ${config.width}x${config.height} " +
-                "${config.frameRateNumerator}/${config.frameRateDenominator}",
-        )
-    }
-
-    private fun onAudioConfig(config: FrameArkNative.AudioConfig) {
-        Log.i(TAG, "audio config ${config.codec} ${config.sampleRate}Hz/${config.channels}ch")
-    }
 
     private fun startAsForeground() {
         val notification = Notification.Builder(this, CHANNEL_ID)

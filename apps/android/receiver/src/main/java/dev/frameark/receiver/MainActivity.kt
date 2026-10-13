@@ -2,9 +2,12 @@ package dev.frameark.receiver
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.SurfaceTexture
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Surface
+import android.view.TextureView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -19,8 +22,11 @@ class MainActivity : Activity() {
     private lateinit var proofStatus: TextView
     private lateinit var approveProof: Button
     private lateinit var rejectProof: Button
+    private lateinit var playbackStatus: TextView
+    private var videoSurface: Surface? = null
     private val pollProof = object : Runnable {
         override fun run() {
+            playbackStatus.text = ReceiverPlaybackOutput.diagnostic()
             val prompt = proofCoordinator.refresh()
             if (prompt != proofRequest) {
                 proofStatus.text = if (prompt == null) getString(R.string.proof_waiting) else getString(
@@ -185,6 +191,23 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(statusView)
+            addView(TextureView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (200 * resources.displayMetrics.density).toInt())
+                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                    override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+                        videoSurface = Surface(texture).also(ReceiverPlaybackOutput::attach)
+                    }
+                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
+                    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+                    override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                        releaseVideoSurface()
+                        stopService(Intent(this@MainActivity, FrameArkReceiverService::class.java))
+                        return true
+                    }
+                }
+            })
+            playbackStatus = TextView(this@MainActivity).apply { text = ReceiverPlaybackOutput.diagnostic() }
+            addView(playbackStatus)
             addView(mutationStatus)
             addView(proofStatus)
             addView(approveProof)
@@ -241,7 +264,15 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         proofHandler.removeCallbacksAndMessages(null)
         dismissProof()
+        releaseVideoSurface()
         super.onDestroy()
+    }
+
+    private fun releaseVideoSurface() {
+        videoSurface?.let { surface ->
+            try { ReceiverPlaybackOutput.detach(surface) } finally { surface.release() }
+        }
+        videoSurface = null
     }
 
     private companion object {

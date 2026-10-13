@@ -36,6 +36,7 @@ class FrameArkNative(
     pollPeerProofProvider: (() -> ByteArray?)? = null,
     peerProofDecisionProvider: ((Long, Boolean) -> Int)? = null,
     peerProofPendingProvider: ((Long) -> Int)? = null,
+    playbackEventProvider: (() -> ByteArray?)? = null,
 ) {
     companion object {
         const val LIBRARY_NAME = "frameark_ffi"
@@ -99,6 +100,7 @@ class FrameArkNative(
             nativeDecidePeerProof(requestId, approved)
         }
     private var loadedAbiVersion: Int? = null
+    private val bridgePlaybackEventProvider = playbackEventProvider ?: { nativePollPlaybackEvent() }
     private val bridgePeerProofPendingProvider: (Long) -> Int =
         peerProofPendingProvider ?: { requestId -> nativePeerProofPending(requestId) }
 
@@ -192,6 +194,37 @@ class FrameArkNative(
         val keyframe: Boolean,
         val payload: ByteArray,
     )
+
+    /** Ordered Rust events. Frame timestamps in this stream are microseconds. */
+    sealed interface PlaybackEvent {
+        data class Video(val config: VideoConfig) : PlaybackEvent
+        data class Audio(val config: AudioConfig) : PlaybackEvent
+        data class Frame(val frame: MediaFrame) : PlaybackEvent
+        data object Reset : PlaybackEvent
+    }
+
+    fun pollPlaybackEvent(): PlaybackEvent? {
+        if (!isLoaded()) return null
+        val bytes = bridgePlaybackEventProvider() ?: return null
+        require(bytes.size in 6..(MAX_MEDIA_FRAME_BYTES + MEDIA_FRAME_HEADER_BYTES + 6)) {
+            "invalid playback event size"
+        }
+        require(bytes.copyOfRange(0, 5).contentEquals(byteArrayOf(70, 65, 80, 69, 1))) {
+            "invalid playback event version"
+        }
+        val body = bytes.copyOfRange(6, bytes.size)
+        return when (bytes[5].toInt()) {
+            1 -> PlaybackEvent.Video(requireNotNull(decodeVideoConfig(body)))
+            2 -> PlaybackEvent.Audio(requireNotNull(decodeAudioConfig(body)))
+            3, 4 -> {
+                val frame = requireNotNull(decodeMediaFrame(body))
+                require((bytes[5].toInt() == 3) == (frame.kind == MediaKind.VIDEO))
+                PlaybackEvent.Frame(frame)
+            }
+            5 -> { require(body.isEmpty()); PlaybackEvent.Reset }
+            else -> error("unsupported playback event")
+        }
+    }
 
     /** Ephemeral FANP listener material for an explicit in-app pairing flow. */
     data class NetworkInfo(
@@ -549,6 +582,7 @@ class FrameArkNative(
     private external fun nativeSetPeerProofRequired(required: Boolean): Int
 
     private external fun nativePollPeerProof(): ByteArray?
+    private external fun nativePollPlaybackEvent(): ByteArray?
 
     private external fun nativeDecidePeerProof(requestId: Long, approved: Boolean): Int
 

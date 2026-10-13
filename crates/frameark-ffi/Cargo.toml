@@ -10,6 +10,10 @@ rust-version.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Local instrumentation only. Never enabled by normal APK/release builds.
+android-playback-probe = []
+
 [dependencies]
 frameark-api = { path = "../frameark-api" }
 frameark-core.workspace = true

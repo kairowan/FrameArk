@@ -11,6 +11,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaPlaybackLoopTest {
+    @Test
+    fun stop_waits_for_inflight_dispatch_before_resetting_outputs() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val stopped = CountDownLatch(1)
+        val resets = AtomicInteger()
+        val native = FrameArkNative(libraryLoader = {},
+            versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION },
+            pollMediaProvider = { envelope(1, 0) }, videoConfigProvider = { null }, audioConfigProvider = { null })
+        val pump = MediaPlaybackPump(native, {
+            entered.countDown()
+            check(release.await(2, TimeUnit.SECONDS))
+            assertEquals(0, resets.get())
+        }, {}, maxFramesPerDrain = 1, resetOutput = { resets.incrementAndGet() })
+        val loop = MediaPlaybackLoop(pump, tickIntervalMs = 1)
+        try {
+            assertTrue(loop.start())
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            val stopper = Thread { loop.stop(); stopped.countDown() }.apply { start() }
+            assertFalse(stopped.await(30, TimeUnit.MILLISECONDS))
+            assertEquals(0, resets.get())
+            release.countDown()
+            assertTrue(stopped.await(1, TimeUnit.SECONDS))
+            stopper.join(1_000)
+            assertEquals(1, resets.get())
+            assertFalse(loop.isRunning())
+        } finally { release.countDown(); loop.close() }
+    }
+
     private fun envelope(kind: Int, pts: Long): ByteArray = ByteBuffer.allocate(20)
         .order(ByteOrder.BIG_ENDIAN)
         .put("FAMF".toByteArray())

@@ -213,15 +213,33 @@ The standby Activity reads the endpoint through the JNI getters only to display
 the temporary port and pairing code after an explicit user refresh; it never
 displays or persists the certificate.
 `ReceiverNetworkObserver` listens only to Android's default connectivity
-callback and coalesces route/capability changes into the existing bounded
+callback and coalesces changed/lost default Network identities into the bounded
 Rust-owned recovery operation. It has no protocol state and does not authorize
 or reconnect a sender. Registration failure disables automatic recovery while
 leaving the explicit lifecycle available; callback storms cannot start
 overlapping recovery attempts.
+The initial available callback and routine capability/link-property updates
+do not restart a just-authenticated session. A same-network address change
+currently requires explicit receiver restart.
 `MediaPlaybackPump` and `MediaPlaybackLoop` add only bounded polling and
 fixed-rate scheduling. The loop cancels on consumer failure, does not decode,
 retain surfaces, or bypass the native lifecycle, and releases its executor on
 close.
+
+The network player uses a separate ordered `FAPE1` JNI event queue, capped at
+128 events / 16 MiB encoded bytes. It retains explicit clock units until Rust
+converts to microseconds, rejects overflow/zero clocks and timestamps over five
+seconds ahead of the first-arrival clock, and never loses reset to a full queue.
+Kotlin validates envelopes before dispatch. H.264/AAC-LC/Opus codec input is
+bounded by platform buffers; periodic output drains are bounded to 16 buffers.
+PCM output owns at most 64 buffers / 256 KiB, retains partial non-blocking
+writes, and fails on negative writes or exhausted capacity. These limits do
+not include codec allocations or transient JNI/Java copies. Surface destruction,
+consumer failure and receiver stop release codecs/audio and discard pending PCM.
+Diagnostics retain counters/static source locations only, never raw codec
+messages or media. The Cargo `android-playback-probe` feature is opt-in test
+support; normal release builds must not enable it or distribute test APKs.
+See [ADR 0119](docs/adr/0119-android-ordered-native-playback.md).
 
 The AirPlay XML Property List boundary caps document size, nesting, entries,
 scalar/data fields, duplicate keys, and base64 decoding. It is not a parser for

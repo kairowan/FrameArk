@@ -150,7 +150,7 @@ pub enum MediaCodec {
     Unknown,
 }
 
-/// A rational media clock time base.
+/// A rational media clock time base, in seconds per tick (for example 1/90000).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TimeBase {
     numerator: u32,
@@ -180,6 +180,62 @@ impl TimeBase {
     /// Returns the denominator.
     pub const fn denominator(self) -> u32 {
         self.denominator
+    }
+
+    /// Converts ticks to platform microseconds, truncating sub-microsecond
+    /// fractions toward zero and rejecting zero clocks or i64 overflow.
+    pub fn to_microseconds(self, ticks: i64) -> Result<i64> {
+        if self.numerator == 0 {
+            return Err(FrameArkError::invalid_argument(
+                "media.zero_clock",
+                "clock must be positive",
+            ));
+        }
+        let value = i128::from(ticks) * i128::from(self.numerator) * 1_000_000
+            / i128::from(self.denominator);
+        i64::try_from(value).map_err(|_| {
+            FrameArkError::invalid_argument(
+                "media.timestamp_overflow",
+                "timestamp exceeds platform range",
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::TimeBase;
+
+    #[test]
+    fn platform_timestamps_keep_clock_units_and_reject_overflow() {
+        assert_eq!(
+            TimeBase::new(1, 90_000)
+                .unwrap()
+                .to_microseconds(90_000)
+                .unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            TimeBase::new(1, 48_000)
+                .unwrap()
+                .to_microseconds(960)
+                .unwrap(),
+            20_000
+        );
+        assert_eq!(
+            TimeBase::new(1, 90_000)
+                .unwrap()
+                .to_microseconds(-3_000)
+                .unwrap(),
+            -33_333
+        );
+        assert!(TimeBase::new(0, 1).unwrap().to_microseconds(1).is_err());
+        assert!(
+            TimeBase::new(u32::MAX, 1)
+                .unwrap()
+                .to_microseconds(i64::MAX)
+                .is_err()
+        );
     }
 }
 

@@ -54,3 +54,44 @@ one-hour playback tests in `PLAN.md`.
 The [Android 14 emulator smoke record](../../../docs/evidence/2026-10-13-proof-ui/README.md)
 includes the idle-screen screenshot, real JNI loading and mode/start/stop
 checks, with the remaining incoming-sender integration limitation stated.
+
+## Native video/audio preview
+
+The foreground TextureView now receives actual H.264 output through Rust's
+ordered FAPE queue. AAC-LC and constrained Opus decode to PCM16/AudioTrack.
+The screen reports video submissions, frame-rendered callbacks and completed
+PCM buffer writes (not measured audible output). Closing/destroying the surface
+stops the service. Keep this page foreground; background playback and rotation
+continuation are not implemented. Codec setup/backpressure failure stops playback
+and reports a static source location without recording media or peer details.
+
+Only Annex-B H.264 with initial SPS/PPS/keyframe, raw AAC-LC, or 48 kHz mapping-0
+Opus mono/stereo are in this experimental path. See
+[ADR 0119](../../../docs/adr/0119-android-ordered-native-playback.md) for the
+timestamp/API migration, memory budgets and unsupported configurations.
+Ordinary sender UX and reference-device 1080p performance remain open.
+
+### Opt-in emulator instrumentation (developers only)
+
+Use a disposable API 34 x86_64 AVD, not a device owner's phone. With the Rust
+Android target and NDK linker configured as in the native build script, build
+`frameark-ffi` for `x86_64-linux-android` with the explicit
+`--features android-playback-probe` flag. Copy its `.so` to
+`build/probe-jni/x86_64/libframeark_ffi.so` in the repository root, then run:
+
+```sh
+./gradlew :receiver:assembleDebug :receiver:assembleDebugAndroidTest -PframearkPlaybackProbe=true
+adb -s emulator-5582 install -r apps/android/receiver/build/outputs/apk/debug/receiver-debug.apk
+adb -s emulator-5582 install -r apps/android/receiver/build/outputs/apk/androidTest/debug/receiver-debug-androidTest.apk
+adb -s emulator-5582 shell am instrument -w -e class dev.frameark.receiver.NativePlaybackTest dev.frameark.receiver.test/android.test.InstrumentationTestRunner
+```
+
+Replace the example serial with your disposable emulator's serial. The test
+creates gray 320×240 H.264 and silent 48 kHz stereo AAC with Android encoders,
+sends 90 video frames plus paced audio over real pinned loopback QUIC, checks
+platform render/write callbacks, Stop output release and service listener
+release, and saves `native-playback.png` in the app's external-files directory.
+The probe exists only in explicitly opted-in Rust builds and test sources;
+never enable it in a release APK. Omit the Gradle property and rebuild normal
+ARM64 JNI before packaging an owner-test APK. This test does not cover Opus,
+physical decoding, audible quality, LAN discovery, one-hour stability or sync.

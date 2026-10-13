@@ -85,17 +85,19 @@ class MediaPlaybackLoop(
     }
 
     private fun tick() {
-        if (!running) return
-        try {
-            pump.drainOnce()
-        } catch (error: Throwable) {
-            synchronized(lock) {
+        val failure = synchronized(lock) {
+            if (!running) return
+            try {
+                pump.drainOnce()
+                null
+            } catch (error: Throwable) {
                 running = false
                 scheduled?.cancel(false)
                 scheduled = null
-                pump.stop()
+                runCatching { pump.stop() }
+                error
             }
-            runCatching { onError(error) }
         }
+        failure?.let { runCatching { onError(it) } }
     }
 }

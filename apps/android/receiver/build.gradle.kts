@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Explicit local instrumentation opt-in; normal/release artifacts stay ARM64.
+val playbackProbe = providers.gradleProperty("framearkPlaybackProbe").orNull == "true"
+
 android {
     namespace = "dev.frameark.receiver"
     compileSdk = 36
@@ -13,8 +16,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "android.test.InstrumentationTestRunner"
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += if (playbackProbe) listOf("x86_64") else listOf("arm64-v8a")
         }
     }
 
@@ -40,6 +44,9 @@ android {
     }
 
     sourceSets["main"].jniLibs.srcDir("src/main/jniLibs")
+    if (playbackProbe) sourceSets["main"].jniLibs.srcDir(rootProject.file("build/probe-jni"))
+    useLibrary("android.test.runner", false)
+    useLibrary("android.test.base", false)
 }
 
 dependencies {

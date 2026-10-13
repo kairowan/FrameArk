@@ -2,6 +2,8 @@ package dev.frameark.receiver
 
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.os.Handler
+import android.os.Looper
 import android.view.Surface
 
 /**
@@ -13,6 +15,7 @@ import android.view.Surface
  */
 class VideoDecoderRenderer(
     private val codecFactory: (String) -> MediaCodec = MediaCodec::createDecoderByType,
+    private val onRendered: () -> Unit = {},
 ) {
     private var codec: MediaCodec? = null
     private var configuredSurface: Surface? = null
@@ -25,6 +28,7 @@ class VideoDecoderRenderer(
             val format = MediaFormat.createVideoFormat(MIME_H264, config.width, config.height)
             format.setFloat(MediaFormat.KEY_FRAME_RATE, config.frameRate)
             decoder.configure(format, surface, null, 0)
+            decoder.setOnFrameRenderedListener({ _, _, _ -> onRendered() }, Handler(Looper.getMainLooper()))
             decoder.start()
             codec = decoder
             configuredSurface = surface
@@ -37,10 +41,12 @@ class VideoDecoderRenderer(
     /** Queues one encoded access unit and drains all currently available output. */
     fun render(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) {
         val decoder = codec ?: error("video decoder is not configured")
+        drain(decoder)
         val inputIndex = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
         require(inputIndex >= 0) { "video decoder input is backpressured" }
         val input = decoder.getInputBuffer(inputIndex) ?: error("video input buffer unavailable")
         input.clear()
+        require(data.size <= input.remaining()) { "encoded video exceeds decoder input capacity" }
         input.put(data)
         decoder.queueInputBuffer(
             inputIndex,
@@ -69,14 +75,16 @@ class VideoDecoderRenderer(
     /** Whether a decoder has been configured and started. */
     fun isConfigured(): Boolean = codec != null && configuredSurface != null
 
+    fun drain() { codec?.let(::drain) }
+
     @Suppress("DEPRECATION")
     private fun drain(decoder: MediaCodec) {
         val info = MediaCodec.BufferInfo()
-        while (true) {
+        repeat(16) {
             when (val outputIndex = decoder.dequeueOutputBuffer(info, 0)) {
                 MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> continue
-                MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> continue
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> return@repeat
+                MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return@repeat
                 else -> {
                     if (outputIndex >= 0) {
                         decoder.releaseOutputBuffer(outputIndex, true)
