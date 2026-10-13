@@ -2,6 +2,26 @@
 
 This document records the required GitHub settings for `kairowan/FrameArk`. Workflow files cannot enforce repository settings by themselves; a repository administrator must apply and periodically audit these controls.
 
+## Current audit blocker — 2026-10-13
+
+The repository API now reports private visibility. The main protection endpoint
+returns HTTP 403 (plan/visibility restriction), dependency review reports that it
+is unsupported, and CodeQL upload reports code scanning is not enabled. The
+`android-release` environment still exists with `can_admins_bypass=false`, but
+its returned protection rules include only `branch_policy`, not required
+reviewers. The environment secret count was zero at this audit.
+
+The settings below are required policy, **not confirmation of currently effective
+protection**. Stop merges and production signing setup until the owner chooses
+the visibility/hosting plan and all controls are restored and verified. Do not
+make a private repository public without explicit permission or weaken checks
+to pass CI. The bootstrap exception waives impossible independent self-approval;
+it does not waive CI/security or missing environment protection. A plan upgrade
+must be checked against every required feature, not just branch protection.
+
+Audit the actual API/UI configuration after recovery, then rerun checks on the
+current PR head. Do not infer recovery from the environment name or workflow YAML.
+
 ## Main branch protection
 
 Protect `refs/heads/main` with a branch protection rule or equivalent active ruleset:
@@ -43,7 +63,7 @@ Grant write permissions only to jobs that publish a reviewed artifact, advisory,
 
 ## Audit schedule
 
-Android release secrets live in `android-release`: required reviewer `kairowan`,
+Android release secrets must live in `android-release`: required reviewer `kairowan`,
 administrator bypass disabled, and a tag-only `v*` deployment policy. The sole
 maintainer may approve their own deployment; require independent review when a
 second trusted maintainer joins. The workflow additionally checks exact annotated

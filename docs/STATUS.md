@@ -5,6 +5,15 @@ gates have all passed. A milestone is only closed when its `PLAN.md` exit
 condition has a repeatable compatibility, performance, and recovery record.
 Current compatibility labels remain in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
+**Repository control drift, audited 2026-10-13:** the repository is now private;
+main protection is unavailable through the API (403), dependency review is
+unsupported, and CodeQL upload reports code scanning disabled. The signing
+environment no longer returns required reviewers; no environment signing secrets
+were configured. Merges and production signing setup are blocked pending the
+owner's visibility/hosting decision and verified recovery. Existing workflow code
+does not prove these external controls are effective. See the
+[protection audit](BRANCH_PROTECTION.md).
+
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|
 | M0 工程与规范基础 | Rust workspace, Android shell, licenses/governance, CI/security gates including required `framearkd` Linux listener smoke, Windows/macOS Rust workspace format/test/build matrix and bounded `framearkd` startup smoke, ADR series, repository policy checks, Android native-package verification, deterministic SPDX SBOM generation, release APK/source/checksum publication, GitHub OIDC provenance attestations for published artifacts | Non-Linux media/session runtime evidence beyond startup, platform signing policy, and final multi-platform release baseline | Partial |
@@ -19,8 +28,9 @@ Current compatibility labels remain in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 Android release engineering now separates unsigned dual-APK build/test from
 protected environment signing and publication. Real disposable-key signing,
 certificate pinning, alignment and failure cleanup are exercised in CI. The
-`android-release` environment requires owner approval and tag-only deployment;
-production secrets are not configured by the agent. Both APKs now embed a verified
+`android-release` environment must require owner approval and tag-only deployment,
+but approval protection is currently unavailable as noted above; production
+secrets are not configured by the agent. Both APKs now embed a verified
 third-party notice set, with complete lockfile coverage, actual Android runtime
 resolution and original legal texts; identical sidecars are published with them.
 This closes the old single-APK/unsigned-filename and missing-notice pipeline defects,
