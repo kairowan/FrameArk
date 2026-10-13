@@ -23,6 +23,9 @@ use tokio::time::timeout;
 mod control;
 mod media;
 mod negotiation;
+mod ticket;
+
+pub use ticket::{InvalidPairingTicket, MAX_PAIRING_TICKET_BYTES, PairingTicket};
 
 pub use control::{ControlMessage, PendingControl};
 pub use media::{MAX_MEDIA_FRAME_BYTES, MediaReceiver, MediaSender};

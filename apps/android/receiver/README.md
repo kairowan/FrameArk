@@ -60,8 +60,9 @@ checks, with the remaining incoming-sender integration limitation stated.
 The foreground TextureView now receives actual H.264 output through Rust's
 ordered FAPE queue. AAC-LC and constrained Opus decode to PCM16/AudioTrack.
 The screen reports video submissions, frame-rendered callbacks and completed
-PCM buffer writes (not measured audible output). Closing/destroying the surface
-stops the service. Keep this page foreground; background playback and rotation
+PCM buffer writes (not measured audible output). Destroying an active surface
+stops the service; an idle listener may remain while sharing a pairing ticket.
+Keep this page foreground; background playback and rotation
 continuation are not implemented. Codec setup/backpressure failure stops playback
 and reports a static source location without recording media or peer details.
 
@@ -69,7 +70,9 @@ Only Annex-B H.264 with initial SPS/PPS/keyframe, raw AAC-LC, or 48 kHz mapping-
 Opus mono/stereo are in this experimental path. See
 [ADR 0119](../../../docs/adr/0119-android-ordered-native-playback.md) for the
 timestamp/API migration, memory budgets and unsupported configurations.
-Ordinary sender UX and reference-device 1080p performance remain open.
+A separate reference Sender APK now supplies generated pattern/tone content;
+see the [two-APK operator guide](../../../docs/testing/ANDROID_REFERENCE_SENDER.md).
+Real capture, discovery UI and reference-device 1080p performance remain open.
 
 ### Opt-in emulator instrumentation (developers only)
 

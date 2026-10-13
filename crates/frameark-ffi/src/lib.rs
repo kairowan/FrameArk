@@ -9,6 +9,7 @@
 
 #[cfg(feature = "android-playback-probe")]
 mod playback_probe;
+mod sender;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
