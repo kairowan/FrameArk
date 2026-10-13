@@ -16,15 +16,22 @@ Current compatibility labels remain in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Current interpretation
 
-An installable Android reference Sender now generates moving H.264/AAC content
-and uses the same Rust Native session path. Receiver can explicitly share a
-bounded PIN-free local pairing ticket; Sender requires exact-ticket fingerprint
-confirmation and a separately entered PIN. See the [operator instructions](testing/ANDROID_REFERENCE_SENDER.md)
-and [ADR 0120](adr/0120-android-reference-sender.md), with
-[two-emulator runtime evidence](evidence/2026-10-13-reference-sender/README.md). This addresses the test
-sender software gap, not M1's physical-LAN discovery/hardware exit gate or
-M2's real capture/1080p60/one-hour/recovery gates. Sender discovery and peer
-identity proof are not implemented in this reference app.
+Android Sender now also provides explicit MediaProjection screen capture and
+optional AudioPlaybackCapture on Android 10+, through the same Rust Native
+session path. A non-exported foreground service owns the one-use OS grant;
+notification/UI stop, screen-off and system revocation end capture. Geometry
+is bounded to 1080p area in either orientation, 30/60 fps requested, maximum
+one-hour session. This closes the initial real-source software gap, **not**
+M2's measured 1080p60, one-hour, dynamic reconfiguration or reconnect gates.
+See [capture operations](testing/ANDROID_SCREEN_CAPTURE.md), [ADR 0121](adr/0121-android-screen-capture.md)
+and [actual OS capture evidence](evidence/2026-10-13-screen-capture/README.md).
+
+The separate 30-second generated test mode remains available with its
+[operator guide](testing/ANDROID_REFERENCE_SENDER.md) and
+[reference-stream evidence](evidence/2026-10-13-reference-sender/README.md).
+Both modes require explicit ticket/fingerprint/PIN entry; Sender discovery and
+peer identity proof remain open. M1 still requires physical reference-LAN
+discovery and hardware evidence. No M0–M5 exit gate is newly marked complete.
 
 The Android service now drives real platform codecs and outputs instead of
 no-op media consumers. A platform-encoded gray H.264/silent AAC probe traverses

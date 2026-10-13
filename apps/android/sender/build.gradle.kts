@@ -23,7 +23,11 @@ android {
     kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
     // Both apps consume the same Rust bridge output, never a second protocol implementation.
     sourceSets["main"].jniLibs.srcDir(rootProject.file("apps/android/receiver/src/main/jniLibs"))
-    if (playbackProbe) sourceSets["main"].jniLibs.srcDir(rootProject.file("build/probe-jni"))
+    if (playbackProbe) {
+        sourceSets["main"].jniLibs.srcDir(rootProject.file("build/probe-jni"))
+        sourceSets["debug"].java.srcDir("src/playbackProbe/java")
+        sourceSets["debug"].manifest.srcFile("src/playbackProbe/AndroidManifest.xml")
+    }
     useLibrary("android.test.runner", false)
     useLibrary("android.test.base", false)
 }

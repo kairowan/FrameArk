@@ -2,6 +2,8 @@
 
 Experimental M1 test tool. Requires two Android 8+ ARM64 devices with a reachable
 private IPv4 LAN. It sends generated picture and tone, **not your screen**.
+For the separate Android 10+ real screen-sharing mode, use the
+[capture guide](ANDROID_SCREEN_CAPTURE.md). This page covers synthetic mode only.
 You operate your own devices; no developer tools, ADB access, private media,
 packet captures or permanent device identifiers need to be shared with us.
 

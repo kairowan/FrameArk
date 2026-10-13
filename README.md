@@ -10,15 +10,16 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 ## Project status / 项目状态
 
 **Pre-alpha: M0–M5 experimental foundations, not completed milestones.** Native
-Receiver now has foreground Android H.264/AAC output and a matching installable
-reference Sender for 30-second 720p30/1080p30 generated pattern/tone tests over
-pinned QUIC. This is not screen capture, a hardware compatibility claim or a
-complete casting product. DLNA and AirPlay remain bounded protocol foundations.
+Receiver has foreground Android H.264/AAC output. Sender offers both a
+30-second generated reference stream and explicit Android 10+ screen sharing
+with optional permitted playback audio over pinned QUIC. Physical performance,
+one-hour stability and recovery gates remain open. DLNA and AirPlay remain
+bounded protocol foundations, not Apple-device interoperability claims.
 
-**实验性预览：M1 Native 播放链路开发中。** Android Receiver 已有真实编解码输出，
-配套参考 Sender APK 发送 30 秒测试画面和提示音，可选择 720p30/1080p30。
-它不采集手机屏幕；真机结果必须由设备持有人安装并反馈，不把模拟器等同真机。
-两端安装与操作见[参考发送器测试说明](docs/testing/ANDROID_REFERENCE_SENDER.md)。
+**实验性预览：Native 播放与真实屏幕采集开发中。** Sender 保留 30 秒测试流，
+新增 Android 10+ 系统授权屏幕共享，可选捕获允许共享的播放音频（不采集麦克风）。
+真机结果由设备持有人自行安装并反馈，不把模拟器或请求 60 fps 等同真机验收。
+操作见[参考测试流](docs/testing/ANDROID_REFERENCE_SENDER.md)与[屏幕共享说明](docs/testing/ANDROID_SCREEN_CAPTURE.md)。
 
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
