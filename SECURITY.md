@@ -347,12 +347,30 @@ Receiver invalidates a ticket. The reference Sender is PIN-only and cannot
 satisfy proof-required mode. See [ADR 0120](docs/adr/0120-android-reference-sender.md)
 for resource/time limits, generation ownership and explicit trust limitations.
 
-The synthetic source does not capture microphone/screen. Sender cancels on
+The synthetic source does not capture microphone/screen. That mode cancels on
 pause; Receiver may retain only its idle listener during ticket sharing.
 Active surface loss stops reception and missing-surface configuration fails.
 Test-only two-emulator fixtures briefly store ephemeral credentials in private
 test files and remove them in teardown; never collect these as evidence or ship
 instrumentation/probe-enabled APKs to users.
+
+Screen sharing is a separate, explicit Android 10+ action. It requires a fresh
+MediaProjection grant each time and a visible foreground notification. The
+non-exported service consumes a one-use, 15-second, process-memory credential
+handoff; neither credentials nor OS grant survive process death or sticky
+restart. Optional playback capture requires RECORD_AUDIO and matches permitted
+media/game/unknown playback only, in the same profile. There is **no microphone
+fallback** or protected-content bypass. OS permission text may mention recording
+audio, but this implementation never selects a microphone source. Sender's
+credential form stays FLAG_SECURE. Other displayed personal content can be sent
+to the selected receiver after consent; the user must choose the screen/app
+carefully. No capture files or media-bearing diagnostics are written.
+
+User stop, OS grant revocation, screen-off and task removal stop capture. No
+automatic reconnect, restart, regrant or reconfiguration is attempted. Fixed
+capture geometry and bounded queues/timeouts fail rather than silently changing
+encryption or codecs. Platform codec calls cannot guarantee hard real-time
+termination. See [ADR 0121](docs/adr/0121-android-screen-capture.md).
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
 
