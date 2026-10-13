@@ -41,6 +41,12 @@ tampering, stale state, archive traversal/duplicates/links/bounds and missing ru
 notices. Actual ARM64 dual-APK build/sign smoke verifies embedded/sidecar identity
 and rejects a real APK with a required legal asset removed.
 
+The PR whitespace gate caught two trailing-whitespace lines in Kotlin's upstream
+license README. Normalize those lines without changing attribution or terms,
+update the stored-file hash and retain the original upstream LF-normalized hash
+for provenance. Verify both the staged diff and the complete PR diff, regenerate
+the notices and rebuild both APKs after this policy change.
+
 No in-app license viewer, exact linker map, expanded Android SPDX SBOM or legal
 clearance is claimed. System codecs/DRM and trademark/patent gates remain separate.
 M0–M5 maturity does not advance merely because packaging checks pass. Rollback is
