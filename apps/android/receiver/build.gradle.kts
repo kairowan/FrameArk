@@ -48,6 +48,8 @@ android {
     }
 
     sourceSets["main"].jniLibs.srcDir("src/main/jniLibs")
+    sourceSets["main"].assets.srcDir(rootProject.file(providers.gradleProperty("framearkNoticesDir")
+        .getOrElse("build/third-party-notices/assets")))
     if (playbackProbe) sourceSets["main"].jniLibs.srcDir(rootProject.file("build/probe-jni"))
     useLibrary("android.test.runner", false)
     useLibrary("android.test.base", false)

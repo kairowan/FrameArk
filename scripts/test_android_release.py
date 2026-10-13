@@ -75,7 +75,10 @@ class ReleasePolicyTests(unittest.TestCase):
             root = Path(temp)
             for app in release.APPS:
                 (root / f"{app}-unsigned.apk").write_bytes(app.encode())
-            data = {"schema": 1, "tag": "v0.1.0-alpha.1", "commit": "a" * 40, "versionCode": 7,
+            for asset in release.ASSET_NAMES:
+                (root / asset).write_bytes(b"notice fixture")
+            data = {"schema": 2, "tag": "v0.1.0-alpha.1", "commit": "a" * 40, "versionCode": 7,
+                    "noticesSha256": {asset: release.digest(root / asset) for asset in release.ASSET_NAMES},
                     "unsignedSha256": {app: release.digest(root / f"{app}-unsigned.apk") for app in release.APPS}}
             manifest = root / "android-inputs.json"
             manifest.write_text(json.dumps(data), encoding="utf-8")
@@ -85,10 +88,24 @@ class ReleasePolicyTests(unittest.TestCase):
             (root / "sender-unsigned.apk").write_bytes(b"tampered")
             with self.assertRaises(release.ReleaseError):
                 release.validate_inputs(root, data["tag"], data["commit"])
-            for malformed in (None, [], {**data, "schema": True}, {**data, "unsignedSha256": ["receiver", "sender"]}):
+            for malformed in (None, [], {**data, "schema": True}, {**data, "schema": 1}, {**data, "unsignedSha256": ["receiver", "sender"]}):
                 manifest.write_text(json.dumps(malformed), encoding="utf-8")
                 with self.assertRaises(release.ReleaseError):
                     release.validate_inputs(root, data["tag"], data["commit"])
+
+    def test_notice_sidecars_are_required_and_hash_bound(self):
+        with tempfile.TemporaryDirectory(prefix="frameark-sidecar-test-") as temp:
+            root = Path(temp)
+            for name in (*release.ASSET_NAMES, "receiver-unsigned.apk", "sender-unsigned.apk"):
+                (root / name).write_bytes(b"fixture")
+            data = {"schema": 2, "tag": "v0.1.0-alpha.1", "commit": "a" * 40, "versionCode": 7,
+                    "unsignedSha256": {app: release.digest(root / f"{app}-unsigned.apk") for app in release.APPS},
+                    "noticesSha256": {name: release.digest(root / name) for name in release.ASSET_NAMES}}
+            (root / "android-inputs.json").write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(data, release.validate_inputs(root, data["tag"], data["commit"]))
+            (root / release.ASSET_NAMES[0]).write_bytes(b"altered")
+            with self.assertRaisesRegex(release.ReleaseError, "notice artifact hash"):
+                release.validate_inputs(root, data["tag"], data["commit"])
 
     def test_apk_rejects_wrong_identity_debug_abi_and_probe(self):
         with tempfile.TemporaryDirectory(prefix="frameark-apk-test-") as temp:
@@ -100,7 +117,9 @@ class ReleasePolicyTests(unittest.TestCase):
                 with zipfile.ZipFile(apk, "w") as archive:
                     archive.writestr(f"lib/{abi}/libframeark_ffi.so", library)
                     archive.writestr("classes.dex", dex)
-            with patch.object(release, "tool", return_value=root / "aapt"), patch.object(release, "run", return_value=badge):
+                    for asset in release.ASSET_NAMES:
+                        archive.writestr("assets/" + asset, b"notice fixture")
+            with patch.object(release, "tool", return_value=root / "aapt"), patch.object(release, "run", return_value=badge), patch.object(release, "verify_notices", return_value={}):
                 write_jar()
                 release.verify_apk(apk, root, "sender", "0.1.0", 2)
                 with self.assertRaises(release.ReleaseError):

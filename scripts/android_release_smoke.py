@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +42,21 @@ def main() -> None:
             release.sign(inputs, output, args.sdk_tools, "v0.0.0-ci", commit)
             receipt = json.loads((output / "android-signing.json").read_text(encoding="utf-8"))
             release.require(len(receipt["apks"]) == 2 and receipt["certificateSha256"] == release.digest(cert), "fixture receipt invalid")
+            release.require(set(receipt["noticesSha256"]) == set(release.ASSET_NAMES), "fixture receipt lacks notice hashes")
+            for asset in release.ASSET_NAMES:
+                release.require(release.digest(output / asset) == receipt["noticesSha256"][asset], "published notice differs from receipt")
+            # Exercise a real APK with one required legal asset removed, not a mock.
+            missing = private / "missing-notice.apk"
+            with zipfile.ZipFile(inputs / "sender-unsigned.apk") as source, zipfile.ZipFile(missing, "w") as altered:
+                for entry in source.infolist():
+                    if entry.filename != "assets/THIRD_PARTY_NOTICES.txt":
+                        altered.writestr(entry, source.read(entry))
+            try:
+                release.verify_apk(missing, args.sdk_tools, "sender", "0.0.0-ci", 2)
+            except release.ReleaseError:
+                pass
+            else:
+                raise release.ReleaseError("real APK missing notices was accepted")
             for label, change in (("wrong-certificate", {"ANDROID_SIGNING_CERT_SHA256": "0" * 64}),
                                   ("wrong-password", {"ANDROID_KEYSTORE_PASSWORD": "wrong-fixture-password"}),
                                   ("missing-secret", {"ANDROID_KEYSTORE_BASE64": ""})):
@@ -54,7 +70,7 @@ def main() -> None:
                         raise release.ReleaseError("invalid signing configuration accepted")
                 release.require(not failed.exists(), "partial signed outputs leaked")
                 release.require(not list(private.glob("frameark-sign-*")), "temporary signing key survived cleanup")
-        print("Release smoke passed: both real APKs, fixture certificate, wrong fingerprint/password/missing secret rejection, no partial outputs or retained key.")
+        print("Release smoke passed: both real APKs and embedded/sidecar notices, missing legal asset rejection, fixture certificate, wrong fingerprint/password/missing secret rejection, no partial outputs or retained key.")
 
 
 if __name__ == "__main__":

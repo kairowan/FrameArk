@@ -348,6 +348,16 @@ custody remain owner decisions.
 Python release/repository tooling also receives security-extended CodeQL analysis,
 required by `security-gate`; workflow analysis alone does not cover signer code.
 
+Distributable APKs must contain a verified third-party notice set tied to the
+current Cargo lockfile, reviewed Android runtime hashes and notice policy. The
+same three sidecars are hash-bound in release input/receipt schema 2. Generation
+checks original crate archive hashes and pinned supplements; archive entries are
+bounded and read without filesystem extraction. Missing coverage, stale/tampered
+texts, duplicate entries, links and traversal fail before signing secrets are
+loaded. Local dependency-cache paths never enter public indexes. This is packaging
+integrity evidence, not a legal/patent clearance; see
+[dependency notices](docs/DEPENDENCY_NOTICES.md).
+
 The experimental Android reference Sender accepts only explicitly pasted,
 bounded private-IPv4 pairing tickets and a separately entered PIN. Tickets
 contain an ephemeral **public** TLS certificate and endpoint, not a secret key,

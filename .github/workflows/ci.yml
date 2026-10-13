@@ -129,6 +129,9 @@ jobs:
           test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
           test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
           test -f "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
+          rustup component add rust-docs
+          ./gradlew --no-daemon writeReleaseRuntimeInventories
+          python scripts/third_party_notices.py --output build/third-party-notices/assets --ndk-root "$ANDROID_NDK_LATEST_HOME"
           ./gradlew --no-daemon assembleRelease -PframearkVersionName=0.0.0-ci -PframearkVersionCode=2
           python scripts/android_release_smoke.py --sdk-tools "$ANDROID_HOME/build-tools/35.0.0"
 

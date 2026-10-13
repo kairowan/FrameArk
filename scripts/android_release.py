@@ -16,6 +16,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from verify_third_party_notices import ASSET_NAMES, verify as verify_notices
 
 APPS = ("receiver", "sender")
 SECRET_NAMES = ("ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD")
@@ -72,7 +73,7 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_apk(path: Path, sdk_tools: Path, app: str, name: str, code: int) -> None:
+def verify_apk(path: Path, sdk_tools: Path, app: str, name: str, code: int) -> dict[str, str]:
     require(path.is_file() and not path.is_symlink(), "release APK missing")
     badging = run([tool(sdk_tools, "aapt"), "dump", "badging", path], "APK manifest validation failed")
     package = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging, re.MULTILINE)
@@ -90,6 +91,15 @@ def verify_apk(path: Path, sdk_tools: Path, app: str, name: str, code: int) -> N
             if re.fullmatch(r"classes[0-9]*\.dex", entry):
                 data = archive.read(entry)
                 require(b"CaptureFixtureActivity" not in data and b"PlaybackNetworkProbe" not in data, "test-only class present")
+        assets = {}
+        for asset in ASSET_NAMES:
+            entry = "assets/" + asset
+            require(entry in names and 0 < archive.getinfo(entry).file_size <= 32 * 1024 * 1024, "APK third-party notice asset missing or oversized")
+            assets[asset] = archive.read(entry)
+        try:
+            return verify_notices(assets, Path(__file__).resolve().parent.parent)
+        except (ValueError, KeyError, TypeError, OSError, RecursionError, zipfile.BadZipFile):
+            raise ReleaseError("APK third-party notice verification failed") from None
 
 
 def fingerprint(output: str) -> str:
@@ -121,13 +131,19 @@ def prepare(repo: Path, output: Path, sdk_tools: Path, tag: str, commit: str, co
     require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None and 1 <= code <= 2_100_000_000, "invalid release identity")
     sources = {app: repo / f"apps/android/{app}/build/outputs/apk/release/{app}-release-unsigned.apk" for app in APPS}
     # Validate both before writing any distribution; never guess a signed filename.
+    notices = None
     for app, source in sources.items():
-        verify_apk(source, sdk_tools, app, name, code)
+        current = verify_apk(source, sdk_tools, app, name, code)
+        require(notices is None or notices == current, "APK notice sets differ")
+        notices = current
     fresh_directory(output)
     for app, source in sources.items():
         shutil.copyfile(source, output / f"{app}-unsigned.apk")
-    metadata = {"schema": 1, "tag": tag, "commit": commit, "versionCode": code,
-                "unsignedSha256": {app: digest(path) for app, path in sources.items()}}
+    with zipfile.ZipFile(sources["receiver"]) as archive:
+        for asset in ASSET_NAMES:
+            (output / asset).write_bytes(archive.read("assets/" + asset))
+    metadata = {"schema": 2, "tag": tag, "commit": commit, "versionCode": code,
+                "unsignedSha256": {app: digest(path) for app, path in sources.items()}, "noticesSha256": notices}
     (output / "android-inputs.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
@@ -135,7 +151,7 @@ def validate_inputs(inputs: Path, tag: str, commit: str) -> dict:
     path = inputs / "android-inputs.json"
     require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 8192, "release manifest missing or oversized")
     metadata = json.loads(path.read_text(encoding="utf-8"))
-    require(isinstance(metadata, dict) and set(metadata) == {"schema", "tag", "commit", "versionCode", "unsignedSha256"} and type(metadata["schema"]) is int and metadata["schema"] == 1, "release manifest schema mismatch")
+    require(isinstance(metadata, dict) and set(metadata) == {"schema", "tag", "commit", "versionCode", "unsignedSha256", "noticesSha256"} and type(metadata["schema"]) is int and metadata["schema"] == 2, "release manifest schema mismatch")
     require(metadata["tag"] == tag and metadata["commit"] == commit and re.fullmatch(r"[0-9a-f]{40}", commit) is not None, "release manifest identity mismatch")
     require(type(metadata["versionCode"]) is int and 1 <= metadata["versionCode"] <= 2_100_000_000, "invalid Android version code")
     require(isinstance(metadata["unsignedSha256"], dict) and set(metadata["unsignedSha256"]) == set(APPS), "release requires both APKs")
@@ -144,6 +160,12 @@ def validate_inputs(inputs: Path, tag: str, commit: str) -> dict:
         expected = metadata["unsignedSha256"][app]
         require(isinstance(expected, str) and HEX.fullmatch(expected) is not None, "invalid APK hash")
         require(path.is_file() and not path.is_symlink() and digest(path) == expected, "unsigned APK hash mismatch")
+    require(isinstance(metadata["noticesSha256"], dict) and set(metadata["noticesSha256"]) == set(ASSET_NAMES), "release requires all three notice artifacts")
+    for asset in ASSET_NAMES:
+        path = inputs / asset
+        expected = metadata["noticesSha256"][asset]
+        require(isinstance(expected, str) and HEX.fullmatch(expected) is not None, "invalid notice artifact hash")
+        require(path.is_file() and not path.is_symlink() and digest(path) == expected, "notice artifact hash mismatch")
     return metadata
 
 
@@ -170,7 +192,7 @@ def sign(inputs: Path, output: Path, sdk_tools: Path, tag: str, commit: str) -> 
     name = version(tag)
     metadata = validate_inputs(inputs, tag, commit)
     for app in APPS:
-        verify_apk(inputs / f"{app}-unsigned.apk", sdk_tools, app, name, metadata["versionCode"])
+        require(verify_apk(inputs / f"{app}-unsigned.apk", sdk_tools, app, name, metadata["versionCode"]) == metadata["noticesSha256"], "APK notices differ from release manifest")
     key, alias, env, expected = signing_environment()
     require(not output.exists(), "signed output directory already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -193,9 +215,12 @@ def sign(inputs: Path, output: Path, sdk_tools: Path, tag: str, commit: str) -> 
             verification = run([*signer(sdk_tools), "verify", "--verbose", "--print-certs", "-Werr", target], "APK signature verification failed")
             require(fingerprint(verification) == expected, "APK signing certificate mismatch")
             run([tool(sdk_tools, "zipalign"), "-c", "-P", "16", "4", target], "signed APK alignment failed")
-            verify_apk(target, sdk_tools, app, name, metadata["versionCode"])
-        receipt = {"schema": 1, "tag": tag, "commit": commit, "versionCode": metadata["versionCode"],
-                   "certificateSha256": expected, "apks": {p.name: digest(p) for p in sorted(staged.glob("*.apk"))}}
+            require(verify_apk(target, sdk_tools, app, name, metadata["versionCode"]) == metadata["noticesSha256"], "signed APK notice set changed")
+        for asset in ASSET_NAMES:
+            shutil.copyfile(inputs / asset, staged / asset)
+        receipt = {"schema": 2, "tag": tag, "commit": commit, "versionCode": metadata["versionCode"],
+                   "certificateSha256": expected, "apks": {p.name: digest(p) for p in sorted(staged.glob("*.apk"))},
+                   "noticesSha256": metadata["noticesSha256"]}
         (staged / "android-signing.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
         # No partial APK set is published on any failure.
         publish_staged(staged, output)

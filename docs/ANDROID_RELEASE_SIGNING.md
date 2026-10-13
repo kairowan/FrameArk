@@ -57,11 +57,14 @@ main 提交；不要给同一提交打多个用于应用更新的版本 tag，�
 ## 产物及边界
 
 正式分发目录包括 Receiver 与 Sender 签名 ARM64 APK、`android-signing.json`
-（tag/commit/versionCode/证书指纹/两包哈希）、source ZIP、Rust SPDX SBOM、项目
+（schema 2：tag/commit/versionCode/证书指纹/两包和声明文件哈希）、source ZIP、Rust SPDX SBOM、项目
 许可证、当前兼容性说明和 `SHA256SUMS`。OIDC 证明构建来源，不替代 APK 签名。
 Rust SBOM 不代表 Android SDK、平台编解码器或地区专利的全面法律结论。
-自动收集全部第三方许可证/NOTICE 的分发包仍待补齐（包括 Android runtime 依赖）；
-在完成该项及分发审查前，不应批准实际发布，预发布也不能免除许可证义务。
+现在还包含 `THIRD_PARTY_NOTICES.txt`、`third-party-index.json`、
+`third-party-licenses.zip`，与两个 APK 内的 assets 完全一致。构建先核对完整 Rust
+锁定依赖、两个应用实际解析的 JVM runtime、Rust 标准库及 NDK 运行时声明；签名前
+拒绝缺失、篡改、过期或两包不一致的声明。详见[声明生成与审查](DEPENDENCY_NOTICES.md)。
+自动化检查不等于法律/专利许可结论，正式分发审查仍必需，预发布也不能免除义务。
 
 **当前本地预览使用 Android Debug 证书。** 正式密钥不同会导致不能覆盖安装；需
 提前选择迁移方式并保留数据，不要要求用户直接卸载丢失信任配置。当前没有跨签名
@@ -71,9 +74,9 @@ Rust SBOM 不代表 Android SDK、平台编解码器或地区专利的全面法�
 
 `python -m unittest discover -s scripts -p 'test_*.py'` 验证 tag/环境/输入哈希/
 证书/平台边界。CI 的 Android job 还构建 `0.0.0-ci` / code 2 的实际 unsigned
-双 APK，运行 `scripts/android_release_smoke.py --sdk-tools <SDK build-tools/35.0.0>`。
+双 APK（构建前生成并嵌入声明），运行 `scripts/android_release_smoke.py --sdk-tools <SDK build-tools/35.0.0>`。
 它生成两日有效的独立 fixture 密钥，真实签名、验证两包，测试错误证书、错误密码、
-缺 secret 与失败清理，并删除测试私钥和测试产物。不会上传测试签名 APK 给用户。
+缺 secret、真实 APK 缺失声明与失败清理，并删除测试私钥和测试产物。不会上传测试签名 APK 给用户。
 Windows PowerShell 下 Gradle 参数应整体加引号，例如 `'-PframearkVersionName=0.0.0-ci'`。
 
 没有生产 secrets 和明确发布版本时，不创建 tag、触发正式签名或声称生产发布已验收。
