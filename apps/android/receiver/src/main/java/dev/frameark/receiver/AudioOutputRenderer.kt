@@ -13,29 +13,40 @@ import android.media.AudioTrack
  */
 class AudioOutputRenderer(
     private val trackFactory: (PcmTrackConfig) -> AudioTrack = ::createTrack,
+    private val onWritten: () -> Unit = {},
 ) {
     private var track: AudioTrack? = null
+    private val pending = PcmWriteQueue()
 
     /** Opens and starts an audio output for the negotiated PCM format. */
     fun configure(config: PcmTrackConfig) {
         reset()
-        track = trackFactory(config).also { it.play() }
+        val output = trackFactory(config)
+        try { output.play(); track = output } catch (error: Throwable) {
+            output.release()
+            throw error
+        }
     }
 
     /** Writes one interleaved PCM16 buffer, applying explicit backpressure. */
     fun render(pcm16: ByteArray) {
-        require(pcm16.isNotEmpty()) { "PCM buffer must not be empty" }
+        check(track != null) { "audio output is not configured" }
+        pending.append(pcm16)
+        drain()
+    }
+
+    fun drain() {
+        if (track == null) return
         val output = track ?: error("audio output is not configured")
-        var offset = 0
-        while (offset < pcm16.size) {
-            val written = output.write(pcm16, offset, pcm16.size - offset, AudioTrack.WRITE_BLOCKING)
-            require(written > 0) { "audio output rejected PCM data" }
-            offset += written
+        val completed = pending.drain { data, offset, length ->
+            output.write(data, offset, length, AudioTrack.WRITE_NON_BLOCKING)
         }
+        repeat(completed) { onWritten() }
     }
 
     /** Stops, flushes, and releases the output. */
     fun reset() {
+        pending.clear()
         val output = track ?: return
         try {
             output.pause()

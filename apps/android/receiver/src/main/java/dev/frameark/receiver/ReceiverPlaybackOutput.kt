@@ -1,0 +1,66 @@
+package dev.frameark.receiver
+
+import android.view.Surface
+import java.util.concurrent.atomic.AtomicLong
+
+/** Process-local OS output ownership only; Rust owns session/order/timing. */
+object ReceiverPlaybackOutput {
+    private var surface: Surface? = null
+    private val videoRendered = AtomicLong()
+    private val audioRendered = AtomicLong()
+    private var videoSubmitted = 0L
+    private var error = false
+    private var failureLocation = ""
+    private val video = VideoDecoderRenderer(onRendered = { videoRendered.incrementAndGet() })
+    private val audio = AudioDecoderRenderer(onPcm = { audioRendered.incrementAndGet() })
+
+    @Synchronized fun attach(value: Surface) { reset(); surface = value }
+    @Synchronized fun detach(value: Surface) {
+        if (surface === value) { try { reset() } finally { surface = null } }
+    }
+
+    @Synchronized fun consume(event: FrameArkNative.PlaybackEvent) {
+        try {
+            when (event) {
+                is FrameArkNative.PlaybackEvent.Video -> {
+                    val config = event.config
+                    require(config.codec == FrameArkNative.MediaCodecKind.H264)
+                    val target = surface?.takeIf { it.isValid } ?: error("video surface unavailable")
+                    video.configure(VideoTrackConfig(config.width, config.height, config.frameRateNumerator, config.frameRateDenominator), target)
+                    error = false
+                }
+                is FrameArkNative.PlaybackEvent.Audio -> { audio.configure(event.config); error = false }
+                is FrameArkNative.PlaybackEvent.Frame -> when (event.frame.kind) {
+                    FrameArkNative.MediaKind.VIDEO -> {
+                        video.render(event.frame.payload, event.frame.pts, event.frame.keyframe)
+                        videoSubmitted++
+                    }
+                    FrameArkNative.MediaKind.AUDIO -> audio.render(event.frame)
+                }
+                FrameArkNative.PlaybackEvent.Reset -> reset()
+            }
+        } catch (failure: Throwable) { recordFailure(failure); runCatching { reset() }; throw failure }
+    }
+
+    @Synchronized fun drain() {
+        try { video.drain(); audio.drain() } catch (failure: Throwable) {
+            recordFailure(failure); runCatching { reset() }; throw failure
+        }
+    }
+
+    @Synchronized fun reset() { try { video.reset() } finally { audio.reset() } }
+    @Synchronized fun diagnostic(): String =
+        "Video submitted: $videoSubmitted; rendered: ${videoRendered.get()}; PCM buffers: ${audioRendered.get()}" +
+            if (error) "\nPlayback failed ($failureLocation). Stop and restart; inspect codec/surface support." else ""
+
+    private fun recordFailure(failure: Throwable) {
+        error = true
+        // Static source location only: never retain/log a decoder's raw message.
+        failureLocation = failure.stackTrace.firstOrNull { it.className.startsWith("dev.frameark.receiver.") }
+            ?.let { "${it.fileName}:${it.lineNumber}" } ?: "platform output"
+    }
+
+    fun renderedVideoFrames(): Long = videoRendered.get()
+    fun renderedAudioBuffers(): Long = audioRendered.get()
+    @Synchronized fun outputsReleased(): Boolean = !video.isConfigured() && !audio.isConfigured()
+}

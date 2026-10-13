@@ -4,7 +4,7 @@
 //! desktop, and future web adapters implement them with their native codec,
 //! audio, clock, and rendering APIs.
 
-use frameark_core::{AudioConfig, Result, TrackId, VideoConfig};
+use frameark_core::{AudioConfig, Result, TimeBase, TrackId, VideoConfig};
 
 /// An encoded video sample handed to a platform decoder or renderer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +15,8 @@ pub struct VideoFrame<'a> {
     pub data: &'a [u8],
     /// Presentation timestamp expressed in the track time base.
     pub timestamp: i64,
+    /// Seconds per timestamp tick; never infer this from the codec or frame rate.
+    pub time_base: TimeBase,
     /// Whether the sample is a random-access/key frame.
     pub keyframe: bool,
 }
@@ -28,6 +30,8 @@ pub struct AudioFrame<'a> {
     pub data: &'a [u8],
     /// Presentation timestamp expressed in the track time base.
     pub timestamp: i64,
+    /// Seconds per timestamp tick, retained from the received media packet.
+    pub time_base: TimeBase,
 }
 
 /// A platform-owned video rendering surface and decoder adapter.

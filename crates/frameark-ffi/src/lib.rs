@@ -7,6 +7,9 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(feature = "android-playback-probe")]
+mod playback_probe;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -53,6 +56,8 @@ const NETWORK_SERVER_NAME: &str = "frameark.local";
 const DISCOVERY_INSTANCE_NAME: &str = "FrameArk Receiver";
 const DISCOVERY_HOST_NAME: &str = "frameark.local.";
 const NETWORK_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PLAYBACK_EVENTS: usize = 128;
+const MAX_PLAYBACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Returns the core ABI version expected by the Android receiver.
 #[unsafe(no_mangle)]
@@ -642,6 +647,7 @@ struct NativeReceiverState {
     stopping: bool,
     session: Option<Session>,
     media_queue: VecDeque<NativeMediaFrame>,
+    playback_queue: PlaybackQueue,
     video_config: Option<VideoConfig>,
     audio_config: Option<AudioConfig>,
     identity_alias: Option<String>,
@@ -653,6 +659,117 @@ struct NativeReceiverState {
     peer_proof_required: bool,
     peer_proof_bridge: PeerProofBridge,
     network: Option<NetworkRuntime>,
+}
+
+/// Ordered platform events: config and teardown cannot overtake media.
+#[derive(Default)]
+struct PlaybackQueue {
+    events: VecDeque<Vec<u8>>,
+    bytes: usize,
+    clock: Option<(i64, Instant)>,
+    arrival_clock: Option<(i64, Instant)>,
+}
+
+impl PlaybackQueue {
+    fn push(&mut self, kind: u8, payload: &[u8]) -> Result<(), ()> {
+        let size = payload.len().checked_add(6).ok_or(())?;
+        if self.events.len() >= MAX_PLAYBACK_EVENTS || size > MAX_PLAYBACK_BYTES - self.bytes {
+            return Err(());
+        }
+        if matches!(kind, 3 | 4) {
+            let pts = i64::from_be_bytes(payload.get(7..15).ok_or(())?.try_into().map_err(|_| ())?);
+            let (origin, started) = *self.arrival_clock.get_or_insert((pts, Instant::now()));
+            if i128::from(pts) - i128::from(origin) - started.elapsed().as_micros() as i128
+                > 5_000_000
+            {
+                return Err(());
+            }
+        }
+        let mut event = Vec::with_capacity(size);
+        event.extend_from_slice(b"FAPE");
+        event.extend_from_slice(&[1, kind]);
+        event.extend_from_slice(payload);
+        self.bytes += size;
+        self.events.push_back(event);
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<Vec<u8>> {
+        let next = self.events.front()?;
+        if matches!(next[5], 3 | 4) {
+            let pts = i64::from_be_bytes(next.get(13..21)?.try_into().ok()?);
+            let (origin, started) = *self.clock.get_or_insert((pts, Instant::now()));
+            if i128::from(pts) - i128::from(origin) > started.elapsed().as_micros() as i128 {
+                return None;
+            }
+        }
+        let event = self.events.pop_front()?;
+        self.bytes -= event.len();
+        if event[5] == 5 {
+            self.clock = None;
+            // A prepare reset may precede already queued frames. Their arrival
+            // origin still bounds the current session until its next prepare.
+            if self.events.is_empty() {
+                self.arrival_clock = None;
+            }
+        }
+        Some(event)
+    }
+
+    fn clear(&mut self) {
+        self.events.clear();
+        self.bytes = 0;
+        self.clock = None;
+        self.arrival_clock = None;
+    }
+
+    fn reset(&mut self, discard: bool) {
+        if discard || self.push(5, &[]).is_err() {
+            self.clear();
+            // A reset must never be lost to producer backpressure.
+            let _ = self.push(5, &[]);
+        }
+    }
+}
+
+fn enqueue_playback(kind: u8, payload: &[u8]) -> Result<(), ()> {
+    let mut state = receiver_state().lock().map_err(|_| ())?;
+    if state.stopping || state.session.is_none() {
+        #[cfg(feature = "android-playback-probe")]
+        playback_probe::record_failure("playback.inactive");
+        return Err(());
+    }
+    let result = state.playback_queue.push(kind, payload);
+    #[cfg(feature = "android-playback-probe")]
+    if result.is_err() {
+        playback_probe::record_failure("playback.queue_unavailable");
+    }
+    result
+}
+
+fn reset_playback(discard: bool) {
+    if let Ok(mut state) = receiver_state().lock() {
+        state.playback_queue.reset(discard);
+    }
+}
+
+/// FAPE1 events contain ordered configuration, microsecond frames and reset.
+/// The legacy FAMF polling seam is separate and is not the network player.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePollPlaybackEvent(
+    env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jbyteArray {
+    let Some(event) = receiver_state()
+        .lock()
+        .ok()
+        .and_then(|mut state| state.playback_queue.pop())
+    else {
+        return std::ptr::null_mut();
+    };
+    env.byte_array_from_slice(&event)
+        .map(|array| array.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 impl NativeReceiverState {
@@ -679,6 +796,7 @@ fn begin_receiver_stop(state: &mut NativeReceiverState) -> Result<Option<Receive
         .take()
         .is_some_and(|mut session| session.transition(SessionState::Closed).is_err());
     state.media_queue.clear();
+    state.playback_queue.clear();
     state.video_config = None;
     state.audio_config = None;
     state.peer_proof_bridge.clear();
@@ -692,6 +810,7 @@ fn finish_receiver_stop(state: &mut NativeReceiverState) {
     // A listener callback may have completed after begin_stop released the
     // lock. It has now been joined; remove all leftovers before reopening.
     state.media_queue.clear();
+    state.playback_queue.clear();
     state.video_config = None;
     state.audio_config = None;
     state.peer_proof_bridge.clear();
@@ -929,10 +1048,14 @@ impl NetworkRuntime {
                             Ok(receiver) => receiver,
                             Err(_) => continue,
                         };
-                        if until_stopped(&stop_thread, receiver.serve(NETWORK_OPERATION_TIMEOUT))
-                            .await
-                            .is_none()
-                        {
+                        let outcome =
+                            until_stopped(&stop_thread, receiver.serve(NETWORK_OPERATION_TIMEOUT))
+                                .await;
+                        #[cfg(feature = "android-playback-probe")]
+                        if let Some(Err(error)) = &outcome {
+                            playback_probe::record_failure(error.code());
+                        }
+                        if outcome.is_none() {
                             break;
                         }
                     }
@@ -994,7 +1117,7 @@ const fn network_policy() -> ReceiverPolicy {
         max_width: 3840,
         max_height: 2160,
         max_fps: 60,
-        max_channels: 8,
+        max_channels: 2,
     }
 }
 
@@ -1002,6 +1125,7 @@ struct NetworkBackend;
 
 impl SessionBackend for NetworkBackend {
     fn prepare(&mut self, _offer: SessionOffer) -> frameark_core::Result<()> {
+        reset_playback(true);
         Ok(())
     }
 
@@ -1010,6 +1134,7 @@ impl SessionBackend for NetworkBackend {
     }
 
     fn reset(&mut self) -> frameark_core::Result<()> {
+        reset_playback(false);
         Ok(())
     }
 }
@@ -1021,21 +1146,22 @@ impl VideoRenderer for NetworkVideoRenderer {
 
     fn configure(&mut self, config: VideoConfig) -> std::result::Result<(), Self::Error> {
         set_video_config(config);
-        Ok(())
+        enqueue_playback(1, &encode_video_config(config))
     }
 
     fn render(&mut self, frame: VideoFrame<'_>) -> std::result::Result<(), Self::Error> {
-        if submit_media_frame(NativeMediaFrame {
-            kind: MEDIA_KIND_VIDEO,
-            pts: frame.timestamp,
-            keyframe: frame.keyframe,
-            payload: frame.data.to_vec(),
-        }) == 0
-        {
-            Ok(())
-        } else {
-            Err(())
-        }
+        enqueue_playback(
+            3,
+            &encode_media_frame(&NativeMediaFrame {
+                kind: MEDIA_KIND_VIDEO,
+                pts: frame
+                    .time_base
+                    .to_microseconds(frame.timestamp)
+                    .map_err(|_| ())?,
+                keyframe: frame.keyframe,
+                payload: frame.data.to_vec(),
+            }),
+        )
     }
 
     fn reset(&mut self) -> std::result::Result<(), Self::Error> {
@@ -1050,21 +1176,22 @@ impl AudioRenderer for NetworkAudioRenderer {
 
     fn configure(&mut self, config: AudioConfig) -> std::result::Result<(), Self::Error> {
         set_audio_config(config);
-        Ok(())
+        enqueue_playback(2, &encode_audio_config(config))
     }
 
     fn render(&mut self, frame: AudioFrame<'_>) -> std::result::Result<(), Self::Error> {
-        if submit_media_frame(NativeMediaFrame {
-            kind: MEDIA_KIND_AUDIO,
-            pts: frame.timestamp,
-            keyframe: false,
-            payload: frame.data.to_vec(),
-        }) == 0
-        {
-            Ok(())
-        } else {
-            Err(())
-        }
+        enqueue_playback(
+            4,
+            &encode_media_frame(&NativeMediaFrame {
+                kind: MEDIA_KIND_AUDIO,
+                pts: frame
+                    .time_base
+                    .to_microseconds(frame.timestamp)
+                    .map_err(|_| ())?,
+                keyframe: false,
+                payload: frame.data.to_vec(),
+            }),
+        )
     }
 
     fn reset(&mut self) -> std::result::Result<(), Self::Error> {
@@ -1187,6 +1314,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
         return -4;
     };
     state.media_queue.clear();
+    state.playback_queue.clear();
     state.video_config = None;
     state.audio_config = None;
     state.session = Some(session);
@@ -2194,7 +2322,7 @@ mod tests {
                     .await
                     .unwrap();
                 sender.start(Duration::from_secs(5)).await.unwrap();
-                let time_base = TimeBase::new(90_000, 1).unwrap();
+                let time_base = TimeBase::new(1, 90_000).unwrap();
                 let video_track = TrackId::new("video-0").unwrap();
                 let audio_track = TrackId::new("audio-0").unwrap();
                 let video = VideoFrame::new(
@@ -2209,7 +2337,7 @@ mod tests {
                 let audio = AudioPacket::new(
                     audio_track,
                     1,
-                    MediaTimestamp::new(0, TimeBase::new(48_000, 1).unwrap()),
+                    MediaTimestamp::new(0, TimeBase::new(1, 48_000).unwrap()),
                     960,
                     vec![0xF8, 0xFF, 0xFE],
                 )
@@ -2237,15 +2365,12 @@ mod tests {
         let mut state = receiver_state().lock().unwrap();
         assert_eq!(state.video_config.unwrap().width, 1280);
         assert_eq!(state.audio_config.unwrap().sample_rate, 48_000);
-        assert_eq!(state.media_queue.len(), 2);
+        let events: Vec<_> = std::iter::from_fn(|| state.playback_queue.pop()).collect();
         assert_eq!(
-            state.media_queue.pop_front().unwrap().kind,
-            MEDIA_KIND_VIDEO
+            events.iter().map(|event| event[5]).collect::<Vec<_>>(),
+            [5, 1, 2, 3, 4, 5]
         );
-        assert_eq!(
-            state.media_queue.pop_front().unwrap().kind,
-            MEDIA_KIND_AUDIO
-        );
+        assert!(state.media_queue.is_empty());
         state.session = None;
         state.media_queue.clear();
         state.network = None;
@@ -2331,7 +2456,7 @@ mod tests {
                     let video = VideoFrame::new(
                         TrackId::new("video-0").unwrap(),
                         1,
-                        MediaTimestamp::new(0, TimeBase::new(90_000, 1).unwrap()),
+                        MediaTimestamp::new(0, TimeBase::new(1, 90_000).unwrap()),
                         None,
                         true,
                         vec![0, 0, 0, 1, 0x65, cycle],
@@ -2340,7 +2465,7 @@ mod tests {
                     let audio = AudioPacket::new(
                         TrackId::new("audio-0").unwrap(),
                         1,
-                        MediaTimestamp::new(0, TimeBase::new(48_000, 1).unwrap()),
+                        MediaTimestamp::new(0, TimeBase::new(1, 48_000).unwrap()),
                         960,
                         vec![0xF8, 0xFF, cycle],
                     )
@@ -2373,15 +2498,12 @@ mod tests {
             let mut state = receiver_state().lock().unwrap();
             assert_eq!(state.video_config.unwrap().width, 1280);
             assert_eq!(state.audio_config.unwrap().sample_rate, 48_000);
-            assert_eq!(state.media_queue.len(), 2);
+            let events: Vec<_> = std::iter::from_fn(|| state.playback_queue.pop()).collect();
             assert_eq!(
-                state.media_queue.pop_front().unwrap().kind,
-                MEDIA_KIND_VIDEO
+                events.iter().map(|event| event[5]).collect::<Vec<_>>(),
+                [5, 1, 2, 3, 4, 5]
             );
-            assert_eq!(
-                state.media_queue.pop_front().unwrap().kind,
-                MEDIA_KIND_AUDIO
-            );
+            assert!(state.media_queue.is_empty());
             state.session = None;
             state.video_config = None;
             state.audio_config = None;
@@ -2416,6 +2538,7 @@ mod tests {
                 DeviceId::try_from("media-device").unwrap(),
             )),
             media_queue: VecDeque::new(),
+            playback_queue: PlaybackQueue::default(),
             video_config: None,
             audio_config: None,
             identity_alias: None,
@@ -2478,6 +2601,95 @@ mod tests {
     }
 
     #[test]
+    fn ordered_playback_queue_paces_microseconds_and_resets_its_clock() {
+        let mut queue = PlaybackQueue::default();
+        let frame = |pts| {
+            encode_media_frame(&NativeMediaFrame {
+                kind: MEDIA_KIND_VIDEO,
+                pts,
+                keyframe: true,
+                payload: vec![1],
+            })
+        };
+        queue.push(3, &frame(2_000_000)).unwrap();
+        queue.push(3, &frame(3_000_000)).unwrap();
+        assert!(
+            queue.push(3, &frame(i64::MAX)).is_err(),
+            "far future cannot pin outputs indefinitely"
+        );
+        queue.reset(false);
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none(), "future frame must wait");
+        assert_eq!(queue.events.len(), 2, "reset cannot overtake the frame");
+        queue.clock = Some((2_000_000, Instant::now() - Duration::from_secs(2)));
+        assert!(queue.pop().is_some());
+        assert_eq!(queue.pop().unwrap(), b"FAPE\x01\x05");
+        assert!(queue.clock.is_none());
+        queue.push(3, &frame(50_000_000)).unwrap();
+        assert!(queue.pop().is_some(), "new timeline starts immediately");
+    }
+
+    #[test]
+    fn network_renderers_convert_both_track_clocks_to_microseconds() {
+        let _guard = test_guard();
+        {
+            let mut state = receiver_state().lock().unwrap();
+            state.session = Some(network_session(DeviceId::try_from("clock-test").unwrap()));
+            state.playback_queue.clear();
+        }
+        let track_id = TrackId::new("video-0").unwrap();
+        NetworkVideoRenderer
+            .render(frameark_api::VideoFrame {
+                track_id: &track_id,
+                data: &[1],
+                timestamp: 90_000,
+                time_base: TimeBase::new(1, 90_000).unwrap(),
+                keyframe: true,
+            })
+            .unwrap();
+        NetworkAudioRenderer
+            .render(AudioFrame {
+                track_id: &track_id,
+                data: &[2],
+                timestamp: 48_000,
+                time_base: TimeBase::new(1, 48_000).unwrap(),
+            })
+            .unwrap();
+        let mut state = receiver_state().lock().unwrap();
+        for kind in [3, 4] {
+            let event = state.playback_queue.pop().unwrap();
+            assert_eq!(event[5], kind);
+            assert_eq!(
+                i64::from_be_bytes(event[13..21].try_into().unwrap()),
+                1_000_000
+            );
+        }
+        state.session = None;
+        state.playback_queue.clear();
+    }
+
+    #[test]
+    fn ordered_playback_queue_bounds_bytes_and_never_loses_reset() {
+        let mut queue = PlaybackQueue::default();
+        for _ in 0..MAX_PLAYBACK_EVENTS {
+            queue.push(5, &[]).unwrap();
+        }
+        assert!(queue.push(5, &[]).is_err());
+        queue.reset(false);
+        assert_eq!(queue.pop().unwrap(), b"FAPE\x01\x05");
+        assert!(queue.pop().is_none());
+        assert_eq!(queue.bytes, 0);
+        let payload = vec![0; MAX_JNI_MEDIA_FRAME_BYTES];
+        for _ in 0..3 {
+            queue.push(3, &payload).unwrap();
+        }
+        assert!(queue.push(3, &payload).is_err());
+        queue.reset(true);
+        assert_eq!(queue.events.len(), 1);
+        assert_eq!(queue.bytes, 6);
+    }
+
+    #[test]
     fn jni_media_queue_sink_accepts_encoded_platform_samples() {
         let _guard = test_guard();
         let state = receiver_state();
@@ -2491,6 +2703,7 @@ mod tests {
             track_id: &track_id,
             data: &[7, 8],
             timestamp: 90_000,
+            time_base: TimeBase::new(1, 90_000).unwrap(),
             keyframe: true,
         })
         .unwrap();

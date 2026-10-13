@@ -151,6 +151,7 @@ where
                         track_id: frame.track_id(),
                         data: frame.payload(),
                         timestamp: frame.presentation().value(),
+                        time_base: frame.presentation().time_base(),
                         keyframe: frame.is_keyframe(),
                     })
                     .map_err(|_| renderer_error("fanp.video_render"))
@@ -166,6 +167,7 @@ where
                         track_id: packet.track_id(),
                         data: packet.payload(),
                         timestamp: packet.timestamp().value(),
+                        time_base: packet.timestamp().time_base(),
                     })
                     .map_err(|_| renderer_error("fanp.audio_render"))
             }

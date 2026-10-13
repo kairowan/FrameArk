@@ -15,6 +15,9 @@ class MediaPlaybackPump(
     maxFramesPerDrain: Int = DEFAULT_MAX_FRAMES_PER_DRAIN,
     private val videoConfigConsumer: (FrameArkNative.VideoConfig) -> Unit = {},
     private val audioConfigConsumer: (FrameArkNative.AudioConfig) -> Unit = {},
+    private val eventConsumer: ((FrameArkNative.PlaybackEvent) -> Unit)? = null,
+    private val drainOutput: () -> Unit = {},
+    private val resetOutput: () -> Unit = {},
 ) {
     companion object {
         const val DEFAULT_MAX_FRAMES_PER_DRAIN = 8
@@ -39,6 +42,7 @@ class MediaPlaybackPump(
     /** Stops polling; queued frames remain owned by Rust until its lifecycle stops. */
     fun stop() {
         active = false
+        resetOutput()
     }
 
     /** Whether this pump will poll the native queue. */
@@ -50,6 +54,16 @@ class MediaPlaybackPump(
      */
     fun drainOnce(): Int {
         if (!active) return 0
+        eventConsumer?.let { consume ->
+            var count = 0
+            while (count < drainLimit) {
+                val event = native.pollPlaybackEvent() ?: break
+                consume(event)
+                count++
+            }
+            drainOutput()
+            return count
+        }
         native.pollVideoConfig()?.let(videoConfigConsumer)
         native.pollAudioConfig()?.let(audioConfigConsumer)
         var dispatched = 0
