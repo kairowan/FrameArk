@@ -72,7 +72,9 @@ jobs:
           cargo test --workspace --all-features --locked
           cargo build --workspace --release --locked
           bash scripts/build_android_native.sh
-          sdkmanager 'build-tools;35.0.0'
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace lint test assembleRelease \
             -PframearkVersionName="$VERSION_NAME" -PframearkVersionCode="$VERSION_CODE"
@@ -139,8 +141,11 @@ jobs:
           distribution: temurin
           java-version: '21'
           verify-signature: true
-      - name: Install pinned Android signing tools
-        run: sdkmanager 'build-tools;35.0.0'
+      - name: Verify pinned preinstalled Android signing tools
+        run: |
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
       - name: Sign both APKs and pin the release certificate
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

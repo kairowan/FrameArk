@@ -55,6 +55,10 @@ publish was performed here. No new package dependency or protocol wire format.
 Python policy tests and actual platform signing smoke are required by CI. The
 Windows smoke exposed a brief file-lock race on atomic directory rename; bounded
 permission-error retries preserve atomic publication and fail closed afterward.
+The first Linux workflow failed before signing because `sdkmanager` was not on
+PATH. Hosted Ubuntu already includes build-tools 35.0.0; workflows now explicitly
+verify the three tools under `ANDROID_HOME` and fail if absent, without relying
+on an unconfigured command-line-tool path or silently changing tool versions.
 Linux CI exercises the full signing path independently. Main Rust/Android/security
 gates remain required. Python security-extended CodeQL analysis of release and
 repository tooling is a required dependency of `security-gate`, alongside
