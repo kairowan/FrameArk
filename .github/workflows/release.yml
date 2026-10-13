@@ -7,118 +7,174 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed or annotated semantic-version tag to publish
+        description: Existing annotated/signed SemVer tag; select the same tag as the workflow ref
         required: true
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  source-release:
-    name: source-release
+  build:
+    name: verified-release-build
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      checks: read
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+      tag: ${{ steps.identity.outputs.tag }}
+      prerelease: ${{ steps.identity.outputs.prerelease }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Check out release tag
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
-      - name: Validate tag and ancestry
-        shell: bash
+          persist-credentials: false
+      - name: Validate annotated tag, checkout and reviewed ancestry
+        id: identity
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag is not semantic-version style: $RELEASE_TAG" >&2
-            exit 1
-          fi
           git fetch origin main --tags
-          git rev-parse "$RELEASE_TAG^{commit}"
-          git merge-base --is-ancestor "$RELEASE_TAG^{commit}" origin/main
-      - name: Validate repository
-        run: python scripts/check_repository.py --repo .
-      - name: Set up Java for Android release checks
-        if: ${{ hashFiles('gradlew') != '' }}
-        uses: actions/setup-java@v6
+          python scripts/android_release.py tag --tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Require completed main CI and security gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.identity.outputs.commit }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/commits/$COMMIT/check-runs?per_page=100" > /tmp/frameark-release-checks.json
+          python scripts/release_checks.py --check-runs /tmp/frameark-release-checks.json
+      - name: Validate repository and release tooling
+        run: |
+          python scripts/check_repository.py --repo .
+          python -m unittest discover -s scripts -p 'test_*.py'
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
           cache: gradle
           verify-signature: true
-      - name: Test releaseable source trees
-        shell: bash
+      - name: Test and build both unsigned production APKs
+        env:
+          VERSION_NAME: ${{ steps.identity.outputs.version_name }}
+          VERSION_CODE: ${{ steps.identity.outputs.version_code }}
         run: |
-          found=false
-          if [[ -f Cargo.toml ]]; then
-            found=true
-            rustup component add rustfmt clippy
-            cargo fmt --all -- --check
-            cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-            cargo test --workspace --all-features --locked
-            cargo build --workspace --release --locked
-          fi
-          if [[ -f gradlew ]]; then
-            found=true
-            bash scripts/build_android_native.sh
-            chmod +x gradlew
-            ./gradlew --no-daemon --stacktrace lint test assembleRelease
-            python scripts/verify_android_native_package.py --apk apps/android/receiver/build/outputs/apk/release/receiver-release.apk
-          fi
-          if [[ "$found" != "true" ]]; then
-            echo "No Rust or Android product manifest exists; refusing to publish a release." >&2
-            exit 1
-          fi
-      - name: Generate deterministic SPDX SBOM
-        shell: bash
+          rustup component add rustfmt clippy
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          cargo build --workspace --release --locked
+          bash scripts/build_android_native.sh
+          sdkmanager 'build-tools;35.0.0'
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace lint test assembleRelease \
+            -PframearkVersionName="$VERSION_NAME" -PframearkVersionCode="$VERSION_CODE"
+      - name: Stage exact dual-APK inputs and source evidence
+        env:
+          COMMIT: ${{ steps.identity.outputs.commit }}
+          VERSION_CODE: ${{ steps.identity.outputs.version_code }}
+          SOURCE_DATE_EPOCH: ${{ steps.identity.outputs.source_date_epoch }}
         run: |
-          if [[ ! -f Cargo.toml ]]; then
-            echo "Rust workspace is required for the release SBOM." >&2
-            exit 1
-          fi
+          python scripts/android_release.py prepare --tag "$RELEASE_TAG" --commit "$COMMIT" \
+            --version-code "$VERSION_CODE" --sdk-tools "$ANDROID_HOME/build-tools/35.0.0" --output build/release-inputs
           cargo metadata --format-version 1 --locked > /tmp/frameark-cargo-metadata.json
-          python scripts/generate_sbom.py \
-            --repo . \
-            --tag "$RELEASE_TAG" \
-            --cargo-metadata /tmp/frameark-cargo-metadata.json \
-            --output "dist/FrameArk-$RELEASE_TAG-sbom.spdx.json"
-      - name: Collect verified Android release artifact
-        if: ${{ hashFiles('gradlew') != '' }}
-        shell: bash
+          python scripts/generate_sbom.py --repo . --tag "$RELEASE_TAG" \
+            --cargo-metadata /tmp/frameark-cargo-metadata.json --output "build/release-inputs/FrameArk-$RELEASE_TAG-sbom.spdx.json"
+          git archive --format=zip --prefix="FrameArk-$RELEASE_TAG/" \
+            --output="build/release-inputs/FrameArk-$RELEASE_TAG-source.zip" "$COMMIT"
+          cp LICENSE LICENSE-APACHE LICENSE-MIT docs/COMPATIBILITY.md build/release-inputs/
+      - uses: actions/upload-artifact@v7
+        id: upload
+        with:
+          name: verified-unsigned-release-inputs
+          path: build/release-inputs/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-and-publish:
+    name: protected-android-sign-and-publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: android-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ needs.build.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck immutable release identity and channel before secrets
+        env:
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          STABLE_APPROVED: ${{ vars.STABLE_RELEASE_APPROVED }}
         run: |
-          apk="apps/android/receiver/build/outputs/apk/release/receiver-release.apk"
-          if [[ ! -f "$apk" ]]; then
-            echo "Android release APK was not produced: $apk" >&2
+          git fetch origin main --tags
+          python scripts/android_release.py tag --tag "$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          if [[ "$PRERELEASE" != "true" && "$STABLE_APPROVED" != "true" ]]; then
+            echo 'Stable release gates need explicit environment approval; signing is blocked.' >&2
             exit 1
           fi
-          cp "$apk" "dist/FrameArk-$RELEASE_TAG-android-release.apk"
-      - name: Package source and checksums
-        shell: bash
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: build/release-inputs
+          digest-mismatch: error
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          verify-signature: true
+      - name: Install pinned Android signing tools
+        run: sdkmanager 'build-tools;35.0.0'
+      - name: Sign both APKs and pin the release certificate
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: |
-          mkdir -p dist
-          git archive \
-            --format=zip \
-            --prefix="FrameArk-$RELEASE_TAG/" \
-            --output="dist/FrameArk-$RELEASE_TAG-source.zip" \
-            "$RELEASE_TAG"
-          (cd dist && sha256sum * > SHA256SUMS)
-      - name: Attest release artifacts
+          python scripts/android_release.py sign --inputs build/release-inputs --output build/release-dist \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --sdk-tools "$ANDROID_HOME/build-tools/35.0.0"
+      - name: Finalize checksums and public evidence
+        run: |
+          cp "build/release-inputs/FrameArk-$RELEASE_TAG-sbom.spdx.json" "build/release-inputs/FrameArk-$RELEASE_TAG-source.zip" build/release-dist/
+          cp build/release-inputs/LICENSE* build/release-inputs/COMPATIBILITY.md build/release-dist/
+          (cd build/release-dist && sha256sum * > SHA256SUMS)
+      - name: Attest only the final signed distribution
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'dist/*'
-      - name: Publish GitHub release
+          subject-path: 'build/release-dist/*'
+      - name: Publish reviewed distribution
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          STABLE_APPROVED: ${{ vars.STABLE_RELEASE_APPROVED }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            dist/* \
-            --verify-tag \
-            --generate-notes \
-            --title "FrameArk $RELEASE_TAG"
+          git fetch origin main --tags
+          python scripts/android_release.py tag --tag "$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          flags=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            flags+=(--prerelease)
+          elif [[ "$STABLE_APPROVED" != "true" ]]; then
+            echo 'Stable release gates need explicit environment approval; no release published.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" build/release-dist/* --verify-tag --generate-notes \
+            --title "FrameArk $RELEASE_TAG" "${flags[@]}"

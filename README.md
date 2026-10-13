@@ -27,6 +27,9 @@ Apple 设备尚未验证的行为写成完成。
 
 See [PLAN.md](PLAN.md) for the complete product definition, architecture, milestones, quality gates, and release criteria.
 
+Maintainers: [protected dual-APK release signing](docs/ANDROID_RELEASE_SIGNING.md)
+documents environment secrets, owner approval, signed artifacts and the debug-to-release migration boundary.
+
 ## Product direction / 产品方向
 
 FrameArk is built around three long-term pillars:

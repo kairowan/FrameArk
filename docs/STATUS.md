@@ -16,6 +16,16 @@ Current compatibility labels remain in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Current interpretation
 
+Android release engineering now separates unsigned dual-APK build/test from
+protected environment signing and publication. Real disposable-key signing,
+certificate pinning, alignment and failure cleanup are exercised in CI. The
+`android-release` environment requires owner approval and tag-only deployment;
+production secrets are not configured by the agent. This closes the old
+single-APK/unsigned-filename pipeline defect, **not** production-key publishing,
+complete third-party notices/legal review, desktop signing or a milestone gate.
+See [release signing operations](ANDROID_RELEASE_SIGNING.md) and
+[ADR 0122](adr/0122-protected-dual-apk-release-signing.md).
+
 Android Sender now also provides explicit MediaProjection screen capture and
 optional AudioPlaybackCapture on Android 10+, through the same Rust Native
 session path. A non-exported foreground service owns the one-use OS grant;
