@@ -51,6 +51,13 @@ class SenderIdentityUiTest : InstrumentationTestCase() {
                     checkbox(R.string.identity_use).isChecked = selected
                     assertTrue(pin.text.isEmpty()); assertFalse(checkbox(R.string.confirm).isChecked)
                 }
+                checkbox(R.string.identity_use).isChecked = true
+                pin.setText("123456"); checkbox(R.string.confirm).isChecked = true
+                views().filterIsInstance<Button>().single { it.text == context.getString(R.string.identity_load) }.performClick()
+                assertFalse(checkbox(R.string.identity_use).isChecked)
+                assertFalse(checkbox(R.string.identity_use).isEnabled)
+                assertTrue(pin.text.isEmpty()); assertFalse(checkbox(R.string.confirm).isChecked)
+                assertFalse(views().filterIsInstance<SenderIdentityPanel>().single().isReady())
             }
         } finally { instrumentation.runOnMainSync { activity.finish() } }
     }
