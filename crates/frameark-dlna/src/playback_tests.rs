@@ -89,10 +89,6 @@ fn mutations() -> Vec<HttpRequest> {
 }
 
 fn subscribe(service: &mut MediaRendererHttpService, path: &str) {
-    // Existing handler routes GENA through control URLs. The advertised event
-    // URL mismatch is a separate interoperability defect, not hidden by these
-    // command-dispatch fixtures; see ADR 0129's follow-up requirements.
-    let path = path.replace("/upnp/event/", "/upnp/control/");
     let request = HttpRequest::parse(format!(
         "SUBSCRIBE {path} HTTP/1.1\r\nHost: fixture\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n"
     ).as_bytes()).unwrap();
@@ -206,7 +202,7 @@ fn every_nonfatal_rejection_preserves_state_and_gena_sequence() {
             assert_eq!(service.handle(&action("Pause", "")).status, 200);
             let events = service.drain_events();
             assert_eq!(events.len(), 1);
-            assert_eq!(events[0].sequence, 2);
+            assert_eq!(events[0].sequence, 1);
             assert_eq!(service.playback_report().last_error, None);
             assert_eq!(service.playback_report().rejected, 1);
         }

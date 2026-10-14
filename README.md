@@ -123,10 +123,13 @@ caller-owned HTTP/SOAP renderer contracts and one-shot IPv4 SSDP multicast
 announcements. Its [output binding](docs/adr/0129-dlna-playback-dispatch.md)
 now requires backend acknowledgment before committing playback control state;
 unbound output mutations fail instead of simulating success. No Android DLNA
-decoder is included by this boundary. GENA events can now be delivered by
-an explicitly plain-HTTP, bounded callback client plus a caller-injected
-HTTP/HTTPS stream boundary; built-in TLS, URL fetching, streaming media
-serving, and named-client interoperability remain future work.
+decoder is included by this boundary. [GENA eventing](docs/adr/0130-dlna-controller-eventing.md)
+now follows advertised event URLs with service-scoped random SIDs, initial SEQ 0,
+bounded coalesced updates and AVTransport/RenderingControl LastChange XML.
+Callback delivery uses an explicitly plain-HTTP client or caller-injected
+HTTP/HTTPS stream boundary. Timed notification scheduling, complete SCPD schemas,
+decoder feedback and named-client interoperability remain future work; callback
+authorization and DNS/address policy belong to the Rust host.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current
