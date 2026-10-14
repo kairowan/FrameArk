@@ -35,6 +35,8 @@ No PIN, ticket, public fingerprint or key is logged or stored in fixture files.
 `SenderIdentityUiTest#testExplicitOptInClearsPinAndConfirmation` passed:
 identity starts unloaded/disabled/unchecked, load stays unchecked, Rust's
 summary appears, and both opt-in/opt-out clear old PIN and TLS confirmation.
+Reload immediately disables/unchecks the old identity and invalidates credentials,
+so load failure cannot leave a checked mode with a missing key.
 Screenshot was taken only on the empty form before loading a key or discovering
 a peer. It contains no credentials or persistent identity.
 

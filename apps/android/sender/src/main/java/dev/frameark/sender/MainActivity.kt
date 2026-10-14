@@ -88,7 +88,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val value = ticket.text.toString()
                 val code = pin.text.toString()
-                if (worker?.isAlive == true || CaptureStatus.snapshot.active || pendingCapture != null || !gate.permits(value, code, confirm.isChecked)) {
+                if (!identityPanel.isReady() || worker?.isAlive == true || CaptureStatus.snapshot.active || pendingCapture != null || !gate.permits(value, code, confirm.isChecked)) {
                     status.text = getString(R.string.invalid)
                     return@setOnClickListener
                 }
@@ -115,7 +115,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val value = ticket.text.toString()
                 val code = pin.text.toString()
-                if (worker?.isAlive == true || CaptureStatus.snapshot.active || pendingCapture != null || !gate.permits(value, code, confirm.isChecked)) {
+                if (!identityPanel.isReady() || worker?.isAlive == true || CaptureStatus.snapshot.active || pendingCapture != null || !gate.permits(value, code, confirm.isChecked)) {
                     status.text = getString(R.string.invalid)
                     return@setOnClickListener
                 }

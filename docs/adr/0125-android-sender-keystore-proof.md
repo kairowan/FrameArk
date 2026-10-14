@@ -74,7 +74,9 @@ Media budgets, queue limits and one-hour capture limit are unchanged.
 
 Identity mode is explicit/default-off each Activity session for legacy peers.
 Load/create shows Rust-derived full sender ID/fingerprint, then allows the
-checkbox. Mode changes clear PIN and TLS confirmation. Sender snapshots the
+checkbox. Mode changes clear PIN and TLS confirmation. Reload clears the old
+identity/checkbox/authorization immediately and blocks submission until the OS
+load completes. Failure cannot retain an enabled identity choice. Sender snapshots the
 choice for reference/capture; capture carries only an opaque key handle via
 the existing process-memory handoff, never Intent/disk. Receiver must enable
 proof-required mode while stopped. Existing allow/deny UI displays the same
