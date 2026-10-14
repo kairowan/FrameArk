@@ -35,6 +35,16 @@ class CaptureTransport(private val native: SenderNative, val id: Long, private v
         while (native.status(id) == 2 && System.nanoTime() < deadline) Thread.sleep(10)
         check(native.status(id) == 3)
     }
+    fun reconfigure(options: CaptureOptions) {
+        val deadline = System.nanoTime() + 1_000_000_000L
+        var result: Int
+        do {
+            if (stop.get()) throw InterruptedException()
+            result = native.reconfigureVideo(id, options.width, options.height, options.fps)
+            if (result == 1) Thread.sleep(2)
+        } while (result == 1 && System.nanoTime() < deadline)
+        check(result == 0)
+    }
     fun stage(): Int = native.status(id)
     override fun close() { if (native.status(id) != 3) native.cancel(id) }
 }

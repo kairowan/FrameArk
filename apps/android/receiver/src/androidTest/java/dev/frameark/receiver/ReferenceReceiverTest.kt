@@ -9,8 +9,9 @@ import java.io.File
 class ReferenceReceiverTest : InstrumentationTestCase() {
     fun testReceivesActualScreenCapture() = receiveCapture(true)
     fun testReceivesVideoOnlyCapture() = receiveCapture(false)
+    fun testReceivesRotatingCapture() = receiveCapture(true, true)
 
-    private fun receiveCapture(withAudio: Boolean) {
+    private fun receiveCapture(withAudio: Boolean, rotate: Boolean = false) {
         val context = instrumentation.targetContext
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val native = FrameArkNative()
@@ -27,6 +28,8 @@ class ReferenceReceiverTest : InstrumentationTestCase() {
             val network = requireNotNull(native.networkInfo())
             val beforeVideo = ReceiverPlaybackOutput.renderedVideoFrames()
             val beforeAudio = ReceiverPlaybackOutput.renderedAudioBuffers()
+            val beforeConfigs = ReceiverPlaybackOutput.videoConfigurationCount()
+            val beforeLevel = ReceiverPlaybackOutput.audioLevel()
             pin.writeText(network.pairingCode.toString().padStart(6, '0'))
             ticket.writeText(requireNotNull(native.pairingTicket("10.0.2.2")))
             fun textures(view: android.view.View): List<android.view.TextureView> =
@@ -59,6 +62,47 @@ class ReferenceReceiverTest : InstrumentationTestCase() {
                 if (!colored) Thread.sleep(100)
             }
             assertTrue("decoded actual red/blue OS screen; ${ReceiverPlaybackOutput.diagnostic()}", colored)
+            if (rotate) {
+                val texture = textures(activity.window.decorView).single()
+                val surface = texture.surfaceTexture
+                val priorVideo = ReceiverPlaybackOutput.renderedVideoFrames()
+                val priorAudio = ReceiverPlaybackOutput.renderedAudioBuffers()
+                instrumentation.runOnMainSync { activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+                val rotationDeadline = System.nanoTime() + 20_000_000_000L
+                while ((ReceiverPlaybackOutput.videoConfigurationCount() < beforeConfigs + 3 ||
+                        ReceiverPlaybackOutput.renderedVideoFrames() < priorVideo + 100 ||
+                        ReceiverPlaybackOutput.renderedAudioBuffers() < priorAudio + 100) && System.nanoTime() < rotationDeadline) Thread.sleep(50)
+                instrumentation.waitForIdleSync()
+                assertFalse("configuration does not destroy Activity", activity.isDestroyed)
+                assertSame("configuration keeps decoder SurfaceTexture", surface, texture.surfaceTexture)
+                assertTrue("two sender geometry updates: ${ReceiverPlaybackOutput.diagnostic()}", ReceiverPlaybackOutput.videoConfigurationCount() >= beforeConfigs + 3)
+                assertTrue("video continues across both rotations", ReceiverPlaybackOutput.renderedVideoFrames() >= priorVideo + 100)
+                assertTrue("audio continues across both rotations", ReceiverPlaybackOutput.renderedAudioBuffers() >= priorAudio + 100)
+                assertTrue("final portrait output", requireNotNull(ReceiverPlaybackOutput.videoDisplaySize()).let { it.height > it.width })
+                assertFalse("session not torn down by rotation", ReceiverPlaybackOutput.outputsReleased())
+                assertEquals("local gain/mute unchanged", beforeLevel, ReceiverPlaybackOutput.audioLevel())
+                // Configuration delivery and the UI frame callback are asynchronous.
+                // Assert off-main so a failure is reported, not an Activity-process crash.
+                var fitted = false
+                val fitDeadline = System.nanoTime() + 2_000_000_000L
+                while (!fitted && System.nanoTime() < fitDeadline) {
+                    instrumentation.runOnMainSync {
+                        val expected = requireNotNull(ReceiverPlaybackOutput.videoDisplaySize()).fit(texture.width, texture.height)
+                        val values = FloatArray(9)
+                        texture.getTransform(android.graphics.Matrix()).getValues(values)
+                        fitted = kotlin.math.abs(expected.first - values[android.graphics.Matrix.MSCALE_X]) < 0.001f &&
+                            kotlin.math.abs(expected.second - values[android.graphics.Matrix.MSCALE_Y]) < 0.001f
+                    }
+                    if (!fitted) Thread.sleep(20)
+                }
+                assertTrue("actual TextureView applies aspect-fit transform", fitted)
+                instrumentation.runOnMainSync {
+                    val bitmap = requireNotNull(texture.getBitmap(360, 640))
+                    File(context.getExternalFilesDir(null), "reconfigured-decoded.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                    bitmap.recycle()
+                }
+                instrumentation.runOnMainSync { activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+            }
             val end = System.nanoTime() + 40_000_000_000L
             while (!ReceiverPlaybackOutput.outputsReleased() && System.nanoTime() < end) Thread.sleep(50)
             assertTrue(ReceiverPlaybackOutput.diagnostic(), ReceiverPlaybackOutput.renderedVideoFrames() - beforeVideo > 100)

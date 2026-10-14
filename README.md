@@ -37,6 +37,11 @@ Receiver 现有应用内音量、静音和遥控器方向键操作：只调节�
 已完成的调整，调高音量不会自动解除静音。详见[声音测试说明](docs/testing/ANDROID_AUDIO_CONTROLS.md)。
 这不是发送端网络遥控；真实播放链路已在隔离模拟器验证，真机听感仍待反馈。
 
+匹配版本支持 Native 屏幕共享横竖屏/窗口尺寸更新：Rust 在同一已认证连接内
+协商新视频配置，音频和时间线不重置；Receiver 自身旋转保留播放 Surface 并按比例显示。
+旧 Receiver 会在开始媒体前拒绝新模式，请同时更新两端。详见
+[旋转验证记录](docs/evidence/2026-10-14-video-reconfiguration/README.md)；仍不等于真机性能或 M2 完成。
+
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
 Apple 设备尚未验证的行为写成完成。

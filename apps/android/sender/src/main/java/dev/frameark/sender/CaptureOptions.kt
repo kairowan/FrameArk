@@ -1,11 +1,16 @@
 package dev.frameark.sender
 
 /** Platform capture geometry, not protocol negotiation or session state. */
-data class CaptureOptions(val width: Int, val height: Int, val fps: Int, val audio: Boolean, val seconds: Int = 3600) {
+data class CaptureOptions(
+    val width: Int, val height: Int, val fps: Int, val audio: Boolean, val seconds: Int = 3600,
+    val fullHd: Boolean = maxOf(width, height) > 1280,
+) {
     init {
         require(width in 16..1920 && height in 16..1920 && width % 2 == 0 && height % 2 == 0)
         require(width.toLong() * height <= 1920L * 1080 && fps in listOf(30, 60) && seconds in 1..3600)
     }
+
+    fun resized(width: Int, height: Int): CaptureOptions = fit(width, height, fullHd, fps, audio).copy(seconds = seconds)
 
     companion object {
         fun fit(sourceWidth: Int, sourceHeight: Int, fullHd: Boolean, fps: Int, audio: Boolean): CaptureOptions {
@@ -16,7 +21,7 @@ data class CaptureOptions(val width: Int, val height: Int, val fps: Int, val aud
             val maxWidth = if (landscape) longEdge else shortEdge
             val maxHeight = if (landscape) shortEdge else longEdge
             val scale = minOf(1.0, maxWidth.toDouble() / sourceWidth, maxHeight.toDouble() / sourceHeight)
-            return CaptureOptions((sourceWidth * scale).toInt() / 2 * 2, (sourceHeight * scale).toInt() / 2 * 2, fps, audio)
+            return CaptureOptions((sourceWidth * scale).toInt() / 2 * 2, (sourceHeight * scale).toInt() / 2 * 2, fps, audio, fullHd = fullHd)
         }
     }
 }
@@ -47,7 +52,7 @@ class CaptureHandoff(private val clock: () -> Long = System::nanoTime) {
 
 /** Redacted process-local UI diagnostics; no input, token or media is retained. */
 object CaptureStatus {
-    data class Snapshot(val active: Boolean = false, val phase: String = "idle", val video: Int = 0, val audio: Int = 0, val nonSilentAudio: Int = 0, val seconds: Long = 0, val failure: String = "")
+    data class Snapshot(val active: Boolean = false, val phase: String = "idle", val video: Int = 0, val audio: Int = 0, val nonSilentAudio: Int = 0, val seconds: Long = 0, val failure: String = "", val width: Int = 0, val height: Int = 0, val videoUpdates: Int = 0)
     @Volatile var snapshot = Snapshot()
         private set
     private var generation = 0L

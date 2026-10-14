@@ -36,6 +36,7 @@ struct Frame {
 }
 enum Command {
     Frame(Frame),
+    Reconfigure(VideoConfig),
     Finish,
 }
 struct Worker {
@@ -56,6 +57,7 @@ struct SenderConfig {
     audio: bool,
     max_pts_us: i64,
     lifetime: Duration,
+    reconfigurable: bool,
 }
 
 impl SenderConfig {
@@ -71,6 +73,7 @@ impl SenderConfig {
             audio: true,
             max_pts_us: 31_000_000,
             lifetime: Duration::from_secs(60),
+            reconfigurable: false,
         }
     }
 
@@ -95,6 +98,7 @@ impl SenderConfig {
             audio,
             max_pts_us: MAX_CAPTURE_PTS_US,
             lifetime: Duration::from_secs(3660),
+            reconfigurable: true,
         })
     }
 
@@ -346,21 +350,21 @@ impl Worker {
                                         ),
                                     )
                                     .map_err(|_| -12)?;
-                                    sender
-                                        .offer(
-                                            SessionOffer {
-                                                video: Some(config.video),
-                                                audio: config.audio.then_some(AudioConfig {
-                                                    codec: MediaCodec::Aac,
-                                                    sample_rate: 48_000,
-                                                    channels: 2,
-                                                }),
-                                                latency_ms: 120,
-                                            },
-                                            BUDGET,
-                                        )
-                                        .await
-                                        .map_err(|_| -13)?;
+                                    let offer = SessionOffer {
+                                        video: Some(config.video),
+                                        audio: config.audio.then_some(AudioConfig {
+                                            codec: MediaCodec::Aac,
+                                            sample_rate: 48_000,
+                                            channels: 2,
+                                        }),
+                                        latency_ms: 120,
+                                    };
+                                    if config.reconfigurable {
+                                        sender.offer_reconfigurable(offer, BUDGET).await
+                                    } else {
+                                        sender.offer(offer, BUDGET).await
+                                    }
+                                    .map_err(|_| -13)?;
                                     sender.start(BUDGET).await.map_err(|_| -14)?;
                                     let mut stream =
                                         sender.open_media_stream().await.map_err(|_| -15)?;
@@ -424,6 +428,20 @@ impl Worker {
                                                     )
                                                     .await
                                                     .map_err(|_| -17)?;
+                                                last_command = Instant::now();
+                                            }
+                                            Ok(Command::Reconfigure(video)) => {
+                                                // The single producer queue orders all old access units
+                                                // before FIN/update, and all new access units after it.
+                                                stream.finish().map_err(|_| -20)?;
+                                                sender
+                                                    .reconfigure_video(video, BUDGET)
+                                                    .await
+                                                    .map_err(|_| -23)?;
+                                                stream = sender
+                                                    .open_media_stream()
+                                                    .await
+                                                    .map_err(|_| -15)?;
                                                 last_command = Instant::now();
                                             }
                                             Ok(Command::Finish) => break,
@@ -496,6 +514,43 @@ impl Worker {
             }
         }
     }
+
+    fn reconfigure(&self, video: VideoConfig) -> i32 {
+        if !self.config.reconfigurable {
+            return -3;
+        }
+        if self.finishing
+            || self.cancel.load(Ordering::Acquire)
+            || self.status.load(Ordering::Acquire) != 2
+        {
+            return -1;
+        }
+        match self.commands.try_send(Command::Reconfigure(video)) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frameark_sender_SenderNative_reconfigureVideo(
+    _env: JNIEnv<'_>,
+    _object: JObject<'_>,
+    id: jlong,
+    width: jint,
+    height: jint,
+    fps: jint,
+) -> jint {
+    let Some(config) = SenderConfig::capture(width, height, fps, false) else {
+        return -2;
+    };
+    let Ok(slot) = SENDER.lock() else {
+        return -1;
+    };
+    let Some(worker) = slot.as_ref().filter(|worker| worker.id == id) else {
+        return -1;
+    };
+    worker.reconfigure(config.video)
 }
 
 fn pairing_failure(error: frameark_transport::TransportError) -> i32 {
@@ -692,6 +747,43 @@ mod tests {
         drop(receiver);
         assert_eq!(worker.submit(frame(1)), 1);
         assert_eq!(worker.bytes.load(Ordering::Acquire), MAX_QUEUE_FRAMES);
+        worker.join.join().unwrap();
+    }
+
+    #[test]
+    fn reconfiguration_is_bounded_ordered_and_capture_only() {
+        let (commands, receiver) = mpsc::sync_channel(3);
+        let mut worker = Worker {
+            id: 1,
+            commands,
+            bytes: Arc::new(AtomicUsize::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            status: Arc::new(AtomicI32::new(2)),
+            finishing: false,
+            join: thread::spawn(|| ()),
+            config: SenderConfig::reference(1280, 720),
+            signing: Arc::new(SigningBridge::default()),
+        };
+        let video = SenderConfig::capture(720, 1280, 30, true).unwrap().video;
+        assert_eq!(worker.reconfigure(video), -3);
+        worker.config = SenderConfig::capture(1280, 720, 30, true).unwrap();
+        assert_eq!(worker.submit(frame(1)), 0);
+        assert_eq!(worker.reconfigure(video), 0);
+        assert_eq!(worker.submit(frame(1)), 0);
+        assert_eq!(worker.reconfigure(video), 1);
+        assert!(matches!(receiver.recv().unwrap(), Command::Frame(_)));
+        assert!(
+            matches!(receiver.recv().unwrap(), Command::Reconfigure(config) if config == video)
+        );
+        assert!(matches!(receiver.recv().unwrap(), Command::Frame(_)));
+        worker.finishing = true;
+        assert_eq!(worker.reconfigure(video), -1);
+        worker.finishing = false;
+        worker.cancel.store(true, Ordering::Release);
+        assert_eq!(worker.reconfigure(video), -1);
+        worker.cancel.store(false, Ordering::Release);
+        worker.status.store(3, Ordering::Release);
+        assert_eq!(worker.reconfigure(video), -1);
         worker.join.join().unwrap();
     }
 

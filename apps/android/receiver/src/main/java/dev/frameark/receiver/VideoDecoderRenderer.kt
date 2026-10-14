@@ -16,6 +16,7 @@ import android.view.Surface
 class VideoDecoderRenderer(
     private val codecFactory: (String) -> MediaCodec = MediaCodec::createDecoderByType,
     private val onRendered: () -> Unit = {},
+    private val onFormat: (Int, Int) -> Unit = { _, _ -> },
 ) {
     private var codec: MediaCodec? = null
     private var configuredSurface: Surface? = null
@@ -83,7 +84,19 @@ class VideoDecoderRenderer(
         repeat(16) {
             when (val outputIndex = decoder.dequeueOutputBuffer(info, 0)) {
                 MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> return@repeat
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    val format = decoder.outputFormat
+                    val width = format.getInteger(MediaFormat.KEY_WIDTH)
+                    val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                    require(width in 1..8192 && height in 1..8192)
+                    fun value(key: String, fallback: Int) = if (format.containsKey(key)) format.getInteger(key) else fallback
+                    val left = value("crop-left", 0)
+                    val top = value("crop-top", 0)
+                    val right = value("crop-right", width - 1)
+                    val bottom = value("crop-bottom", height - 1)
+                    require(left in 0 until width && right in left until width && top in 0 until height && bottom in top until height)
+                    onFormat(right - left + 1, bottom - top + 1)
+                }
                 MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return@repeat
                 else -> {
                     if (outputIndex >= 0) {

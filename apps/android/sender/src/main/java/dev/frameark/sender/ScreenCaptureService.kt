@@ -9,6 +9,9 @@ import android.content.pm.ServiceInfo
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.hardware.display.DisplayManager
+import android.graphics.Point
+import android.view.Display
 import android.os.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -37,6 +40,7 @@ class ScreenCaptureService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) { if (intent?.action == Intent.ACTION_SCREEN_OFF) requestStop() }
     }
     private var receiverRegistered = false
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -59,13 +63,31 @@ class ScreenCaptureService : Service() {
             check(native.load())
             val value = requireNotNull(getSystemService(MediaProjectionManager::class.java).getMediaProjection(Activity.RESULT_OK, grant))
             projection.set(value)
+            val resize = CaptureResizeTracker()
             value.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() { stop.set(true) }
+                override fun onCapturedContentResize(width: Int, height: Int) { resize.update(width, height) }
             }, handler)
+            if (Build.VERSION.SDK_INT < 34) {
+                val displays = getSystemService(DisplayManager::class.java)
+                fun refreshSize() {
+                    val size = Point()
+                    @Suppress("DEPRECATION")
+                    displays.getDisplay(Display.DEFAULT_DISPLAY)?.getRealSize(size)
+                    resize.update(size.x, size.y)
+                }
+                displayListener = object : DisplayManager.DisplayListener {
+                    override fun onDisplayAdded(id: Int) = Unit
+                    override fun onDisplayRemoved(id: Int) { if (id == Display.DEFAULT_DISPLAY) requestStop() }
+                    override fun onDisplayChanged(id: Int) { if (id == Display.DEFAULT_DISPLAY) refreshSize() }
+                }
+                displays.registerDisplayListener(displayListener, handler)
+                refreshSize()
+            }
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF), RECEIVER_NOT_EXPORTED)
             else registerReceiver(screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF))
             receiverRegistered = true
-            worker = Thread({ produce(request, value) }, "frameark-capture").also { it.start() }
+            worker = Thread({ produce(request, value, resize) }, "frameark-capture").also { it.start() }
         } catch (failure: Exception) {
             CaptureStatus.end(generation, location(failure))
             requestStop()
@@ -74,7 +96,7 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun produce(request: CaptureRequest, value: MediaProjection) {
+    private fun produce(request: CaptureRequest, value: MediaProjection, resize: CaptureResizeTracker) {
         var transport: CaptureTransport? = null
         var failureCode = ""
         try {
@@ -87,8 +109,9 @@ class ScreenCaptureService : Service() {
             handle.set(id)
             transport = CaptureTransport(native, id, stop, identity)
             transport.awaitStreaming()
-            ScreenCaptureEncoder().run(value, o, resources.configuration.densityDpi, stop, transport::submit) { video, audio, nonSilent, elapsed ->
-                CaptureStatus.publish(generation, CaptureStatus.Snapshot(true, "sharing", video, audio, nonSilent, elapsed))
+            ScreenCaptureEncoder().run(value, o, resources.configuration.densityDpi, stop, transport::submit, resize, transport::reconfigure) { video, audio, nonSilent, elapsed, size, updates ->
+                CaptureStatus.publish(generation, CaptureStatus.Snapshot(true, "sharing", video, audio, nonSilent, elapsed,
+                    width = size.width, height = size.height, videoUpdates = updates))
             }
             transport.finish()
         } catch (failure: Exception) {
@@ -126,6 +149,8 @@ class ScreenCaptureService : Service() {
         requestStop()
         handle.get().takeIf { it > 0 }?.let(native::cancel)
         if (receiverRegistered) unregisterReceiver(screenOff)
+        displayListener?.let { getSystemService(DisplayManager::class.java).unregisterDisplayListener(it) }
+        displayListener = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }

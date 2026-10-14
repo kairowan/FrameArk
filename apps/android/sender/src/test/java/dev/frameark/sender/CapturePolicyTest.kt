@@ -19,7 +19,7 @@ class CapturePolicyTest {
         assertEquals(CaptureOptions(1920, 1080, 60, false), CaptureOptions.fit(3840, 2160, true, 60, false))
         assertEquals(CaptureOptions(1080, 1920, 30, true), CaptureOptions.fit(1080, 1920, true, 30, true))
         assertEquals(CaptureOptions(720, 1280, 30, false), CaptureOptions.fit(1080, 1920, false, 30, false))
-        assertEquals(CaptureOptions(640, 480, 30, false), CaptureOptions.fit(641, 481, true, 30, false))
+        assertEquals(CaptureOptions(640, 480, 30, false, fullHd = true), CaptureOptions.fit(641, 481, true, 30, false))
     }
     @Test fun invalidCaptureBoundsFailBeforeGrant() {
         for (action in listOf<() -> Unit>(

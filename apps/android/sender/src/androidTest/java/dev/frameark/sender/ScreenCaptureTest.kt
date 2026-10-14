@@ -34,8 +34,9 @@ class ScreenCaptureTest : InstrumentationTestCase() {
 
     fun testCapturesOsScreenAndPlaybackAudio() = capture(true)
     fun testVideoOnlyStopsOnLock() = capture(false)
+    fun testRotationKeepsVideoAndPlaybackAudio() = capture(true, true)
 
-    private fun capture(withAudio: Boolean) {
+    private fun capture(withAudio: Boolean, rotate: Boolean = false) {
         assertTrue("disposable emulator only", Build.MODEL.startsWith("sdk_gphone") && Build.SUPPORTED_ABIS.contains("x86_64"))
         val context = instrumentation.targetContext
         val ticket = File(context.filesDir, "reference-ticket.txt")
@@ -75,6 +76,24 @@ class ScreenCaptureTest : InstrumentationTestCase() {
             while (CaptureStatus.snapshot.phase != "sharing" && System.nanoTime() < connected && CaptureStatus.snapshot.phase != "failed") Thread.sleep(50)
             assertTrue("capture startup: ${CaptureStatus.snapshot}", CaptureStatus.snapshot.active)
             fixture = instrumentation.startActivitySync(Intent().setClassName(context.packageName, "dev.frameark.sender.CaptureFixtureActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            if (rotate) {
+                val initial = System.nanoTime() + 10_000_000_000L
+                while (CaptureStatus.snapshot.video < 100 && CaptureStatus.snapshot.active && System.nanoTime() < initial) Thread.sleep(50)
+                for (orientation in listOf(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)) {
+                    val before = CaptureStatus.snapshot
+                    instrumentation.runOnMainSync { fixture.requestedOrientation = orientation }
+                    val resized = System.nanoTime() + 12_000_000_000L
+                    fun advanced(): Boolean {
+                        val current = CaptureStatus.snapshot
+                        return current.videoUpdates > before.videoUpdates && current.video > before.video + 50 &&
+                            current.audio > before.audio + 50 && current.nonSilentAudio > before.nonSilentAudio + 10 &&
+                            (if (orientation == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) current.width > current.height else current.height > current.width)
+                    }
+                    while (!advanced() && CaptureStatus.snapshot.active && System.nanoTime() < resized) Thread.sleep(50)
+                    assertTrue("rotation continued video and non-silent playback PCM: ${CaptureStatus.snapshot}", advanced())
+                    instrumentation.sendStatus(0, android.os.Bundle().apply { putString("rotation", CaptureStatus.snapshot.toString()) })
+                }
+            }
             val deadline = System.nanoTime() + 30_000_000_000L
             while (CaptureStatus.snapshot.seconds < 25 && CaptureStatus.snapshot.active && System.nanoTime() < deadline) Thread.sleep(50)
             val captured = CaptureStatus.snapshot

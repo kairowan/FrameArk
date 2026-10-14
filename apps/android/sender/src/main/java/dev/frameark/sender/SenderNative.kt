@@ -20,6 +20,8 @@ class SenderNative : DiscoveryBackend {
     external fun status(id: Long): Int
     /** 0 accepted, 1 bounded backpressure, negative invalid/stale/not-streaming. */
     external fun submit(id: Long, payload: ByteArray, ptsUs: Long, video: Boolean, keyframe: Boolean): Int
+    /** Ordered behind old frames; only accepted on a negotiated capture session. */
+    external fun reconfigureVideo(id: Long, width: Int, height: Int, fps: Int): Int
     external fun finish(id: Long): Int
     /** Nonblocking; Rust drops in-progress transport within its cancellation poll. */
     external fun cancel(id: Long)

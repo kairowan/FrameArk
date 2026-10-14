@@ -23,6 +23,10 @@ pub struct Request {
 pub enum Command {
     /// Propose exact media configuration before backend preparation.
     Offer(SessionOffer),
+    /// Explicitly negotiate ordered video updates between media streams.
+    OfferReconfigurable(SessionOffer),
+    /// Replace video configuration after the preceding media stream has ended.
+    UpdateVideo(VideoConfig),
     /// Start an already prepared backend.
     Start,
     /// Stop and release the session.
@@ -55,7 +59,7 @@ pub struct Response {
     pub status: Status,
     /// Shared session state after applying the operation.
     pub state: SessionState,
-    /// Exact selected configuration, only on a successful offer.
+    /// Exact selected configuration, on a successful offer or video update.
     pub offer: Option<SessionOffer>,
 }
 
@@ -114,6 +118,45 @@ fn offer_bytes(offer: SessionOffer, out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+fn video_update_bytes(video: VideoConfig, out: &mut Vec<u8>) -> Result<()> {
+    SessionOffer {
+        video: Some(video),
+        audio: None,
+        latency_ms: 120,
+    }
+    .validate()?;
+    out.push(1); // H.264 only, no implicit codec switch.
+    for value in [
+        video.width,
+        video.height,
+        video.frame_rate_numerator,
+        video.frame_rate_denominator,
+    ] {
+        out.extend(value.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn parse_video_update(reader: &mut Reader<'_>) -> Result<VideoConfig> {
+    if reader.byte()? != 1 {
+        return Err(malformed());
+    }
+    let video = VideoConfig {
+        codec: MediaCodec::H264,
+        width: reader.u32()?,
+        height: reader.u32()?,
+        frame_rate_numerator: reader.u32()?,
+        frame_rate_denominator: reader.u32()?,
+    };
+    SessionOffer {
+        video: Some(video),
+        audio: None,
+        latency_ms: 120,
+    }
+    .validate()?;
+    Ok(video)
+}
+
 fn parse_offer(reader: &mut Reader<'_>) -> Result<SessionOffer> {
     let flags = reader.byte()?;
     if flags == 0 || flags & !3 != 0 {
@@ -170,9 +213,15 @@ impl Request {
             Command::Start => 2,
             Command::Stop => 3,
             Command::Status => 4,
+            Command::OfferReconfigurable(_) => 5,
+            Command::UpdateVideo(_) => 6,
         });
-        if let Command::Offer(offer) = self.command {
-            offer_bytes(offer, &mut bytes)?;
+        match self.command {
+            Command::Offer(offer) | Command::OfferReconfigurable(offer) => {
+                offer_bytes(offer, &mut bytes)?
+            }
+            Command::UpdateVideo(video) => video_update_bytes(video, &mut bytes)?,
+            _ => {}
         }
         ControlMessage::new(REQUEST, &bytes).map_err(|_| malformed())
     }
@@ -194,6 +243,8 @@ impl Request {
             2 => Command::Start,
             3 => Command::Stop,
             4 => Command::Status,
+            5 => Command::OfferReconfigurable(parse_offer(&mut reader)?),
+            6 => Command::UpdateVideo(parse_video_update(&mut reader)?),
             _ => return Err(malformed()),
         };
         reader.finish()?;
@@ -321,5 +372,78 @@ mod tests {
         assert!(Request::decode(&message).is_err());
         let wrong = ControlMessage::new(RESPONSE, &[VERSION, 0, 0, 0, 1, 4]).unwrap();
         assert!(Request::decode(&wrong).is_err());
+    }
+
+    #[test]
+    fn extension_round_trips_without_changing_fixed_profile_bytes() {
+        let fixed = Request {
+            id: 1,
+            command: Command::Offer(offer()),
+        }
+        .encode()
+        .unwrap();
+        let adaptive = Request {
+            id: 1,
+            command: Command::OfferReconfigurable(offer()),
+        }
+        .encode()
+        .unwrap();
+        let mut expected = fixed.payload().to_vec();
+        assert_eq!(expected[5], 1);
+        expected[5] = 5;
+        assert_eq!(adaptive.payload(), expected);
+        for command in [
+            Command::OfferReconfigurable(offer()),
+            Command::UpdateVideo(offer().video.unwrap()),
+        ] {
+            let request = Request { id: 3, command };
+            assert_eq!(
+                Request::decode(&request.encode().unwrap()).unwrap(),
+                request
+            );
+        }
+        let stop = Request {
+            id: 3,
+            command: Command::Stop,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(stop.payload(), &[1, 0, 0, 0, 3, 3]);
+    }
+
+    #[test]
+    fn video_update_rejects_every_truncation_trailing_byte_and_invalid_field() {
+        let message = Request {
+            id: 3,
+            command: Command::UpdateVideo(offer().video.unwrap()),
+        }
+        .encode()
+        .unwrap();
+        let payload = message.payload();
+        assert_eq!(payload.len(), 23);
+        for length in 0..payload.len() {
+            if let Ok(short) = ControlMessage::new(REQUEST, &payload[..length]) {
+                assert!(Request::decode(&short).is_err(), "length {length}");
+            }
+        }
+        let mut trailing = payload.to_vec();
+        trailing.push(0);
+        assert!(Request::decode(&ControlMessage::new(REQUEST, &trailing).unwrap()).is_err());
+        for (offset, value) in [(0, 2), (5, 7), (6, 2)] {
+            let mut invalid = payload.to_vec();
+            invalid[offset] = value;
+            assert!(Request::decode(&ControlMessage::new(REQUEST, &invalid).unwrap()).is_err());
+        }
+        for offset in [7, 11, 15, 19] {
+            for bytes in [[0; 4], [255; 4]] {
+                // A large nonzero denominator represents a valid low frame rate.
+                if offset == 19 && bytes == [255; 4] {
+                    continue;
+                }
+                let mut invalid = payload.to_vec();
+                invalid[offset..offset + 4].copy_from_slice(&bytes);
+                assert!(Request::decode(&ControlMessage::new(REQUEST, &invalid).unwrap()).is_err());
+            }
+        }
     }
 }
