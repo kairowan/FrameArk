@@ -29,6 +29,10 @@ Sender 支持前台扫描并选择局域网接收器（Experimental，仅本地 
 Rust 验证 P-256 挑战签名，Receiver 核对完整发送端指纹并批准，或匹配已明确保存的信任记录。
 仍需 TLS/PIN，默认关闭，不自动记住、不免 PIN、不在失败后降级；真机身份兼容矩阵尚待验证。
 
+Receiver 的网络变化通知现在保留现有 Rust 连接与配对信息，不再强制重启。
+真实 QUIC 的同地址短丢包测试与[设备测试说明](docs/testing/ANDROID_NETWORK_CONTINUITY.md)
+已加入；换网换 IP、已失败会话重连及真机短断验收仍未完成。
+
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
 Apple 设备尚未验证的行为写成完成。

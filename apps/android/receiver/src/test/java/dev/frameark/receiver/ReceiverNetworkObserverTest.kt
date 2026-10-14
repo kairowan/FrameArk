@@ -7,7 +7,7 @@ import org.junit.Test
 
 class ReceiverNetworkObserverTest {
     @Test
-    fun coalesces_network_events_until_recovery_completes() {
+    fun coalesces_network_events_until_change_handled() {
         var registered: ReceiverNetworkObserver.Listener? = null
         var changes = 0
         val observer = ReceiverNetworkObserver(
@@ -23,7 +23,7 @@ class ReceiverNetworkObserverTest {
         registered?.onCapabilitiesChanged()
         assertEquals(1, changes)
 
-        observer.markRecoveryComplete()
+        observer.markChangeHandled()
         registered?.onLinkPropertiesChanged()
         assertEquals(2, changes)
     }
@@ -72,7 +72,7 @@ class ReceiverNetworkObserverTest {
             unregister = {},
             onNetworkChanged = {
                 attempts += 1
-                error("recovery failed")
+                error("refresh failed")
             },
         )
 

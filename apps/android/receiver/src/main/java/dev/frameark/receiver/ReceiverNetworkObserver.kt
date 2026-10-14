@@ -1,9 +1,9 @@
 package dev.frameark.receiver
 
 /**
- * Debounces Android connectivity callbacks into one bounded Rust-owned
- * receiver recovery request. It deliberately carries no network/session
- * state and does not open sockets.
+ * Coalesces Android connectivity callbacks into one endpoint-view refresh.
+ * It deliberately carries no protocol/session state, opens no sockets and
+ * does not restart a native listener or report recovery success.
  */
 class ReceiverNetworkObserver(
     private val register: (Listener) -> Unit,
@@ -22,7 +22,7 @@ class ReceiverNetworkObserver(
 
     private val lock = Any()
     private var started = false
-    private var recoveryPending = false
+    private var changePending = false
     private val listener = object : Listener {
         override fun onAvailable() = changed()
 
@@ -41,32 +41,32 @@ class ReceiverNetworkObserver(
         registered
     }
 
-    /** Marks the current recovery attempt complete so a later change can retry. */
-    fun markRecoveryComplete() = synchronized(lock) {
-        recoveryPending = false
+    /** Allows the next notification after the queued refresh is handled. */
+    fun markChangeHandled() = synchronized(lock) {
+        changePending = false
     }
 
     /** Unregisters the callback and forgets pending notifications. */
     fun stop() = synchronized(lock) {
         if (started) runCatching { unregister(listener) }
         started = false
-        recoveryPending = false
+        changePending = false
     }
 
     override fun close() = stop()
 
     private fun changed() {
         val notify = synchronized(lock) {
-            if (!started || recoveryPending) {
+            if (!started || changePending) {
                 false
             } else {
-                recoveryPending = true
+                changePending = true
                 true
             }
         }
         if (notify) {
             runCatching { onNetworkChanged() }
-                .onFailure { markRecoveryComplete() }
+                .onFailure { markChangeHandled() }
         }
     }
 }

@@ -203,21 +203,25 @@ available.
 endpoint snapshot and the service notification may display the port and
 temporary pairing code to the local user. The certificate remains in memory;
 the coordinator does not copy it into logs, preferences, or notification
-text. Best-effort mDNS metadata advertises protocol/capability labels only; it
-never advertises the pairing code or certificate.
+text. Best-effort mDNS metadata advertises protocol/capability labels and the
+public bootstrap certificate (ADR 0124), never the PIN or private key. Discovery
+is untrusted until the user compares the complete Receiver TLS fingerprint.
 The Android service also acquires a non-reference-counted Wi-Fi multicast lock
 for the active lifecycle when the platform provides one. Acquisition failure is
 best effort and never bypasses FANP endpoint authentication; the lock is
 released on stop/destroy and is not retained by the Rust layer.
 The standby Activity reads the endpoint through the JNI getters only to display
-the temporary port and pairing code after an explicit user refresh; it never
-displays or persists the certificate.
+the temporary port and pairing code after an explicit user refresh, and exposes
+the public certificate fingerprint/ticket for explicit Sender confirmation.
 `ReceiverNetworkObserver` listens only to Android's default connectivity
-callback and coalesces changed/lost default Network identities into the bounded
-Rust-owned recovery operation. It has no protocol state and does not authorize
-or reconnect a sender. Registration failure disables automatic recovery while
-leaving the explicit lifecycle available; callback storms cannot start
-overlapping recovery attempts.
+callback and coalesces changed/lost default Network identities into an endpoint
+view refresh, retaining the existing Rust listener and playback owners. It has
+no protocol state and does not authorize, restart or reconnect a sender. Rust's
+existing I/O deadlines remain in force; notification storms cannot extend them.
+Registration failure leaves native transport active. Temporary certificate/PIN
+material now lasts for the explicit receiver lifecycle rather than rotating on
+each route notification. Explicitly stop Receiver to end that boundary; late
+notifications cannot start it again. See [ADR 0126](docs/adr/0126-retain-receiver-on-network-notifications.md).
 The initial available callback and routine capability/link-property updates
 do not restart a just-authenticated session. A same-network address change
 currently requires explicit receiver restart.

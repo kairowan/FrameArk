@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted — experimental M2 increment.
+Automatic restart superseded by [ADR 0126](0126-retain-receiver-on-network-notifications.md).
+The observer remains a coalesced endpoint-view refresh, not a session-resume mechanism.
 
 ## Context
 
