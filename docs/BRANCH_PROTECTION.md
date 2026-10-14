@@ -2,18 +2,33 @@
 
 This document records the required GitHub settings for `kairowan/FrameArk`. Workflow files cannot enforce repository settings by themselves; a repository administrator must apply and periodically audit these controls.
 
-## Current audit blocker — 2026-10-13
+## Protection recovery — 2026-10-14
 
-The repository API now reports private visibility. The main protection endpoint
-returns HTTP 403 (plan/visibility restriction), dependency review reports that it
-is unsupported, and CodeQL upload reports code scanning is not enabled. The
-`android-release` environment still exists with `can_admins_bypass=false`, but
-its returned protection rules include only `branch_policy`, not required
-reviewers. The environment secret count was zero at this audit.
+The owner restored public visibility. The environment again returns required
+reviewer `kairowan`, `prevent_self_review=false`, `can_admins_bypass=false` and
+the tag-only `v*` deployment policy. No production environment secrets are set.
+Main protection did **not** return automatically (the API reported "Branch not
+protected"); it was reapplied and read back with strict status checks for
+`pull-request-policy`, `ci-gate`, `security-gate`, `dependency-review`, one approval,
+CODEOWNERS review, stale-review dismissal, conversation resolution and linear
+history, with force pushes/deletion disabled. Administrator enforcement remains
+disabled solely for the existing owner-authorized single-maintainer exception.
 
-The settings below are required policy, **not confirmation of currently effective
-protection**. Stop merges and production signing setup until the owner chooses
-the visibility/hosting plan and all controls are restored and verified. Do not
+This verifies configuration recovery, not successful execution of every check or
+a production release. Require fresh successful checks on the current PR head and
+main before merging/releasing. No paid plan, organization transfer, production
+key, tag or release was created during recovery.
+
+### Historical interruption — 2026-10-13
+
+While the repository was private, the main protection endpoint returned HTTP 403
+(plan/visibility restriction), dependency review was unsupported and CodeQL upload
+reported code scanning disabled. `android-release` returned only `branch_policy`,
+not required reviewers. The environment secret count was zero at that audit.
+
+The settings below are required policy and must be checked against effective
+configuration. On any recurrence, stop merges and production signing setup until
+the owner chooses a supported plan and controls are restored and verified. Do not
 make a private repository public without explicit permission or weaken checks
 to pass CI. The bootstrap exception waives impossible independent self-approval;
 it does not waive CI/security or missing environment protection. A plan upgrade
