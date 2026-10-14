@@ -6,6 +6,7 @@
 //! interoperability until platform schedulers and compatibility fixtures cover
 //! those environments.
 
+mod eventing;
 mod playback;
 
 pub use playback::{
@@ -14,6 +15,9 @@ pub use playback::{
 
 #[cfg(test)]
 mod playback_tests;
+
+#[cfg(test)]
+mod eventing_tests;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
@@ -24,6 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ring::rand::{SecureRandom, SystemRandom};
 use rustls::pki_types::ServerName;
 
 /// Maximum complete SSDP message accepted by the parser.
@@ -54,6 +59,12 @@ pub const MAX_DIDL_ITEMS: usize = 8;
 pub const MAX_GENA_SUBSCRIPTIONS: usize = 16;
 /// Maximum queued GENA callback events awaiting the caller's HTTP client.
 pub const MAX_GENA_PENDING_EVENTS: usize = 32;
+/// Maximum serialized GENA body, including escaped LastChange XML.
+pub const MAX_GENA_EVENT_BYTES: usize = MAX_HTTP_BYTES - 4096;
+/// Maximum pre-escape property value in a bounded GENA notification.
+pub const MAX_GENA_PROPERTY_BYTES: usize = 64 * 1024;
+/// Metadata bound that leaves room for both URI metadata fields in LastChange.
+pub const MAX_RENDERER_METADATA_BYTES: usize = 4096;
 /// Maximum sink protocol-info entries advertised by one renderer.
 pub const MAX_PROTOCOL_INFO_ENTRIES: usize = 16;
 /// Maximum requests handled by one bounded synchronous accept loop.
@@ -440,7 +451,12 @@ impl HttpRequest {
             })
             .transpose()?
             .unwrap_or(0);
-        if declared != body.len() || body.len() > MAX_SOAP_ARGUMENT_BYTES {
+        let body_limit = if parts[0].eq_ignore_ascii_case("NOTIFY") {
+            MAX_GENA_EVENT_BYTES
+        } else {
+            MAX_SOAP_ARGUMENT_BYTES
+        };
+        if declared != body.len() || body.len() > body_limit {
             return Err(DlnaError::Invalid("HTTP content length"));
         }
         Ok(Self {
@@ -1364,7 +1380,7 @@ impl DidlLiteItem {
 /// One validated GENA subscription returned to the caller-owned HTTP layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenaSubscription {
-    /// Deterministic local subscription identifier.
+    /// Random UUID v4 subscription identifier; not an authorization credential.
     pub sid: String,
     /// Callback URL supplied by the subscriber.
     pub callback_url: String,
@@ -1377,7 +1393,7 @@ pub struct GenaSubscription {
     expires_at: Instant,
 }
 
-/// One event notification that a caller-owned HTTP client can POST to a
+/// One event notification that a caller-owned HTTP client can NOTIFY to a
 /// subscriber callback URL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenaEvent {
@@ -1387,7 +1403,7 @@ pub struct GenaEvent {
     pub callback_url: String,
     /// UPnP service type of the event body.
     pub service_type: String,
-    /// Monotonic event sequence for this subscription.
+    /// Event sequence: initial 0, then 1..=u32::MAX, wrapping back to 1.
     pub sequence: u32,
     /// XML property-set body.
     pub body: String,
@@ -1403,10 +1419,7 @@ impl GenaEvent {
         validate_callback_url(&self.callback_url)?;
         validate_service_type(&self.service_type)?;
         validate_field(&self.sid, "GENA SID")?;
-        if self.sequence > i32::MAX as u32 {
-            return Err(DlnaError::Invalid("GENA sequence"));
-        }
-        if self.body.is_empty() || self.body.len() > MAX_SOAP_ARGUMENT_BYTES {
+        if self.body.is_empty() || self.body.len() > MAX_GENA_EVENT_BYTES {
             return Err(DlnaError::TooLarge("GENA event"));
         }
         let (host, target) = callback_authority_and_target(&self.callback_url)?;
@@ -1537,11 +1550,10 @@ impl GenaCallbackClient {
     }
 }
 
-/// Bounded GENA subscription registry with deterministic IDs and event bodies.
+/// Bounded GENA registry with random UUID identifiers and deterministic bodies.
 #[derive(Clone, Debug, Default)]
 pub struct GenaRegistry {
     subscriptions: BTreeMap<String, GenaSubscription>,
-    next_id: u64,
 }
 
 impl GenaRegistry {
@@ -1569,9 +1581,9 @@ impl GenaRegistry {
             return Err(DlnaError::TooLarge("GENA subscriptions"));
         }
         let timeout_seconds = parse_gena_timeout(timeout)?;
-        self.next_id = self.next_id.saturating_add(1);
+        let sid = self.new_sid()?;
         let subscription = GenaSubscription {
-            sid: format!("uuid:frameark-sub-{}", self.next_id),
+            sid,
             callback_url: callback_url.to_string(),
             service_type: service_type.to_string(),
             timeout_seconds,
@@ -1581,6 +1593,30 @@ impl GenaRegistry {
         self.subscriptions
             .insert(subscription.sid.clone(), subscription.clone());
         Ok(subscription)
+    }
+
+    fn new_sid(&self) -> Result<String, DlnaError> {
+        for _ in 0..4 {
+            let mut bytes = [0_u8; 16];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| DlnaError::Invalid("GENA identifier entropy"))?;
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            let sid = format!(
+                "uuid:{}-{}-{}-{}-{}",
+                &hex[..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..]
+            );
+            if !self.subscriptions.contains_key(&sid) {
+                return Ok(sid);
+            }
+        }
+        Err(DlnaError::Invalid("GENA identifier collision"))
     }
 
     /// Renews an existing subscription without changing its callback.
@@ -1641,16 +1677,25 @@ impl GenaRegistry {
             if subscription.service_type != service_type {
                 continue;
             }
-            subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
-            events.push(GenaEvent {
-                sid: subscription.sid.clone(),
-                callback_url: subscription.callback_url.clone(),
-                service_type: service_type.to_string(),
-                sequence: subscription.next_sequence,
-                body: body.clone(),
-            });
+            events.push(Self::event_for(subscription, body.clone()));
         }
         Ok(events)
+    }
+
+    fn event_for(subscription: &mut GenaSubscription, body: String) -> GenaEvent {
+        let sequence = subscription.next_sequence;
+        subscription.next_sequence = if sequence == u32::MAX {
+            1
+        } else {
+            sequence + 1
+        };
+        GenaEvent {
+            sid: subscription.sid.clone(),
+            callback_url: subscription.callback_url.clone(),
+            service_type: subscription.service_type.clone(),
+            sequence,
+            body,
+        }
     }
 
     /// Returns the current number of active subscriptions.
@@ -1737,7 +1782,10 @@ impl MediaFormatCapabilities {
             return Err(DlnaError::Invalid("protocol-info entries"));
         }
         if entries.iter().any(|entry| {
-            entry.is_empty() || entry.len() > MAX_FIELD_BYTES || entry.contains(['\r', '\n'])
+            entry.is_empty()
+                || entry.len() > MAX_FIELD_BYTES
+                || entry.contains(['\r', '\n'])
+                || !eventing::valid_xml_text(entry)
         }) {
             return Err(DlnaError::InvalidField("protocol-info entry"));
         }
@@ -2326,11 +2374,26 @@ impl MediaRendererTcpServer {
             return Ok(peer);
         }
         let response = self.service.handle(&request);
-        let encoded = response.encode()?;
-        stream
-            .write_all(&encoded)
-            .and_then(|_| stream.flush())
-            .map_err(|error| DlnaError::Io(error.kind()))?;
+        let delivered = response.encode().and_then(|encoded| {
+            stream
+                .write_all(&encoded)
+                .and_then(|_| stream.flush())
+                .map_err(|error| DlnaError::Io(error.kind()))
+        });
+        if delivered.is_err()
+            && request.method.eq_ignore_ascii_case("SUBSCRIBE")
+            && request.header("sid").is_none()
+            && response.status == 200
+            && let Some(sid) = response.headers.get("sid")
+        {
+            // No completed subscription response: never hand its initial
+            // notification to callback I/O, and release the unissued lease.
+            self.service.gena.subscriptions.remove(sid);
+            self.service
+                .pending_events
+                .retain(|event| &event.sid != sid);
+        }
+        delivered?;
         Ok(peer)
     }
 
@@ -2463,35 +2526,20 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, DlnaError> {
 }
 
 fn callback_socket_address(authority: &str) -> Result<SocketAddr, DlnaError> {
-    if authority.contains('@') {
+    if !validate_media_authority(authority) {
         return Err(DlnaError::Invalid("GENA callback authority"));
     }
-    let port = if authority.starts_with('[') {
-        let end = authority
-            .find(']')
-            .ok_or(DlnaError::Invalid("GENA callback authority"))?;
-        let suffix = authority
-            .get(end + 1..)
-            .ok_or(DlnaError::Invalid("GENA callback authority"))?;
-        suffix
-            .strip_prefix(':')
-            .ok_or(DlnaError::Invalid("GENA callback port"))?
+    let has_port = if authority.starts_with('[') {
+        !authority.ends_with(']')
     } else {
-        let (host, port) = authority
-            .rsplit_once(':')
-            .ok_or(DlnaError::Invalid("GENA callback port"))?;
-        if host.is_empty() || host.contains(':') {
-            return Err(DlnaError::Invalid("GENA callback authority"));
-        }
-        port
+        authority.contains(':')
     };
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| DlnaError::Invalid("GENA callback port"))?;
-    if port == 0 {
-        return Err(DlnaError::Invalid("GENA callback port"));
-    }
-    authority
+    let address = if has_port {
+        authority.to_string()
+    } else {
+        format!("{authority}:80")
+    };
+    address
         .to_socket_addrs()
         .map_err(|error| DlnaError::Io(error.kind()))?
         .next()
@@ -2677,8 +2725,13 @@ impl MediaRendererHttpService {
     }
 
     /// Replaces the advertised protocol-info report after validation.
-    pub fn set_capabilities(&mut self, capabilities: MediaFormatCapabilities) {
-        self.capabilities = capabilities;
+    pub fn set_capabilities(
+        &mut self,
+        capabilities: MediaFormatCapabilities,
+    ) -> Result<(), DlnaError> {
+        self.capabilities = MediaFormatCapabilities::new(capabilities.sink)?;
+        self.queue_state_event(CONNECTION_MANAGER_SERVICE);
+        Ok(())
     }
 
     /// Registers or replaces one bounded media resource for HTTP GET/Range.
@@ -2712,8 +2765,10 @@ impl MediaRendererHttpService {
     }
 
     /// Drains events generated by state changes for caller-owned callback I/O.
-    /// Expired or unsubscribed events are removed before ownership is transferred.
-    /// Callers must re-check authorization/lease policy if they delay delivery.
+    /// Expired/unsubscribed noninitial updates are removed. Initial SEQ 0
+    /// snapshots are retained even after unsubscribe, as required by UDA.
+    /// Drain only after the successful subscription HTTP response is closed;
+    /// callers still apply callback authorization and bounded delivery policy.
     pub fn drain_events(&mut self) -> Vec<GenaEvent> {
         self.expire_subscriptions();
         std::mem::take(&mut self.pending_events)
@@ -2817,8 +2872,9 @@ impl MediaRendererHttpService {
     }
 
     fn discard_inactive_events(&mut self) {
-        self.pending_events
-            .retain(|event| self.gena.subscriptions.contains_key(&event.sid));
+        self.pending_events.retain(|event| {
+            event.sequence == 0 || self.gena.subscriptions.contains_key(&event.sid)
+        });
     }
 
     /// Applies one parsed request and returns an HTTP response.
@@ -2832,21 +2888,33 @@ impl MediaRendererHttpService {
             "UNSUBSCRIBE" => self.handle_unsubscribe(path, request),
             _ => {
                 let mut response = HttpResponse::empty(405, "Method Not Allowed");
-                response
-                    .headers
-                    .insert("allow".to_string(), "GET, POST".to_string());
+                response.headers.insert(
+                    "allow".to_string(),
+                    "GET, POST, SUBSCRIBE, UNSUBSCRIBE".to_string(),
+                );
                 response
             }
         }
     }
 
     fn handle_subscribe(&mut self, path: &str, request: &HttpRequest) -> HttpResponse {
-        let Some(service_type) = self.control_service_for_path(path) else {
+        let Some(service_type) = self.event_service_for_path(path) else {
             return HttpResponse::empty(404, "Not Found");
         };
+        if !request.body.is_empty() {
+            return HttpResponse::empty(400, "Bad Request");
+        }
         let timeout = request.header("timeout");
         let subscription = if let Some(sid) = request.header("sid") {
             if request.header("callback").is_some() || request.header("nt").is_some() {
+                return HttpResponse::empty(400, "Bad Request");
+            }
+            if !self
+                .gena
+                .subscriptions
+                .get(sid)
+                .is_some_and(|s| s.service_type == service_type)
+            {
                 return HttpResponse::empty(412, "Precondition Failed");
             }
             match self.gena.renew(sid, timeout) {
@@ -2863,15 +2931,42 @@ impl MediaRendererHttpService {
             let Some(callback_url) = parse_callback_header(callback_header) else {
                 return HttpResponse::empty(412, "Precondition Failed");
             };
+            // Preserve every initial event and reserve one coalesced update
+            // slot for each active subscription. Refuse before allocating SID.
+            let initials = self
+                .pending_events
+                .iter()
+                .filter(|event| event.sequence == 0)
+                .count();
+            if self.gena.len() >= MAX_GENA_SUBSCRIPTIONS
+                || initials + self.gena.len() + 2 > MAX_GENA_PENDING_EVENTS
+            {
+                return HttpResponse::empty(503, "Service Unavailable");
+            }
+            let body = match self.state_event_body(&service_type) {
+                Ok(body) => body,
+                Err(_) => return HttpResponse::empty(500, "Internal Server Error"),
+            };
             match self.gena.subscribe(&service_type, callback_url, timeout) {
-                Ok(subscription) => subscription,
+                Ok(subscription) => {
+                    if let Some(stored) = self.gena.subscriptions.get_mut(&subscription.sid) {
+                        self.pending_events
+                            .push(GenaRegistry::event_for(stored, body));
+                    }
+                    subscription
+                }
                 Err(_) => return HttpResponse::empty(412, "Precondition Failed"),
             }
         };
-        if request.header("sid").is_none() {
-            self.queue_state_event(&service_type);
-        }
         let mut response = HttpResponse::empty(200, "OK");
+        response.headers.insert(
+            "server".to_string(),
+            format!(
+                "{}/unknown UPnP/1.0 FrameArk/{}",
+                std::env::consts::OS,
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
         response.headers.insert("sid".to_string(), subscription.sid);
         response.headers.insert(
             "timeout".to_string(),
@@ -2881,12 +2976,26 @@ impl MediaRendererHttpService {
     }
 
     fn handle_unsubscribe(&mut self, path: &str, request: &HttpRequest) -> HttpResponse {
-        if self.control_service_for_path(path).is_none() {
+        let Some(service_type) = self.event_service_for_path(path) else {
             return HttpResponse::empty(404, "Not Found");
+        };
+        if request.header("callback").is_some()
+            || request.header("nt").is_some()
+            || !request.body.is_empty()
+        {
+            return HttpResponse::empty(400, "Bad Request");
         }
         let Some(sid) = request.header("sid") else {
             return HttpResponse::empty(412, "Precondition Failed");
         };
+        if !self
+            .gena
+            .subscriptions
+            .get(sid)
+            .is_some_and(|s| s.service_type == service_type)
+        {
+            return HttpResponse::empty(412, "Precondition Failed");
+        }
         match self.gena.unsubscribe(sid) {
             Ok(()) => {
                 self.discard_inactive_events();
@@ -2998,28 +3107,40 @@ impl MediaRendererHttpService {
     }
 
     fn queue_state_event(&mut self, service_type: &str) {
-        let mut properties = BTreeMap::new();
-        match service_type {
-            AVTRANSPORT_SERVICE => {
-                properties.insert(
-                    "TransportState".to_string(),
-                    self.state.transport_state.as_upnp().to_string(),
-                );
-                properties.insert(
-                    "CurrentTrackURI".to_string(),
-                    self.state.current_uri.clone(),
-                );
+        self.expire_subscriptions();
+        let Ok(body) = self.state_event_body(service_type) else {
+            return;
+        };
+        for subscription in self
+            .gena
+            .subscriptions
+            .values_mut()
+            .filter(|s| s.service_type == service_type)
+        {
+            if let Some(pending) = self
+                .pending_events
+                .iter_mut()
+                .find(|event| event.sid == subscription.sid && event.sequence != 0)
+            {
+                // Not sent yet: replace the snapshot without spending a SEQ.
+                pending.body.clone_from(&body);
+            } else if self.pending_events.len() < MAX_GENA_PENDING_EVENTS {
+                self.pending_events
+                    .push(GenaRegistry::event_for(subscription, body.clone()));
             }
-            RENDERING_CONTROL_SERVICE => {
-                properties.insert("Volume".to_string(), self.state.volume.to_string());
-            }
-            _ => return,
         }
-        if let Ok(events) = self.gena.publish(service_type, &properties) {
-            let available = MAX_GENA_PENDING_EVENTS.saturating_sub(self.pending_events.len());
-            self.pending_events
-                .extend(events.into_iter().take(available));
-        }
+    }
+
+    fn state_event_body(&self, service_type: &str) -> Result<String, DlnaError> {
+        eventing::state_event_body(service_type, &self.state, &self.capabilities)
+    }
+
+    fn event_service_for_path(&self, path: &str) -> Option<String> {
+        self.description
+            .services
+            .iter()
+            .find(|service| service.event_sub_url == path)
+            .map(|service| service.service_type.clone())
     }
 
     fn scpd_service_for_path(&self, path: &str) -> Option<&str> {
@@ -3054,6 +3175,12 @@ impl MediaRendererHttpService {
                 let uri = action.required_arg("CurrentURI")?;
                 validate_media_uri(uri)?;
                 let metadata = action.arg("CurrentURIMetaData").unwrap_or_default();
+                if metadata.len() > MAX_RENDERER_METADATA_BYTES
+                    || !eventing::valid_xml_text(metadata)
+                    || !eventing::valid_xml_text(uri)
+                {
+                    return Err(SoapFault::new(402, "Invalid Args"));
+                }
                 let duration = metadata_duration(metadata);
                 self.dispatch_playback(PlaybackCommand::SetUri { uri, metadata })?;
                 self.state.current_uri = uri.to_string();
@@ -3625,12 +3752,52 @@ fn soap_fault_response(code: u16, description: &str) -> HttpResponse {
 }
 
 fn scpd_xml(service: &str) -> String {
-    match service {
-        AVTRANSPORT_SERVICE => "<?xml version=\"1.0\" encoding=\"utf-8\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>SetAVTransportURI</name></action><action><name>Play</name></action><action><name>Pause</name></action><action><name>Stop</name></action><action><name>Seek</name></action><action><name>GetTransportInfo</name></action><action><name>GetPositionInfo</name></action><action><name>GetMediaInfo</name></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>TransportState</name><dataType>string</dataType></stateVariable></serviceStateTable></scpd>".to_string(),
-        RENDERING_CONTROL_SERVICE => "<?xml version=\"1.0\" encoding=\"utf-8\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>SetVolume</name></action><action><name>GetVolume</name></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>Volume</name><dataType>ui2</dataType></stateVariable></serviceStateTable></scpd>".to_string(),
-        CONNECTION_MANAGER_SERVICE => "<?xml version=\"1.0\" encoding=\"utf-8\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>GetProtocolInfo</name></action><action><name>GetCurrentConnectionIDs</name></action><action><name>GetCurrentConnectionInfo</name></action></actionList></scpd>".to_string(),
-        _ => "<?xml version=\"1.0\" encoding=\"utf-8\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion></scpd>".to_string(),
+    let (actions, variables): (&[&str], &[(&str, &str, bool)]) = match service {
+        AVTRANSPORT_SERVICE => (
+            &[
+                "SetAVTransportURI",
+                "Play",
+                "Pause",
+                "Stop",
+                "Seek",
+                "GetTransportInfo",
+                "GetPositionInfo",
+                "GetMediaInfo",
+            ],
+            &[
+                ("LastChange", "string", true),
+                ("TransportState", "string", false),
+            ],
+        ),
+        RENDERING_CONTROL_SERVICE => (
+            &["SetVolume", "GetVolume"],
+            &[("LastChange", "string", true), ("Volume", "ui2", false)],
+        ),
+        CONNECTION_MANAGER_SERVICE => (
+            &[
+                "GetProtocolInfo",
+                "GetCurrentConnectionIDs",
+                "GetCurrentConnectionInfo",
+            ],
+            &[
+                ("SourceProtocolInfo", "string", true),
+                ("SinkProtocolInfo", "string", true),
+                ("CurrentConnectionIDs", "string", true),
+            ],
+        ),
+        _ => (&[], &[]),
+    };
+    let mut xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>".to_string();
+    for action in actions {
+        xml.push_str(&format!("<action><name>{action}</name></action>"));
     }
+    xml.push_str("</actionList><serviceStateTable>");
+    for (name, data_type, evented) in variables {
+        let evented = if *evented { "yes" } else { "no" };
+        xml.push_str(&format!("<stateVariable sendEvents=\"{evented}\"><name>{name}</name><dataType>{data_type}</dataType></stateVariable>"));
+    }
+    xml.push_str("</serviceStateTable></scpd>");
+    xml
 }
 
 fn push_tag(output: &mut String, tag: &str, value: &str) {
@@ -3679,37 +3846,17 @@ fn validate_service_type(service_type: &str) -> Result<(), DlnaError> {
 
 fn validate_callback_url(callback_url: &str) -> Result<(), DlnaError> {
     validate_field(callback_url, "GENA callback URL")?;
-    let Some((scheme, _)) = callback_url.split_once("://") else {
-        return Err(DlnaError::Invalid("GENA callback URL"));
-    };
-    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-        return Err(DlnaError::Invalid("GENA callback URL"));
-    }
-    Ok(())
+    let (scheme, rest) = callback_url
+        .split_once("://")
+        .ok_or(DlnaError::Invalid("GENA callback URL"))?;
+    validate_media_uri(&format!("{}://{rest}", scheme.to_ascii_lowercase()))
+        .map_err(|_| DlnaError::Invalid("GENA callback URL"))
 }
 
 fn callback_authority_and_target(callback_url: &str) -> Result<(String, String), DlnaError> {
-    let (_, rest) = callback_url
-        .split_once("://")
-        .ok_or(DlnaError::Invalid("GENA callback URL"))?;
-    let slash = rest.find('/');
-    let (authority, target) = match slash {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, "/"),
-    };
-    if authority.is_empty()
-        || authority.len() > MAX_FIELD_BYTES
-        || !authority
-            .bytes()
-            .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
-        || target.is_empty()
-        || target.len() > MAX_FIELD_BYTES
-        || !target.starts_with('/')
-        || target.contains(['\r', '\n', ' '])
-    {
-        return Err(DlnaError::Invalid("GENA callback URL"));
-    }
-    Ok((authority.to_string(), target.to_string()))
+    let (_, authority, target) =
+        split_media_uri(callback_url).map_err(|_| DlnaError::Invalid("GENA callback URL"))?;
+    Ok((authority, target))
 }
 
 fn parse_callback_header(value: &str) -> Option<&str> {
@@ -3749,12 +3896,16 @@ fn gena_property_set(properties: &BTreeMap<String, String>) -> Result<String, Dl
     for (name, value) in properties {
         validate_field(name, "GENA property name")?;
         if !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
             return Err(DlnaError::Invalid("GENA property name"));
         }
-        if value.len() > MAX_FIELD_BYTES || value.contains(['\r', '\n']) {
+        if value.len() > MAX_GENA_PROPERTY_BYTES || !eventing::valid_xml_text(value) {
             return Err(DlnaError::InvalidField("GENA property value"));
         }
         body.push_str("<e:property><");
@@ -3766,7 +3917,7 @@ fn gena_property_set(properties: &BTreeMap<String, String>) -> Result<String, Dl
         body.push_str("></e:property>");
     }
     body.push_str("</e:propertyset>");
-    if body.len() > MAX_SOAP_ARGUMENT_BYTES {
+    if body.len() > MAX_GENA_EVENT_BYTES {
         return Err(DlnaError::TooLarge("GENA event"));
     }
     Ok(body)
@@ -4043,7 +4194,7 @@ mod tests {
 
     // State-model fixtures explicitly acknowledge commands. This backend
     // deliberately has no decoder and exists only in the test binary.
-    fn acknowledging_test_service() -> MediaRendererHttpService {
+    pub(super) fn acknowledging_test_service() -> MediaRendererHttpService {
         struct AcknowledgingBackend;
         impl MediaPlaybackBackend for AcknowledgingBackend {
             fn apply(&mut self, _: PlaybackCommand<'_>) -> Result<(), PlaybackBackendError> {
@@ -4402,7 +4553,7 @@ mod tests {
         properties.insert("TransportState".to_string(), "PLAYING".to_string());
         let events = registry.publish(AVTRANSPORT_SERVICE, &properties).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[0].sequence, 0);
         assert!(events[0].body.contains("PLAYING"));
         assert!(
             registry
@@ -4574,14 +4725,16 @@ mod tests {
         assert!(service.drain_events().is_empty());
         assert!(service.gena.subscriptions.is_empty());
 
-        let subscribe = HttpRequest::parse(b"SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n").unwrap();
+        let subscribe = HttpRequest::parse(b"SUBSCRIBE /upnp/event/avtransport HTTP/1.1\r\nHost: localhost\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n").unwrap();
         let response = service.handle(&subscribe);
         let sid = response.headers.get("sid").unwrap();
         assert_eq!(service.pending_events.len(), 1);
-        let unsubscribe = HttpRequest::parse(format!("UNSUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\n\r\n").as_bytes()).unwrap();
+        let unsubscribe = HttpRequest::parse(format!("UNSUBSCRIBE /upnp/event/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\n\r\n").as_bytes()).unwrap();
         assert_eq!(service.handle(&unsubscribe).status, 200);
-        assert!(service.drain_events().is_empty());
-        let renew_expired = HttpRequest::parse(format!("SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {}\r\nTIMEOUT: Second-60\r\n\r\n", subscription.sid).as_bytes()).unwrap();
+        let initial = service.drain_events();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].sequence, 0);
+        let renew_expired = HttpRequest::parse(format!("SUBSCRIBE /upnp/event/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {}\r\nTIMEOUT: Second-60\r\n\r\n", subscription.sid).as_bytes()).unwrap();
         assert_eq!(service.handle(&renew_expired).status, 412);
     }
 
@@ -4593,7 +4746,7 @@ mod tests {
             "http-get:*:audio/ogg:*".to_string(),
         ])
         .unwrap();
-        service.set_capabilities(capabilities);
+        service.set_capabilities(capabilities).unwrap();
         let request = soap_request(
             "/upnp/control/connectionmanager",
             CONNECTION_MANAGER_SERVICE,
@@ -4612,7 +4765,7 @@ mod tests {
     fn renderer_subscribe_emits_initial_and_mutation_events() {
         let mut service = acknowledging_test_service();
         let subscribe = HttpRequest::parse(
-            b"SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n",
+            b"SUBSCRIBE /upnp/event/avtransport HTTP/1.1\r\nHost: localhost\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n",
         )
         .unwrap();
         let response = service.handle(&subscribe);
@@ -4626,7 +4779,7 @@ mod tests {
         let initial = service.drain_events();
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].sid, sid);
-        assert_eq!(initial[0].sequence, 1);
+        assert_eq!(initial[0].sequence, 0);
 
         let set_uri = soap_request(
             "/upnp/control/avtransport",
@@ -4637,20 +4790,20 @@ mod tests {
         assert_eq!(service.handle(&set_uri).status, 200);
         let mutation = service.drain_events();
         assert_eq!(mutation.len(), 1);
-        assert_eq!(mutation[0].sequence, 2);
+        assert_eq!(mutation[0].sequence, 1);
         assert!(mutation[0].body.contains("CurrentTrackURI"));
         let notify = mutation[0].encode_http_notify().unwrap();
         let parsed_notify = HttpRequest::parse(&notify).unwrap();
         assert_eq!(parsed_notify.method, "NOTIFY");
         assert_eq!(parsed_notify.target, "/events");
         assert_eq!(parsed_notify.header("SID"), Some(sid.as_str()));
-        assert_eq!(parsed_notify.header("SEQ"), Some("2"));
+        assert_eq!(parsed_notify.header("SEQ"), Some("1"));
         assert_eq!(parsed_notify.header("NTS"), Some("upnp:propchange"));
         assert_eq!(parsed_notify.body, mutation[0].body.as_bytes());
 
         let renew = HttpRequest::parse(
             format!(
-                "SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\nTIMEOUT: Second-300\r\n\r\n"
+                "SUBSCRIBE /upnp/event/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\nTIMEOUT: Second-300\r\n\r\n"
             )
             .as_bytes(),
         )
@@ -4665,7 +4818,7 @@ mod tests {
 
         let unsubscribe = HttpRequest::parse(
             format!(
-                "UNSUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\n\r\n"
+                "UNSUBSCRIBE /upnp/event/avtransport HTTP/1.1\r\nHost: localhost\r\nSID: {sid}\r\n\r\n"
             )
             .as_bytes(),
         )
@@ -4725,14 +4878,14 @@ mod tests {
             Err(DlnaError::Invalid("GENA HTTPS requires TLS"))
         );
         let invalid = GenaEvent {
-            callback_url: "http://127.0.0.1/events".to_string(),
+            callback_url: "http://127.0.0.1:0/events".to_string(),
             ..event
         };
         assert_eq!(
             GenaCallbackClient::new(Duration::from_secs(1))
                 .unwrap()
                 .send(&invalid),
-            Err(DlnaError::Invalid("GENA callback port"))
+            Err(DlnaError::Invalid("GENA callback URL"))
         );
     }
 

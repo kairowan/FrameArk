@@ -25,9 +25,16 @@ DLNA's pre-alpha Rust API now requires `with_backend` for output mutations;
 `new` is unbound and fails valid mutation commands with SOAP 501. `state_mut`
 has been removed. Output acceptance, failure cleanup and TCP dispatch have
 instrumented-backend coverage, not actual decoding or controller compatibility.
-Asynchronous progress and Android output are absent, and the existing GENA
-control-URL/event-URL mismatch remains a separate open interoperability defect.
+Asynchronous progress and Android output are absent.
 See [ADR 0129](adr/0129-dlna-playback-dispatch.md). DLNA remains Experimental.
+
+GENA now uses advertised event URLs, service-scoped UUID SIDs, initial SEQ 0,
+unsigned sequence wrap and bounded coalesced LastChange snapshots for InstanceID
+0 / Master volume. Decoded URI metadata is limited to 4 KiB. Initial snapshots
+remain pending after unsubscribe; callbacks require host authorization and
+response-close ordering. `set_capabilities` now returns a validation Result and
+emits ConnectionManager updates. Complete SCPD declarations, timed delivery and
+named-controller validation are still open; see [ADR 0130](adr/0130-dlna-controller-eventing.md).
 
 Android Sender discovery is Experimental: foreground mDNS `boot=cert1` hints,
 bounded local-IPv4 candidates, explicit full TLS fingerprint comparison and PIN.

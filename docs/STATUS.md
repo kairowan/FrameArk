@@ -18,9 +18,17 @@ now requires an explicitly bound backend before committing state or success
 events. Unbound/rejected commands fail; fatal failures detach and clean up.
 Nine new regression tests include actual loopback TCP and split requests on
 non-blocking accepted sockets, but use an output
-fixture rather than a decoder. Android DLNA output, live progress feedback,
-correct GENA event-URL/SID routing and the named-controller/two-hour matrix
-remain open; M3 stays Partial. See [ADR 0129](adr/0129-dlna-playback-dispatch.md).
+fixture rather than a decoder. Android DLNA output, live progress feedback
+and the named-controller/two-hour matrix remain open; M3 stays Partial.
+See [ADR 0129](adr/0129-dlna-playback-dispatch.md).
+
+**DLNA controller eventing:** advertised event routes, service-scoped UUID SIDs,
+SEQ 0/wrap behavior, initial snapshot isolation, bounded coalescing and LastChange
+encoding now have 13 additional Rust tests, including actual HTTP callback and
+failed-response cleanup. The crate has 67 passing tests; independent Python XML
+fixture validation checks both layers. Complete SCPD schemas, timed callback
+delivery and actual decoder/controller integration remain open. This does not
+close M3; see [ADR 0130](adr/0130-dlna-controller-eventing.md).
 
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|

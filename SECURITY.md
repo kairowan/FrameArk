@@ -145,10 +145,19 @@ connection after one response; it does not provide persistent authorization or
 multi-client scheduling. The GENA registry caps subscriptions, leases,
 callback schemes, XML property names/values, and pending events. Monotonic
 deadlines are enforced on subscription mutations and event publication; the
-HTTP service drops expired/unsubscribed pending events before handing them to
-callback I/O. A daemon must add authorization policy and re-check leases if it
-delays delivery of already-drained events. Idle cleanup is available through
+HTTP service drops expired/unsubscribed noninitial updates. UDA initial SEQ 0
+snapshots remain pending even after unsubscribe/expiry, within the same 32-event
+bound; new subscription admission reserves initial/update capacity or returns
+503. UUID SIDs are not credentials. A daemon must authorize and pin callback
+destinations, preserve response-close ordering, enforce moderation and apply
+revocation policy even for retained initials. Already-drained events require
+bounded, ordered delivery and policy revalidation if delayed. Idle cleanup is available through
 `expire_subscriptions`; no background scheduler is started by the library.
+Decoded URI metadata is capped at 4 KiB and must be valid XML 1.0 text before
+output dispatch; double-escaped LastChange bodies are capped at 124 KiB inside
+the 128 KiB HTTP envelope. SOAP bodies retain their 16 KiB limit. The TCP adapter
+releases a new subscription and its initial event on response-write failure;
+custom handler hosts own that lifecycle. See [ADR 0130](docs/adr/0130-dlna-controller-eventing.md).
 The SSDP multicast helper sends only the bounded standard IPv4 announcement to
 the caller's selected UDP socket; it does not join interfaces, schedule bursts,
 authenticate discovery peers, or expose a trust boundary.

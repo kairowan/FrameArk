@@ -81,6 +81,10 @@ LastChange event encoding, complete SCPD declarations, asynchronous feedback,
 safe media fetching, Android output, multicast lifecycle and the named-client /
 two-hour M3 acceptance matrix remain open. No M3 exit gate is completed here.
 
+Follow-up: [ADR 0130](0130-dlna-controller-eventing.md) repairs the event-URL/SID
+routing and LastChange encoding identified above. The evidence in this ADR
+describes the earlier output-boundary increment, not full controller acceptance.
+
 ## Primary references
 
 - [UPnP AVTransport:1, actions and common errors](https://upnp.org/specs/av/UPnP-av-AVTransport-v1-Service.pdf)

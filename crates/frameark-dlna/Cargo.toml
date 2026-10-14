@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ring.workspace = true
 rustls = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
