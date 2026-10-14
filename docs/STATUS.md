@@ -24,6 +24,14 @@ The earlier private-repository interruption and recovery are recorded in the
 
 ## Current interpretation
 
+Receiver-local volume/mute now reaches the real AudioTrack output, with bounded
+gain, D-pad controls, app-private preferences and gain-before-play on reset.
+Live H.264/AAC loopback playback continues during mute/volume/unmute actions.
+See [ADR 0127](adr/0127-receiver-local-audio-controls.md) and
+[evidence](evidence/2026-10-14-audio-controls/README.md). This closes the local
+audio-control software gap, not sender-side remote control, physical loudness,
+audio-route compatibility, dynamic reconfiguration or any M2 exit gate.
+
 Android default-network notifications no longer tear down the Rust listener or
 playback owners. Real QUIC loss tests preserve one authenticated stream through
 two one-second blackouts; JVM and real-JNI tests preserve pairing material on

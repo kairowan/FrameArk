@@ -1,4 +1,13 @@
 <resources>
+    <string name="audio_level_value">FrameArk volume: %1$d%%</string>
+    <string name="audio_level_muted">FrameArk muted (level: %1$d%%)</string>
+    <string name="audio_level_help">Only affects FrameArk audio, not system volume. Level and mute are remembered. Changing level does not unmute.</string>
+    <string name="audio_level_slider">FrameArk audio level, zero to one hundred percent</string>
+    <string name="audio_level_down">Volume −10</string>
+    <string name="audio_level_up">Volume +10</string>
+    <string name="audio_level_mute">Mute FrameArk audio</string>
+    <string name="audio_level_not_saved">Applied for now, but could not save. Check this setting after restarting the app.</string>
+    <string name="audio_level_failed">Audio control failed. Playback was stopped and muted. Restart the receiver explicitly.</string>
     <string name="connection_share">分享连接信息（不含 PIN）</string>
     <string name="connection_select">选择发送设备可访问的局域网地址</string>
     <string name="connection_idle_only">请先结束播放，再分享连接信息。</string>

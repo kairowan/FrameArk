@@ -11,6 +11,8 @@ class AudioDecoderRenderer(private val onPcm: () -> Unit = {}) {
     private var codec: MediaCodec? = null
     private val output = AudioOutputRenderer(onWritten = onPcm)
 
+    fun setGain(value: Float) = output.setGain(value)
+
     fun configure(config: FrameArkNative.AudioConfig) {
         reset()
         require(config.channels in 1..2) { "only mono/stereo output is supported" }

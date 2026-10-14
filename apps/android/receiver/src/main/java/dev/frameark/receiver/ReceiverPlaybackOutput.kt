@@ -13,6 +13,34 @@ object ReceiverPlaybackOutput {
     private var failureLocation = ""
     private val video = VideoDecoderRenderer(onRendered = { videoRendered.incrementAndGet() })
     private val audio = AudioDecoderRenderer(onPcm = { audioRendered.incrementAndGet() })
+    private var audioLevel = PlaybackAudioLevel()
+    private var audioLevelInitialized = false
+
+    /** Read persisted local settings once, before either Activity or Service can play. */
+    @Synchronized fun initializeAudioLevel(value: PlaybackAudioLevel) {
+        if (!audioLevelInitialized) {
+            audio.setGain(value.gain)
+            audioLevel = value
+            audioLevelInitialized = true
+        }
+    }
+
+    @Synchronized fun audioLevel(): PlaybackAudioLevel = audioLevel
+
+    @Synchronized fun setAudioLevel(value: PlaybackAudioLevel): Boolean {
+        audioLevelInitialized = true
+        return try {
+            audio.setGain(value.gain)
+            audioLevel = value
+            true
+        } catch (failure: Exception) {
+            // An unsuccessful mute must not leave unknown live output behind.
+            audioLevel = value.copy(muted = true)
+            recordFailure(failure)
+            runCatching { reset() }
+            false
+        }
+    }
 
     @Synchronized fun attach(value: Surface) { reset(); surface = value }
     /** Idle ticket exchange may leave the listener alive, active playback may not. */

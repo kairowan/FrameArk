@@ -38,6 +38,7 @@ class FrameArkReceiverService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        ReceiverPlaybackOutput.initializeAudioLevel(PlaybackAudioSettings(this).read())
         native = FrameArkNative()
         trustSnapshotStore = AndroidTrustSnapshotStore(
             file = filesDir.resolve(TRUST_SNAPSHOT_FILE),

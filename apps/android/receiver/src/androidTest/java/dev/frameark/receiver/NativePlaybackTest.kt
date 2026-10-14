@@ -8,7 +8,11 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.test.InstrumentationTestCase
+import android.widget.Button
+import android.widget.CheckBox
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Real platform encoders -> pinned QUIC -> Rust queue -> codecs -> outputs. */
 @Suppress("DEPRECATION")
@@ -19,7 +23,14 @@ class NativePlaybackTest : InstrumentationTestCase() {
         val native = FrameArkNative()
         assertTrue(native.load() is FrameArkNative.LoadResult.Loaded)
         assertTrue(native.setPeerProofRequired(false))
+        val settings = PlaybackAudioSettings(context)
+        val originalLevel = settings.read()
+        val sender = Executors.newSingleThreadExecutor()
         try {
+            assertTrue(ReceiverPlaybackOutput.setAudioLevel(PlaybackAudioLevel(50)))
+            instrumentation.runOnMainSync {
+                activity.window.decorView.findViewWithTag<PlaybackAudioPanel>("audio-level-panel").refresh()
+            }
             instrumentation.waitForIdleSync()
             Thread.sleep(500) // Wait for this test's TextureView surface, not network retry.
             context.startService(Intent(context, FrameArkReceiverService::class.java).setAction(ReceiverServicePolicy.ACTION_START))
@@ -34,7 +45,32 @@ class NativePlaybackTest : InstrumentationTestCase() {
             instrumentation.waitForIdleSync()
             assertNotNull("listener after initial network callbacks", native.networkInfo())
             val probe = PlaybackNetworkProbe()
-            val result = probe.send(video, audio)
+            val stream = sender.submit<Int> { probe.send(video, audio) }
+            fun awaitMoreAudio() {
+                val target = ReceiverPlaybackOutput.renderedAudioBuffers() + 10
+                val timeout = System.nanoTime() + 10_000_000_000L
+                while (ReceiverPlaybackOutput.renderedAudioBuffers() < target && System.nanoTime() < timeout && !stream.isDone) {
+                    Thread.sleep(10)
+                }
+                assertTrue("decoded audio progresses during gain changes", ReceiverPlaybackOutput.renderedAudioBuffers() >= target)
+                assertFalse("outputs still live", ReceiverPlaybackOutput.outputsReleased())
+            }
+            awaitMoreAudio()
+            instrumentation.runOnMainSync {
+                activity.window.decorView.findViewWithTag<CheckBox>("audio-level-mute").performClick()
+            }
+            assertEquals(PlaybackAudioLevel(50, true), ReceiverPlaybackOutput.audioLevel())
+            awaitMoreAudio() // Muting still consumes decoded PCM instead of retaining stale audio.
+            instrumentation.runOnMainSync {
+                activity.window.decorView.findViewWithTag<Button>("audio-level-up").performClick()
+            }
+            assertEquals(PlaybackAudioLevel(60, true), ReceiverPlaybackOutput.audioLevel())
+            awaitMoreAudio()
+            instrumentation.runOnMainSync {
+                activity.window.decorView.findViewWithTag<CheckBox>("audio-level-mute").performClick()
+            }
+            assertEquals(PlaybackAudioLevel(60), ReceiverPlaybackOutput.audioLevel())
+            val result = stream.get(10, TimeUnit.SECONDS)
             assertEquals("FANP ${probe.diagnostic()}; ${ReceiverPlaybackOutput.diagnostic()}", 0, result)
             val drainDeadline = System.nanoTime() + 5_000_000_000L
             while (!ReceiverPlaybackOutput.outputsReleased() && System.nanoTime() < drainDeadline) Thread.sleep(20)
@@ -42,6 +78,7 @@ class NativePlaybackTest : InstrumentationTestCase() {
             assertTrue(ReceiverPlaybackOutput.diagnostic(), ReceiverPlaybackOutput.renderedVideoFrames() - beforeVideo >= 80)
             assertTrue(ReceiverPlaybackOutput.diagnostic(), ReceiverPlaybackOutput.renderedAudioBuffers() - beforeAudio >= 100)
             assertTrue("Stop releases both codec outputs", ReceiverPlaybackOutput.outputsReleased())
+            assertEquals("Stop preserves local level", PlaybackAudioLevel(60), ReceiverPlaybackOutput.audioLevel())
             instrumentation.sendStatus(0, android.os.Bundle().apply {
                 putString("stream", "\n${ReceiverPlaybackOutput.diagnostic()}\n")
             })
@@ -54,7 +91,11 @@ class NativePlaybackTest : InstrumentationTestCase() {
             val stopDeadline = System.nanoTime() + 5_000_000_000L
             while (native.isReceiverRunning() && System.nanoTime() < stopDeadline) Thread.sleep(20)
             assertFalse("receiver listener released", native.isReceiverRunning())
+            sender.shutdownNow()
+            assertTrue("probe worker released", sender.awaitTermination(10, TimeUnit.SECONDS))
             instrumentation.runOnMainSync { activity.finish() }
+            ReceiverPlaybackOutput.setAudioLevel(originalLevel)
+            settings.save(originalLevel)
         }
     }
 
