@@ -3,6 +3,7 @@
 //! This crate negotiates configuration and drives platform-owned backends. It
 //! carries bounded FAM1 media to those backends but does not decode codecs or
 //! own platform surfaces.
+pub mod discovery;
 pub mod media_control;
 pub mod media_receiver;
 pub mod media_session;

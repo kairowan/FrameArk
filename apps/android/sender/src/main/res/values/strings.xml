@@ -1,7 +1,15 @@
 <resources>
     <string name="app_name">FrameArk Sender</string>
     <string name="title">FrameArk Sender · Experimental</string>
-    <string name="instructions">同一局域网：在 Receiver 启动接收并分享连接信息，粘贴到下方。先核对两端完整 TLS 指纹，再输入接收端 PIN。测试流发送 30 秒画面和短提示音，需要保持前台；屏幕共享请使用下方独立按钮。降低接收端媒体音量。</string>
+    <string name="instructions">同一局域网：在 Receiver 启动接收，然后扫描选择接收器；也可分享连接信息并粘贴到下方。核对两端地址及完整 TLS 指纹，再输入接收端 PIN。测试流发送 30 秒画面和短提示音，需要保持前台；屏幕共享使用独立按钮。降低接收端媒体音量。</string>
+    <string name="discovery_warning">局域网发现 · Experimental。广播未经认证，发现不代表信任！选中后仍须对照 Receiver 核对完整指纹。旧版接收器或组播隔离可手动连接；自动与手动均仅支持本地 IPv4，不支持纯 IPv6。</string>
+    <string name="discovery_start">扫描局域网接收器（15 秒）</string>
+    <string name="discovery_stop">停止扫描并清空列表</string>
+    <string name="discovery_idle">扫描已停止。未自动连接。</string>
+    <string name="discovery_scanning">正在扫描，候选地址 %1$d 个；尚未验证身份。</string>
+    <string name="discovery_complete">扫描完成，候选地址 %1$d 个（会自动过期）。找不到设备时检查同一 Wi-Fi、AP 隔离，或手动粘贴连接信息。</string>
+    <string name="discovery_failed">发现失败或上次扫描正在清理。请稍后重试，检查组播与网络；仍可手动粘贴连接信息。未降级 TLS。</string>
+    <string name="discovery_candidate">选择未验证接收器 %1$s</string>
     <string name="ticket_hint">粘贴接收端连接信息（不含 PIN）</string>
     <string name="inspect">检查连接信息</string>
     <string name="confirm">我已核对接收端地址与完整 TLS 指纹</string>

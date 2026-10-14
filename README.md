@@ -21,6 +21,10 @@ bounded protocol foundations, not Apple-device interoperability claims.
 真机结果由设备持有人自行安装并反馈，不把模拟器或请求 60 fps 等同真机验收。
 操作见[参考测试流](docs/testing/ANDROID_REFERENCE_SENDER.md)与[屏幕共享说明](docs/testing/ANDROID_SCREEN_CAPTURE.md)。
 
+Sender 支持前台扫描并选择局域网接收器（Experimental，仅本地 IPv4），
+也保留手动连接。发现广播未经认证，选择后仍须核对 Receiver 上的完整 TLS
+指纹并输入 PIN；不会自动信任或连接。详见[发现边界](docs/adr/0124-android-sender-discovery.md)。
+
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
 Apple 设备尚未验证的行为写成完成。

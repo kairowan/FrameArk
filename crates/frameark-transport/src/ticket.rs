@@ -1,4 +1,5 @@
-//! Explicit out-of-band bootstrap; never discovery or automatic trust.
+//! Explicitly approved bootstrap; a ticket alone never establishes trust.
+//! DNS-SD may supply candidate bytes, but full fingerprint comparison is mandatory.
 use std::{fmt, net::SocketAddrV4};
 
 use ring::digest::{SHA256, digest};

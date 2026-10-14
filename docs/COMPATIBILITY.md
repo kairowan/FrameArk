@@ -14,6 +14,13 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 
 ## Current status
 
+Android Sender discovery is Experimental: foreground mDNS `boot=cert1` hints,
+bounded local-IPv4 candidates, explicit full TLS fingerprint comparison and PIN.
+No automatic trust/connection, IPv6, or older-certificate-extension compatibility
+is claimed. Manual tickets remain supported. Windows real mDNS/private-IPv4 QUIC
+control integration is not two-device Wi-Fi/hardware acceptance; see
+[ADR 0124](adr/0124-android-sender-discovery.md).
+
 Android trust mutation is enforced as stopped-only in Rust, including the
 listener join interval ([ADR 0118](adr/0118-native-trust-lifecycle-gate.md)).
 Regression evidence covers active revoke rejection without snapshot changes

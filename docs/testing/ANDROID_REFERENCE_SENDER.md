@@ -19,11 +19,17 @@ packet captures or permanent device identifiers need to be shared with us.
 3. Open Receiver, leave proof-required mode off for this PIN-only reference
    sender, and start reception. If one-shot pairing approval is enabled,
    explicitly approve the next pairing before Send. Keep the PIN private.
-4. Tap **分享连接信息（不含 PIN）**, select the reachable address, and copy/share
+4. For automatic discovery, tap **扫描局域网接收器（15 秒）** in Sender and select
+   the reachable, explicitly **unverified** address. Keep Receiver foreground.
+   In Receiver, open **分享连接信息（不含 PIN）** to view the address/full TLS
+   fingerprint for comparison. Discovery does not authorize or connect.
+   Alternatively, tap **分享连接信息（不含 PIN）**, select the reachable address, and copy/share
    through your trusted mechanism to the source device. Return to Receiver
    before sending. The displayed SHA-256 is the temporary TLS certificate,
    not the persistent Keystore identity. Restarting reception changes it.
-5. In Sender, paste the exact connection text and tap **检查连接信息**. Compare
+5. For manual entry, paste the exact connection text and tap **检查连接信息**.
+   Discovery selection fills/inspects the text and clears prior PIN/confirmation.
+   Compare
    the full address and 64-character fingerprint with Receiver. Confirm only
    if both match; enter Receiver's six-digit PIN separately. Never accept a
    ticket from an unknown third party or send your PIN to us.
@@ -35,6 +41,13 @@ packet captures or permanent device identifiers need to be shared with us.
 7. Verify normal end releases playback. Repeat at least three times. Also
    cancel midway, leave Sender, stop Receiver, and try an intentionally wrong
    PIN. These should stop/reject; no encrypted-to-clear fallback is supported.
+
+Discovery requires matching new builds with `boot=cert1`, local IPv4 and working
+multicast. Entries expire; scan again if needed. Cancel/leave the page to stop
+scanning and clear the list; returning never connects automatically. If multiple
+addresses appear, compare the receiver's actual Wi-Fi address. Old builds or
+filtered multicast can use manual entry; pure IPv6 is not supported by either
+ticket path. Report whether discovery, manual entry, or both were tested.
 
 If connection fails: verify both foreground, matching build, current ticket,
 PIN, reachable private address and approval mode. If encoding fails at 1080p,
