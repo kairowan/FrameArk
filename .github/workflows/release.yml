@@ -164,7 +164,7 @@ jobs:
           cp build/release-inputs/LICENSE* build/release-inputs/COMPATIBILITY.md build/release-dist/
           (cd build/release-dist && sha256sum * > SHA256SUMS)
       - name: Attest only the final signed distribution
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: 'build/release-dist/*'
       - name: Publish reviewed distribution
