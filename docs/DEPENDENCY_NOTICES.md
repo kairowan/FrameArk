@@ -89,6 +89,20 @@ Do not suppress a missing notice or use a generic template in place of an upstre
 copyright notice just to make CI pass. Review new dependencies, update pinned
 evidence and tests, then use the normal focused-branch/PR process.
 
+Signing verification independently requires the exact policy-listed Maven notice
+files and the fixed Rust/NDK runtime notice filenames. Rust supplements cannot be
+omitted; both Maven and Rust supplements must match the reviewed policy's hashes
+and provenance URLs, not just hashes supplied by the artifact's own index. Each
+file must belong to its declared component. Regression cases rebuild the readable
+text, index and ZIP together, so a self-consistent omission/replacement does not
+evade these policy checks. Maven license metadata is also bound to policy.
+
+Original crate archive contents and toolchain notice bytes are verified/collected
+by the no-secret build. The signing job does not download dependencies or replay
+that extraction; trust still depends on reviewed build code, the exact immutable
+artifact and its transport digest. Hash consistency is not an independent audit
+of a compromised producer or a legal-completeness proof.
+
 Source references: [Apache redistribution conditions](https://www.apache.org/licenses/LICENSE-2.0),
 [Kotlin's versioned third-party inventory](https://github.com/JetBrains/kotlin/blob/693c44ee79f62895a9b92bdd60fdd7a9bc29a975/license/README.md).
 Legal, patent, trademark and platform-distribution review remain separate gates.

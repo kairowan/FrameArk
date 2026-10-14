@@ -357,6 +357,12 @@ texts, duplicate entries, links and traversal fail before signing secrets are
 loaded. Local dependency-cache paths never enter public indexes. This is packaging
 integrity evidence, not a legal/patent clearance; see
 [dependency notices](docs/DEPENDENCY_NOTICES.md).
+Signing also pins policy-backed supplement bytes/provenance and required
+Maven/runtime filenames independently of artifact-index hashes. Self-consistent
+rewrites of all three notice assets cannot remove those required files. Crate
+archive verification remains a build-stage responsibility: trusted reviewed build
+code and immutable-artifact digest verification are still required; the index is
+not a signature or a proof of legal completeness.
 
 The experimental Android reference Sender accepts only explicitly pasted,
 bounded private-IPv4 pairing tickets and a separately entered PIN. Tickets

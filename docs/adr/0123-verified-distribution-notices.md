@@ -47,6 +47,15 @@ update the stored-file hash and retain the original upstream LF-normalized hash
 for provenance. Verify both the staged diff and the complete PR diff, regenerate
 the notices and rebuild both APKs after this policy change.
 
+A follow-up verifier review reproduced eight policy-coverage omissions: an index,
+readable text and ZIP could be rewritten consistently after dropping/changing a
+required Maven/Rust supplement or dropping a runtime notice. The signer now checks
+exact Maven/runtime file inventories, mandatory Rust supplements, reviewed hashes
+and provenance, component ownership and Maven license metadata independently of
+the supplied index. Synthetic regressions reproduce the original failures. This
+does not replace trust in the reviewed no-secret build or authenticate arbitrary
+crate/toolchain content without that build's evidence.
+
 No in-app license viewer, exact linker map, expanded Android SPDX SBOM or legal
 clearance is claimed. System codecs/DRM and trademark/patent gates remain separate.
 M0–M5 maturity does not advance merely because packaging checks pass. Rollback is
