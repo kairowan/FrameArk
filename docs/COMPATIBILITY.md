@@ -21,6 +21,14 @@ key attestation/hardware-security guarantees and automatic enrollment are absent
 
 ## Current status
 
+DLNA's pre-alpha Rust API now requires `with_backend` for output mutations;
+`new` is unbound and fails valid mutation commands with SOAP 501. `state_mut`
+has been removed. Output acceptance, failure cleanup and TCP dispatch have
+instrumented-backend coverage, not actual decoding or controller compatibility.
+Asynchronous progress and Android output are absent, and the existing GENA
+control-URL/event-URL mismatch remains a separate open interoperability defect.
+See [ADR 0129](adr/0129-dlna-playback-dispatch.md). DLNA remains Experimental.
+
 Android Sender discovery is Experimental: foreground mDNS `boot=cert1` hints,
 bounded local-IPv4 candidates, explicit full TLS fingerprint comparison and PIN.
 No automatic trust/connection, IPv6, or older-certificate-extension compatibility

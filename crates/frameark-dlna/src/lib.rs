@@ -6,6 +6,15 @@
 //! interoperability until platform schedulers and compatibility fixtures cover
 //! those environments.
 
+mod playback;
+
+pub use playback::{
+    MediaPlaybackBackend, PlaybackBackendError, PlaybackCommand, PlaybackDispatchReport,
+};
+
+#[cfg(test)]
+mod playback_tests;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::fs::File;
@@ -1693,6 +1702,8 @@ pub struct MediaRendererHttpService {
     file_resources: BTreeMap<String, FileMediaResource>,
     gena: GenaRegistry,
     pending_events: Vec<GenaEvent>,
+    playback: Option<Box<dyn MediaPlaybackBackend>>,
+    playback_report: PlaybackDispatchReport,
 }
 
 /// Bounded format capability report advertised by `ConnectionManager`.
@@ -2323,7 +2334,9 @@ impl MediaRendererTcpServer {
     /// a request budget, malformed clients are isolated to their connection,
     /// and the listener is restored to blocking mode before returning. This
     /// is a scheduler primitive, not an unbounded daemon or a concurrency
-    /// guarantee.
+    /// guarantee. A request already in progress can outlive the scheduling
+    /// deadline: socket timeouts and backend calls are synchronous. The host
+    /// must separately bound backend operations; this method cannot preempt them.
     pub fn serve_for(
         &mut self,
         duration: Duration,
@@ -2563,7 +2576,10 @@ fn request_may_be_incomplete(bytes: &[u8], error: &DlnaError) -> bool {
 }
 
 impl MediaRendererHttpService {
-    /// Creates a handler after validating the supplied device description.
+    /// Creates an unbound handler after validating the device description.
+    /// Description, query and subscription requests remain available, but
+    /// output mutations fail with SOAP 501 until a backend is supplied through
+    /// [`with_backend`](Self::with_backend). No simulated playback is implicit.
     pub fn new(description: DeviceDescription) -> Result<Self, DlnaError> {
         description.to_xml()?;
         Ok(Self {
@@ -2575,17 +2591,78 @@ impl MediaRendererHttpService {
             file_resources: BTreeMap::new(),
             gena: GenaRegistry::default(),
             pending_events: Vec::new(),
+            playback: None,
+            playback_report: PlaybackDispatchReport::default(),
         })
     }
 
-    /// Returns a read-only snapshot of renderer state for platform adapters.
+    /// Creates a handler that owns one synchronous, bounded output backend.
+    /// Successful validation precedes dispatch; successful dispatch precedes
+    /// state changes and GENA events. Fatal backend failure detaches it.
+    pub fn with_backend<B>(description: DeviceDescription, backend: B) -> Result<Self, DlnaError>
+    where
+        B: MediaPlaybackBackend + 'static,
+    {
+        // Take ownership before validation so a rejected description also
+        // releases a backend whose constructor may already own OS resources.
+        let mut backend: Box<dyn MediaPlaybackBackend> = Box::new(backend);
+        match Self::new(description) {
+            Ok(mut service) => {
+                service.playback = Some(backend);
+                Ok(service)
+            }
+            Err(error) => {
+                backend.shutdown();
+                Err(error)
+            }
+        }
+    }
+
+    /// Returns the acknowledged command state, not a live decoder position.
+    /// Duration currently comes from metadata; asynchronous decoder feedback
+    /// and progress reconciliation are not supplied by this control boundary.
     pub fn state(&self) -> &MediaRendererState {
         &self.state
     }
 
-    /// Returns mutable renderer state for a platform-owned playback backend.
-    pub fn state_mut(&mut self) -> &mut MediaRendererState {
-        &mut self.state
+    /// Returns payload-free command acceptance and failure diagnostics.
+    pub fn playback_report(&self) -> PlaybackDispatchReport {
+        self.playback_report
+    }
+
+    fn dispatch_playback(&mut self, command: PlaybackCommand<'_>) -> Result<(), SoapFault> {
+        self.playback_report.attempted = self.playback_report.attempted.saturating_add(1);
+        let result = self
+            .playback
+            .as_mut()
+            .map_or(Err(PlaybackBackendError::Unavailable), |backend| {
+                backend.apply(command)
+            });
+        match result {
+            Ok(()) => {
+                self.playback_report.accepted = self.playback_report.accepted.saturating_add(1);
+                self.playback_report.last_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.playback_report.last_error = Some(error);
+                if error == PlaybackBackendError::Failed {
+                    self.playback_report.fatal_failures =
+                        self.playback_report.fatal_failures.saturating_add(1);
+                    if let Some(mut backend) = self.playback.take() {
+                        backend.shutdown();
+                    }
+                    self.state = MediaRendererState {
+                        volume: self.state.volume,
+                        ..MediaRendererState::default()
+                    };
+                    self.queue_state_event(AVTRANSPORT_SERVICE);
+                } else {
+                    self.playback_report.rejected = self.playback_report.rejected.saturating_add(1);
+                }
+                Err(SoapFault::new(501, "Action Failed"))
+            }
+        }
     }
 
     /// Returns the bounded protocol-info capability report.
@@ -2970,13 +3047,13 @@ impl MediaRendererHttpService {
                 require_instance_zero(action)?;
                 let uri = action.required_arg("CurrentURI")?;
                 validate_media_uri(uri)?;
+                let metadata = action.arg("CurrentURIMetaData").unwrap_or_default();
+                let duration = metadata_duration(metadata);
+                self.dispatch_playback(PlaybackCommand::SetUri { uri, metadata })?;
                 self.state.current_uri = uri.to_string();
-                self.state.current_uri_metadata = action
-                    .arg("CurrentURIMetaData")
-                    .unwrap_or_default()
-                    .to_string();
+                self.state.current_uri_metadata = metadata.to_string();
                 self.state.position_seconds = 0;
-                self.state.duration_seconds = metadata_duration(&self.state.current_uri_metadata);
+                self.state.duration_seconds = duration;
                 self.state.transport_state = TransportState::Stopped;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
@@ -2986,18 +3063,21 @@ impl MediaRendererHttpService {
                     return Err(SoapFault::new(712, "Play speed not supported"));
                 }
                 ensure_media_loaded(&self.state)?;
+                self.dispatch_playback(PlaybackCommand::Play)?;
                 self.state.transport_state = TransportState::Playing;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
             "Pause" => {
                 require_instance_zero(action)?;
                 ensure_media_loaded(&self.state)?;
+                self.dispatch_playback(PlaybackCommand::Pause)?;
                 self.state.transport_state = TransportState::PausedPlayback;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
             "Stop" => {
                 require_instance_zero(action)?;
                 ensure_media_loaded(&self.state)?;
+                self.dispatch_playback(PlaybackCommand::Stop)?;
                 self.state.transport_state = TransportState::Stopped;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
@@ -3016,6 +3096,9 @@ impl MediaRendererHttpService {
                 {
                     return Err(SoapFault::new(711, "Seek target outside duration"));
                 }
+                self.dispatch_playback(PlaybackCommand::Seek {
+                    position_seconds: position,
+                })?;
                 self.state.position_seconds = position;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
@@ -3074,6 +3157,10 @@ impl MediaRendererHttpService {
                     .required_arg("DesiredVolume")?
                     .parse::<u8>()
                     .map_err(|_| SoapFault::new(402, "Invalid Args"))?;
+                if volume > 100 {
+                    return Err(SoapFault::new(402, "Invalid Args"));
+                }
+                self.dispatch_playback(PlaybackCommand::SetVolume { volume })?;
                 self.state.volume = volume;
                 Ok(soap_response(RENDERING_CONTROL_SERVICE, &action.name, ""))
             }
@@ -3120,6 +3207,14 @@ impl MediaRendererHttpService {
                 ))
             }
             _ => Err(SoapFault::new(401, "Invalid Action")),
+        }
+    }
+}
+
+impl Drop for MediaRendererHttpService {
+    fn drop(&mut self) {
+        if let Some(mut backend) = self.playback.take() {
+            backend.shutdown();
         }
     }
 }
@@ -3478,7 +3573,11 @@ fn parse_upnp_time(value: &str) -> Result<u64, SoapFault> {
     if minutes >= 60 || seconds >= 60 {
         return Err(SoapFault::new(711, "Seek target invalid"));
     }
-    Ok(hours * 3600 + minutes * 60 + seconds)
+    hours
+        .checked_mul(3600)
+        .and_then(|value| value.checked_add(minutes * 60))
+        .and_then(|value| value.checked_add(seconds))
+        .ok_or_else(|| SoapFault::new(711, "Seek target invalid"))
 }
 
 fn format_upnp_time(seconds: u64) -> String {
@@ -3936,7 +4035,21 @@ mod tests {
         );
     }
 
-    fn renderer_description() -> DeviceDescription {
+    // State-model fixtures explicitly acknowledge commands. This backend
+    // deliberately has no decoder and exists only in the test binary.
+    fn acknowledging_test_service() -> MediaRendererHttpService {
+        struct AcknowledgingBackend;
+        impl MediaPlaybackBackend for AcknowledgingBackend {
+            fn apply(&mut self, _: PlaybackCommand<'_>) -> Result<(), PlaybackBackendError> {
+                Ok(())
+            }
+            fn shutdown(&mut self) {}
+        }
+        MediaRendererHttpService::with_backend(renderer_description(), AcknowledgingBackend)
+            .unwrap()
+    }
+
+    pub(super) fn renderer_description() -> DeviceDescription {
         DeviceDescription {
             friendly_name: "FrameArk Renderer".to_string(),
             manufacturer: "FrameArk".to_string(),
@@ -3970,7 +4083,7 @@ mod tests {
 
     #[test]
     fn tcp_renderer_serves_one_bounded_loopback_request() {
-        let service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let service = acknowledging_test_service();
         let mut server = MediaRendererTcpServer::bind(
             "127.0.0.1:0".parse().unwrap(),
             service,
@@ -4001,7 +4114,7 @@ mod tests {
 
     #[test]
     fn tcp_renderer_serves_a_bounded_request_batch_and_rejects_unbounded_budget() {
-        let service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let service = acknowledging_test_service();
         let mut server = MediaRendererTcpServer::bind(
             "127.0.0.1:0".parse().unwrap(),
             service,
@@ -4036,7 +4149,7 @@ mod tests {
 
     #[test]
     fn tcp_renderer_runtime_is_time_and_request_bounded() {
-        let service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let service = acknowledging_test_service();
         let mut server = MediaRendererTcpServer::bind(
             "127.0.0.1:0".parse().unwrap(),
             service,
@@ -4090,7 +4203,7 @@ mod tests {
             &path,
         )
         .unwrap();
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         service.register_file_media_resource(resource).unwrap();
         let mut server = MediaRendererTcpServer::bind(
             "127.0.0.1:0".parse().unwrap(),
@@ -4124,7 +4237,12 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    fn soap_request(path: &str, service: &str, action: &str, arguments: &str) -> HttpRequest {
+    pub(super) fn soap_request(
+        path: &str,
+        service: &str,
+        action: &str,
+        arguments: &str,
+    ) -> HttpRequest {
         let body = format!(
             "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:{action} xmlns:u=\"{service}\">{arguments}</u:{action}></s:Body></s:Envelope>"
         )
@@ -4158,7 +4276,7 @@ mod tests {
 
     #[test]
     fn renderer_serves_description_and_scopd_with_bounded_http_responses() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         let request =
             HttpRequest::parse(b"GET /device.xml HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         let response = service.handle(&request);
@@ -4221,7 +4339,7 @@ mod tests {
 
     #[test]
     fn renderer_serves_full_and_partial_media_without_fetching_urls() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         service
             .register_media_resource(
                 MediaResource::new(
@@ -4428,7 +4546,7 @@ mod tests {
 
     #[test]
     fn renderer_discards_expired_or_unsubscribed_pending_events() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         let now = Instant::now();
         let subscription = service
             .gena
@@ -4463,7 +4581,7 @@ mod tests {
 
     #[test]
     fn renderer_advertises_a_bounded_custom_capability_report() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         let capabilities = MediaFormatCapabilities::new(vec![
             "http-get:*:video/webm:*".to_string(),
             "http-get:*:audio/ogg:*".to_string(),
@@ -4486,7 +4604,7 @@ mod tests {
 
     #[test]
     fn renderer_subscribe_emits_initial_and_mutation_events() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         let subscribe = HttpRequest::parse(
             b"SUBSCRIBE /upnp/control/avtransport HTTP/1.1\r\nHost: localhost\r\nNT: upnp:event\r\nCALLBACK: <http://127.0.0.1:9000/events>\r\nTIMEOUT: Second-120\r\n\r\n",
         )
@@ -4663,7 +4781,7 @@ mod tests {
 
     #[test]
     fn renderer_executes_avtransport_and_volume_lifecycle() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         let set_uri = soap_request(
             "/upnp/control/avtransport",
             AVTRANSPORT_SERVICE,
@@ -5020,7 +5138,7 @@ mod tests {
 
     #[test]
     fn renderer_rejects_unsafe_uri_unknown_action_and_invalid_seek() {
-        let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+        let mut service = acknowledging_test_service();
         let unsafe_uri = soap_request(
             "/upnp/control/avtransport",
             AVTRANSPORT_SERVICE,
@@ -5075,7 +5193,7 @@ mod tests {
             "https://media.example/video.mp4#fragment",
             "https:///video.mp4",
         ] {
-            let mut service = MediaRendererHttpService::new(renderer_description()).unwrap();
+            let mut service = acknowledging_test_service();
             let request = soap_request(
                 "/upnp/control/avtransport",
                 AVTRANSPORT_SERVICE,

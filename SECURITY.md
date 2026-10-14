@@ -16,6 +16,19 @@ If private vulnerability reporting is unavailable, open a public issue containin
 
 The project aims to acknowledge complete reports within 72 hours and provide an initial triage within 14 days. These are targets rather than a service-level guarantee for a volunteer project.
 
+## DLNA output boundary
+
+DLNA mutation commands require an explicitly installed output backend; no
+decoder is implied by a successful state-model test. Unbound or rejected
+commands do not change acknowledged state. Fatal output failure clears media
+and detaches/shuts down the backend. Bounded synchronous shutdown is a backend
+contract, not forced cancellation of arbitrary platform code. Diagnostics
+contain counters and fixed error classes only. URL/metadata values must not be
+logged or handed to an unvetted platform URL fetcher: source authorization,
+DNS/address pinning, redirects and resource bounds remain Rust-host policy.
+This change adds no network exposure or production backend. See
+[ADR 0129](docs/adr/0129-dlna-playback-dispatch.md).
+
 ## Android local playback preferences
 
 Receiver-local volume/mute stores only bounded non-sensitive preferences, not

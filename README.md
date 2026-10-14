@@ -120,7 +120,10 @@ fixed-rate lifecycle scheduling while platform consumers own the subsequent
 codec and render APIs. Neither component grants persistent trust, ships a real
 codec, or claims Android hardware playback yet. The `frameark-dlna` crate additionally exposes bounded SSDP and
 caller-owned HTTP/SOAP renderer contracts and one-shot IPv4 SSDP multicast
-announcements. GENA events can now be delivered by
+announcements. Its [output binding](docs/adr/0129-dlna-playback-dispatch.md)
+now requires backend acknowledgment before committing playback control state;
+unbound output mutations fail instead of simulating success. No Android DLNA
+decoder is included by this boundary. GENA events can now be delivered by
 an explicitly plain-HTTP, bounded callback client plus a caller-injected
 HTTP/HTTPS stream boundary; built-in TLS, URL fetching, streaming media
 serving, and named-client interoperability remain future work.

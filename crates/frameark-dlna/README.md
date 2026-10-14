@@ -3,6 +3,24 @@
 `frameark-dlna` contains the bounded Rust protocol layer for FrameArk's
 DLNA/UPnP MediaRenderer work.
 
+## Output binding (Experimental)
+
+`MediaRendererHttpService::new` is fail-closed for output mutations. Use
+`with_backend(description, backend)` with a `MediaPlaybackBackend` to execute
+SetAVTransportURI, Play, Pause, Stop, Seek and SetVolume. State and success GENA
+events are committed only after the typed command is acknowledged. Nonfatal
+rejection preserves the previous state; fatal failure clears media, shuts down
+and detaches the backend. Dropping the service releases its backend as well.
+Queries/descriptions remain available without output. `state_mut` was removed;
+external pre-alpha callers must migrate rather than editing state directly.
+
+Backends must bound synchronous work and apply Rust-owned media source and
+session policy. URI syntax alone does not authorize a fetch. The snapshot is
+acknowledged control state, not live decoder progress. `playback_report()` is a
+payload-free acceptance/failure report, not proof of decoding or display. No
+production decoder backend is included yet. See [ADR 0129](../../docs/adr/0129-dlna-playback-dispatch.md)
+for failure/cleanup contracts and follow-up requirements.
+
 ## Current capability
 
 - bounded SSDP parsing/encoding and a caller-owned UDP publisher;
