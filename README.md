@@ -33,6 +33,10 @@ Receiver 的网络变化通知现在保留现有 Rust 连接与配对信息，�
 真实 QUIC 的同地址短丢包测试与[设备测试说明](docs/testing/ANDROID_NETWORK_CONTINUITY.md)
 已加入；换网换 IP、已失败会话重连及真机短断验收仍未完成。
 
+Receiver 现有应用内音量、静音和遥控器方向键操作：只调节帧舟声音，记住
+已完成的调整，调高音量不会自动解除静音。详见[声音测试说明](docs/testing/ANDROID_AUDIO_CONTROLS.md)。
+这不是发送端网络遥控；真实播放链路已在隔离模拟器验证，真机听感仍待反馈。
+
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
 Apple 设备尚未验证的行为写成完成。

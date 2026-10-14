@@ -57,6 +57,17 @@ no physical-device result is assumed from package delivery alone.
 | Miracast/Wi-Fi Display | Planned/Conditional | No executable implementation yet |
 | FairPlay, Widevine, HDCP bypass | Unsupported | Intentionally outside project scope |
 
+## Receiver-local audio controls — Experimental
+
+Per-track 0..100 linear gain, separate persistent mute, slider/±10/D-pad controls
+and safe output teardown on rejected gain are implemented. API 34 x86_64 tests
+exercise real AudioTrack and live H.264/AAC QUIC playback; JVM tests cover bounds,
+gain-before-play and failure cleanup. No system volume change, sender network
+remote-control command or DLNA/RAOP volume binding is added. Physical audible
+quality/mute latency, TV focus, Bluetooth/HDMI and other API levels remain
+unverified. See [evidence](evidence/2026-10-14-audio-controls/README.md) and
+[manual test](testing/ANDROID_AUDIO_CONTROLS.md).
+
 ## Evidence required for an entry
 
 Each tested entry must identify receiver build/commit, sender device and OS, network type, codec and media mode, expected and observed result, session duration, diagnostics reference, and limitations. Use the [device compatibility evidence template](compatibility/device-matrix.md) for new records. Do not submit private media, credentials, persistent device identifiers, or unsanitized packet captures.

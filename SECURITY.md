@@ -16,6 +16,17 @@ If private vulnerability reporting is unavailable, open a public issue containin
 
 The project aims to acknowledge complete reports within 72 hours and provide an initial triage within 14 days. These are targets rather than a service-level guarantee for a volunteer project.
 
+## Android local playback preferences
+
+Receiver-local volume/mute stores only bounded non-sensitive preferences, not
+peer or trust data. Invalid stored values fail to zero/muted; missing settings
+on a fresh/cleared install default to 50%, unmuted. A rejected live gain closes
+output and requests service stop rather than continuing with unknown volume.
+Preference-save failure is visible, and persistence of the safe mute after an
+output failure is best-effort. These controls affect FrameArk's AudioTrack, not
+system audio or a general privacy boundary; they grant no remote-control or
+pairing authority. See [ADR 0127](docs/adr/0127-receiver-local-audio-controls.md).
+
 ## Supported versions
 
 FrameArk is currently pre-alpha and has no supported release line. Security fixes will target the active development branch until the first published release. A supported-version table will be added before 1.0.

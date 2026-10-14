@@ -47,6 +47,18 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val audioSettings = PlaybackAudioSettings(this)
+        ReceiverPlaybackOutput.initializeAudioLevel(audioSettings.read())
+        val audioPanel = PlaybackAudioPanel(this, ReceiverPlaybackOutput::audioLevel) { level, persist ->
+            if (!ReceiverPlaybackOutput.setAudioLevel(level)) {
+                stopService(Intent(this, FrameArkReceiverService::class.java))
+                // Keep the failure's safe muted intent even across process restart.
+                audioSettings.save(ReceiverPlaybackOutput.audioLevel())
+                PlaybackAudioPanel.ChangeResult.OUTPUT_FAILED
+            } else if (persist && !audioSettings.save(level)) {
+                PlaybackAudioPanel.ChangeResult.NOT_SAVED
+            } else PlaybackAudioPanel.ChangeResult.APPLIED
+        }
 
         val native = FrameArkNative()
         val trustStore = AndroidTrustSnapshotStore(filesDir.resolve("frameark-trust.fats"), native)
@@ -254,6 +266,7 @@ class MainActivity : Activity() {
             })
             playbackStatus = TextView(this@MainActivity).apply { text = ReceiverPlaybackOutput.diagnostic() }
             addView(playbackStatus)
+            addView(audioPanel)
             addView(mutationStatus)
             addView(proofStatus)
             addView(approveProof)

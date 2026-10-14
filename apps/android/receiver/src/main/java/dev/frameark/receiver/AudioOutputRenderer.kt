@@ -12,18 +12,36 @@ import android.media.AudioTrack
  * start/stop/release lifecycle.
  */
 class AudioOutputRenderer(
-    private val trackFactory: (PcmTrackConfig) -> AudioTrack = ::createTrack,
+    private val trackFactory: (PcmTrackConfig) -> PcmOutputTrack = ::createTrack,
     private val onWritten: () -> Unit = {},
 ) {
-    private var track: AudioTrack? = null
+    private var track: PcmOutputTrack? = null
     private val pending = PcmWriteQueue()
+    private var gain = PlaybackAudioLevel().gain
+
+    /** Applies local linear gain; survives output reset and decoder reconfiguration. */
+    fun setGain(value: Float) {
+        require(value.isFinite() && value in 0f..1f) { "audio gain outside 0..1" }
+        try {
+            track?.setGain(value)
+            gain = value
+        } catch (failure: Exception) {
+            gain = 0f
+            runCatching { reset() }
+            throw failure
+        }
+    }
 
     /** Opens and starts an audio output for the negotiated PCM format. */
     fun configure(config: PcmTrackConfig) {
         reset()
         val output = trackFactory(config)
-        try { output.play(); track = output } catch (error: Throwable) {
-            output.release()
+        try {
+            output.setGain(gain) // Before play: a new track must not leak an unmuted buffer.
+            output.play()
+            track = output
+        } catch (error: Throwable) {
+            output.close()
             throw error
         }
     }
@@ -39,7 +57,7 @@ class AudioOutputRenderer(
         if (track == null) return
         val output = track ?: error("audio output is not configured")
         val completed = pending.drain { data, offset, length ->
-            output.write(data, offset, length, AudioTrack.WRITE_NON_BLOCKING)
+            output.write(data, offset, length)
         }
         repeat(completed) { onWritten() }
     }
@@ -48,23 +66,15 @@ class AudioOutputRenderer(
     fun reset() {
         pending.clear()
         val output = track ?: return
-        try {
-            output.pause()
-            output.flush()
-            output.stop()
-        } catch (_: IllegalStateException) {
-            // Release still needs to run when setup or playback failed.
-        } finally {
-            output.release()
-            track = null
-        }
+        track = null
+        output.close()
     }
 
     /** Whether an AudioTrack is active. */
     fun isConfigured(): Boolean = track != null
 
     private companion object {
-        fun createTrack(config: PcmTrackConfig): AudioTrack {
+        fun createTrack(config: PcmTrackConfig): PcmOutputTrack {
             val channelMask = when (config.channels) {
                 1 -> AudioFormat.CHANNEL_OUT_MONO
                 2 -> AudioFormat.CHANNEL_OUT_STEREO
@@ -77,7 +87,7 @@ class AudioOutputRenderer(
                 .build()
             val minimumBuffer = AudioTrack.getMinBufferSize(config.sampleRate, channelMask, format.encoding)
             require(minimumBuffer > 0) { "audio device rejected the PCM format" }
-            return AudioTrack.Builder()
+            val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -88,6 +98,19 @@ class AudioOutputRenderer(
                 .setBufferSizeInBytes(minimumBuffer.coerceAtLeast(config.sampleRate / 2))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
+            return object : PcmOutputTrack {
+                override fun setGain(gain: Float) {
+                    check(track.setVolume(gain) == AudioTrack.SUCCESS) { "audio gain rejected" }
+                }
+                override fun play() = track.play()
+                override fun write(bytes: ByteArray, offset: Int, size: Int): Int =
+                    track.write(bytes, offset, size, AudioTrack.WRITE_NON_BLOCKING)
+                override fun close() {
+                    try { track.pause(); track.flush(); track.stop() }
+                    catch (_: IllegalStateException) { /* Release also covers partial setup. */ }
+                    finally { track.release() }
+                }
+            }
         }
     }
 }
