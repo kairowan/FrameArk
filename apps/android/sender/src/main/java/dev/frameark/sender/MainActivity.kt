@@ -32,7 +32,7 @@ class MainActivity : Activity() {
     private val refreshCapture = object : Runnable {
         override fun run() {
             val value = CaptureStatus.snapshot
-            captureStatus.text = getString(R.string.capture_progress, value.phase, value.seconds, value.video, value.audio, value.nonSilentAudio, value.failure)
+            captureStatus.text = getString(R.string.capture_progress, value.phase, value.seconds, value.video, value.audio, value.nonSilentAudio, value.failure, value.width, value.height, value.videoUpdates)
             captureHandler.postDelayed(this, 500)
         }
     }

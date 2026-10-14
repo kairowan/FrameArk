@@ -6,7 +6,7 @@
 //! never touches `Surface`, `MediaCodec`, `AudioTrack`, or a UI object.
 
 use frameark_api::{AudioFrame, AudioRenderer, VideoFrame, VideoRenderer};
-use frameark_core::{ErrorKind, FrameArkError, Result, SessionState, TrackId};
+use frameark_core::{ErrorKind, FrameArkError, Result, SessionState, TrackId, VideoConfig};
 use frameark_media::MediaPacket;
 
 use crate::SessionOffer;
@@ -48,6 +48,7 @@ pub struct MediaSession<V: VideoRenderer, A: AudioRenderer> {
     state: SessionState,
     video: Option<VideoTrack<V>>,
     audio: Option<AudioTrack<A>>,
+    video_keyframe_required: bool,
 }
 
 impl<V, A> MediaSession<V, A>
@@ -111,6 +112,7 @@ where
             state: SessionState::Preparing,
             video,
             audio,
+            video_keyframe_required: false,
         })
     }
 
@@ -131,6 +133,27 @@ where
         Ok(())
     }
 
+    /// Rebuilds only the video output at an ordered, policy-validated boundary.
+    /// Audio remains configured. The first video frame must be a keyframe.
+    pub fn reconfigure_video(&mut self, config: VideoConfig) -> Result<()> {
+        if self.state != SessionState::Streaming {
+            return Err(FrameArkError::invalid_state(
+                "fanp.video_reconfigure_state",
+                "video reconfiguration requires streaming",
+            ));
+        }
+        config.validate()?;
+        let video = self.video.as_mut().ok_or_else(|| missing_track("video"))?;
+        self.state = SessionState::Reconfiguring;
+        if video.renderer.configure(config).is_err() {
+            let _ = self.reset();
+            return Err(renderer_error("fanp.video_reconfigure"));
+        }
+        self.video_keyframe_required = true;
+        self.state = SessionState::Streaming;
+        Ok(())
+    }
+
     /// Routes one validated packet to the matching platform renderer.
     pub fn render(&mut self, packet: &MediaPacket) -> Result<()> {
         if self.state != SessionState::Streaming {
@@ -141,6 +164,12 @@ where
         }
         match packet {
             MediaPacket::Video(frame) => {
+                if self.video_keyframe_required && !frame.is_keyframe() {
+                    return Err(FrameArkError::invalid_argument(
+                        "fanp.video_keyframe",
+                        "updated video requires a keyframe",
+                    ));
+                }
                 let video = self.video.as_mut().ok_or_else(|| missing_track("video"))?;
                 if video.id != *frame.track_id() {
                     return Err(track_mismatch("video"));
@@ -154,7 +183,9 @@ where
                         time_base: frame.presentation().time_base(),
                         keyframe: frame.is_keyframe(),
                     })
-                    .map_err(|_| renderer_error("fanp.video_render"))
+                    .map_err(|_| renderer_error("fanp.video_render"))?;
+                self.video_keyframe_required = false;
+                Ok(())
             }
             MediaPacket::Audio(packet) => {
                 let audio = self.audio.as_mut().ok_or_else(|| missing_track("audio"))?;
@@ -219,6 +250,7 @@ mod tests {
         configured: Option<VideoConfig>,
         rendered: usize,
         resets: usize,
+        fail_configure: bool,
     }
 
     struct FakeVideo(Rc<RefCell<VideoState>>);
@@ -227,6 +259,9 @@ mod tests {
         type Error = ();
 
         fn configure(&mut self, config: VideoConfig) -> std::result::Result<(), Self::Error> {
+            if self.0.borrow().fail_configure {
+                return Err(());
+            }
             self.0.borrow_mut().configured = Some(config);
             Ok(())
         }
@@ -404,5 +439,32 @@ mod tests {
             .is_err()
         );
         assert_eq!(video_state.borrow().resets, 1);
+    }
+
+    #[test]
+    fn failed_video_reconfiguration_resets_both_tracks_once() {
+        let video = Rc::new(RefCell::new(VideoState::default()));
+        let audio = Rc::new(RefCell::new(AudioState::default()));
+        let mut session = MediaSession::prepare(
+            offer(),
+            Some((TrackId::new("video-0").unwrap(), FakeVideo(video.clone()))),
+            Some((TrackId::new("audio-0").unwrap(), FakeAudio(audio.clone()))),
+        )
+        .unwrap();
+        assert!(session.reconfigure_video(offer().video.unwrap()).is_err());
+        session.start().unwrap();
+        video.borrow_mut().fail_configure = true;
+        assert_eq!(
+            session
+                .reconfigure_video(offer().video.unwrap())
+                .unwrap_err()
+                .code(),
+            "fanp.video_reconfigure"
+        );
+        assert_eq!(session.state(), SessionState::Closed);
+        session.reset().unwrap();
+        drop(session);
+        assert_eq!(video.borrow().resets, 1);
+        assert_eq!(audio.borrow().resets, 1);
     }
 }

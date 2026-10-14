@@ -430,10 +430,19 @@ to the selected receiver after consent; the user must choose the screen/app
 carefully. No capture files or media-bearing diagnostics are written.
 
 User stop, OS grant revocation, screen-off and task removal stop capture. No
-automatic reconnect, restart, regrant or reconfiguration is attempted. Fixed
-capture geometry and bounded queues/timeouts fail rather than silently changing
-encryption or codecs. Platform codec calls cannot guarantee hard real-time
-termination. See [ADR 0121](docs/adr/0121-android-screen-capture.md).
+automatic reconnect, restart or regrant is attempted. Matching versions explicitly
+negotiate ordered video-only resizing ([ADR 0128](docs/adr/0128-native-video-reconfiguration.md))
+before media. Only an authenticated sender can submit a sequenced update after
+the old stream FIN; Rust revalidates capabilities and receiver bounds before
+rebuilding video. The ceiling is 256 updates per connection within the existing
+1024-request limit. Old receivers reject the new offer; no fallback or second
+MediaProjection grant/display is created. One coalesced OS resize event and the
+existing bounded media queue prevent unbounded resize buffering. Audio, trust,
+timestamps and local mute are retained; failure/cancellation releases both outputs.
+Receiver orientation/size changes retain its existing visible Surface; actual
+surface loss/background destruction still stops active playback. Platform codec
+calls cannot guarantee hard real-time termination. See
+[capture consent](docs/adr/0121-android-screen-capture.md).
 
 Maintainers will validate the report, determine affected versions, coordinate a fix and regression test, and agree on disclosure timing with the reporter when practical. Security releases should include an advisory, upgrade guidance, affected-version range, checksums, and credit unless anonymity is requested.
 

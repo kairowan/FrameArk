@@ -22,7 +22,12 @@
 7. 从通知或 Sender 点击停止，确认接收端画面/音频结束、通知消失。重复三次；再测试
    锁屏停止与系统停止共享。每次重新开始都需要重新输入 PIN、确认指纹与系统授权。
 8. 基础通过后分别尝试 1080p、60 fps 请求值与更长运行，并记录实际表现。最多 1 小时。
-   旋转保持本次固定编码画布，可能黑边；网络断开需手动重新配对，不宣称自动恢复。
+   匹配的新版本会在旋转或共享窗口尺寸改变时更新编码画布，仍保持所选 720p/1080p
+   上限；接收端保持比例显示，可能有黑边。旧 Receiver 不支持新协商时会在媒体开始前
+   拒绝，请同时更新两端，不会自动回退。网络断开需手动重新配对，不宣称自动恢复。
+9. 播放非敏感动态画面时依次横屏、竖屏，观察画面恢复、比例和声音；再单独旋转
+   Receiver，确认没有退出接收。记录 Sender 尺寸/更新次数、Receiver configs/formats
+   及帧/PCM 计数。最多 256 次视频配置更新，超限会结束会话，需重新授权开始。
 
 降低接收端音量再播放自有测试音频；不要用私人消息、密码、金融或受保护媒体测试。
 PIN 失败、授权被拒、编码不支持或网络错误会失败，不会自动降级 TLS 或画质。
@@ -40,7 +45,10 @@ Use the same two isolated API 34 emulators and temporary host UDP forwarding
 described in [reference testing](ANDROID_REFERENCE_SENDER.md). Build with
 `-PframearkPlaybackProbe=true` and Rust `android-playback-probe` for x86_64 only.
 Run `scripts/test_android_reference_sender.ps1` with the required emulator/ADB
-arguments and `-Capture` or `-CaptureVideoOnly`. The latter locks the disposable
+arguments and `-Capture`, `-CaptureRotation` or `-CaptureVideoOnly`. Rotation
+checks actual OS landscape/portrait capture, ongoing non-silent source PCM,
+receiver geometry/configuration counters and retained Activity/SurfaceTexture.
+Video-only locks the disposable
 sender emulator and asserts automatic stop, then wakes it. No physical serials
 are accepted. System UI consent is clicked explicitly, never bypassed with
 PROJECT_MEDIA app-ops. RECORD_AUDIO/notification grants are test setup only.
@@ -51,3 +59,9 @@ red/blue pixels, not merely queued frame counts. Audio mode additionally asserts
 non-silent source PCM and receiver PCM writes. Video-only asserts zero audio.
 Both assert stop/release. Normal APKs exclude the fixture and probe-native code.
 See [evidence](../evidence/2026-10-13-screen-capture/README.md).
+
+Update counts on Sender mean locally queued updates/encoder rebuilds, not receiver
+acknowledgments or measured FPS. Receiver configs/formats count applied codec
+configuration and observed MediaCodec output formats, not physical display latency.
+API 34 captured-region callbacks and API 29–33 default-display fallback require
+separate device coverage; emulator evidence does not establish all versions.

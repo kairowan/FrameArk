@@ -5,6 +5,8 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.os.Bundle
 import android.os.Handler
@@ -28,9 +30,14 @@ class MainActivity : Activity() {
     private lateinit var rejectProof: Button
     private lateinit var playbackStatus: TextView
     private var videoSurface: Surface? = null
+    private lateinit var videoView: TextureView
+    private var transformedVideoSize: VideoDisplaySize? = null
+    private var transformedViewWidth = 0
+    private var transformedViewHeight = 0
     private val pollProof = object : Runnable {
         override fun run() {
             playbackStatus.text = ReceiverPlaybackOutput.diagnostic()
+            fitVideo()
             val prompt = proofCoordinator.refresh()
             if (prompt != proofRequest) {
                 proofStatus.text = if (prompt == null) getString(R.string.proof_waiting) else getString(
@@ -250,20 +257,24 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(statusView)
-            addView(TextureView(this@MainActivity).apply {
+            videoView = TextureView(this@MainActivity).apply {
+                tag = "video-output"
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (200 * resources.displayMetrics.density).toInt())
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
                         videoSurface = Surface(texture).also(ReceiverPlaybackOutput::attach)
+                        transformedVideoSize = null
+                        fitVideo()
                     }
-                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
-                    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) { fitVideo() }
+                    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) { fitVideo() }
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
                         if (releaseVideoSurface()) stopService(Intent(this@MainActivity, FrameArkReceiverService::class.java))
                         return true
                     }
                 }
-            })
+            }
+            addView(videoView)
             playbackStatus = TextView(this@MainActivity).apply { text = ReceiverPlaybackOutput.diagnostic() }
             addView(playbackStatus)
             addView(audioPanel)
@@ -292,6 +303,23 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         proofHandler.post(pollProof)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        dismissProof() // Never carry a pending approval across a changed presentation.
+        videoView.post { fitVideo() }
+    }
+
+    private fun fitVideo() {
+        val size = ReceiverPlaybackOutput.videoDisplaySize() ?: return
+        if (!::videoView.isInitialized || videoView.width <= 0 || videoView.height <= 0) return
+        if (size == transformedVideoSize && videoView.width == transformedViewWidth && videoView.height == transformedViewHeight) return
+        val (x, y) = size.fit(videoView.width, videoView.height)
+        videoView.setTransform(Matrix().apply { setScale(x, y, videoView.width / 2f, videoView.height / 2f) })
+        transformedVideoSize = size
+        transformedViewWidth = videoView.width
+        transformedViewHeight = videoView.height
     }
 
     override fun onPause() {

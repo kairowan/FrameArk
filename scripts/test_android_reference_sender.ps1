@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$Adb,
     [switch]$Ui,
     [switch]$Capture,
-    [switch]$CaptureVideoOnly
+    [switch]$CaptureVideoOnly,
+    [switch]$CaptureRotation
 )
 $ErrorActionPreference = 'Stop'
 if ($ReceiverSerial -eq $SenderSerial) { throw 'Use two disposable emulators, not owner devices.' }
@@ -20,7 +21,7 @@ try {
     foreach ($serial in @($ReceiverSerial, $SenderSerial)) {
         if ((& $Adb -s $serial shell getprop sys.boot_completed).Trim() -ne '1') { throw 'Emulator is not booted.' }
     }
-    $receiverMethod = if ($CaptureVideoOnly) { 'testReceivesVideoOnlyCapture' } elseif ($Capture) { 'testReceivesActualScreenCapture' } else { 'testReceivesSeparateSenderProcess' }
+    $receiverMethod = if ($CaptureRotation) { 'testReceivesRotatingCapture' } elseif ($CaptureVideoOnly) { 'testReceivesVideoOnlyCapture' } elseif ($Capture) { 'testReceivesActualScreenCapture' } else { 'testReceivesSeparateSenderProcess' }
     $receiverProcess = Start-Process -FilePath $Adb -ArgumentList @('-s', $ReceiverSerial, 'shell', 'am', 'instrument', '-w', '-e', 'class', "dev.frameark.receiver.ReferenceReceiverTest#$receiverMethod", 'dev.frameark.receiver.test/android.test.InstrumentationTestRunner') -WindowStyle Hidden -PassThru -RedirectStandardOutput $receiverLog -RedirectStandardError (Join-Path $runDirectory 'receiver-error.txt')
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
@@ -40,7 +41,7 @@ try {
     & $Adb -s $ReceiverSerial exec-out run-as dev.frameark.receiver cat files/reference-pin.txt | & $Adb -s $SenderSerial shell run-as dev.frameark.sender tee files/reference-pin.txt > $null
     if ($LASTEXITCODE -ne 0) { throw 'PIN transfer failed.' }
     $method = if ($Ui) { 'testUiStreamsAndStops' } else { 'testPinnedReferenceStream' }
-    $senderTest = if ($CaptureVideoOnly) { 'dev.frameark.sender.ScreenCaptureTest#testVideoOnlyStopsOnLock' } elseif ($Capture) { 'dev.frameark.sender.ScreenCaptureTest#testCapturesOsScreenAndPlaybackAudio' } else { "dev.frameark.sender.ReferenceSenderTest#$method" }
+    $senderTest = if ($CaptureRotation) { 'dev.frameark.sender.ScreenCaptureTest#testRotationKeepsVideoAndPlaybackAudio' } elseif ($CaptureVideoOnly) { 'dev.frameark.sender.ScreenCaptureTest#testVideoOnlyStopsOnLock' } elseif ($Capture) { 'dev.frameark.sender.ScreenCaptureTest#testCapturesOsScreenAndPlaybackAudio' } else { "dev.frameark.sender.ReferenceSenderTest#$method" }
     $senderProcess = Start-Process -FilePath $Adb -ArgumentList @('-s', $SenderSerial, 'shell', 'am', 'instrument', '-w', '-e', 'class', $senderTest, 'dev.frameark.sender.test/android.test.InstrumentationTestRunner') -WindowStyle Hidden -PassThru -RedirectStandardOutput $senderLog -RedirectStandardError (Join-Path $runDirectory 'sender-error.txt')
     $deadline = [DateTime]::UtcNow.AddSeconds(110)
     while ((!$senderProcess.HasExited -or !$receiverProcess.HasExited) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }

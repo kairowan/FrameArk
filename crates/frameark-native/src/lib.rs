@@ -12,7 +12,8 @@ mod offer;
 pub mod wire;
 
 use frameark_core::{
-    CoreEvent, DiagnosticEvent, ErrorKind, EventLevel, FrameArkError, Result, Session, SessionState,
+    CoreEvent, DiagnosticEvent, ErrorKind, EventLevel, FrameArkError, Result, Session,
+    SessionState, VideoConfig,
 };
 use frameark_transport::{PairingSession, TransportError};
 use std::collections::VecDeque;
@@ -38,6 +39,17 @@ pub trait SessionBackend {
     fn prepare(&mut self, offer: SessionOffer) -> Result<()>;
     /// Activate a previously prepared output.
     fn start(&mut self) -> Result<()>;
+    /// Whether the backend can keep its session/audio alive during video changes.
+    fn supports_video_reconfiguration(&self) -> bool {
+        false
+    }
+    /// Apply an already validated video-only update without resetting the session.
+    fn reconfigure_video(&mut self, _video: VideoConfig) -> Result<()> {
+        Err(FrameArkError::unsupported(
+            "fanp.video_reconfiguration",
+            "video reconfiguration is unsupported",
+        ))
+    }
     /// Release all owned resources; must be idempotent and safe after partial prepare.
     fn reset(&mut self) -> Result<()>;
 }
@@ -129,6 +141,8 @@ pub struct NativeSender {
     transport: PairingSession,
     lifecycle: Lifecycle,
     next_id: u32,
+    offer: Option<SessionOffer>,
+    reconfigurable: bool,
 }
 
 impl NativeSender {
@@ -139,6 +153,8 @@ impl NativeSender {
             transport,
             lifecycle,
             next_id: 1,
+            offer: None,
+            reconfigurable: false,
         })
     }
 
@@ -153,19 +169,71 @@ impl NativeSender {
 
     /// Proposes an exact media configuration, without silent quality fallback.
     pub async fn offer(&mut self, offer: SessionOffer, budget: Duration) -> Result<()> {
+        self.offer_mode(offer, false, budget).await
+    }
+
+    /// Requires explicit receiver support for ordered video-only updates.
+    /// Older receivers reject this request; there is no automatic fallback.
+    pub async fn offer_reconfigurable(
+        &mut self,
+        offer: SessionOffer,
+        budget: Duration,
+    ) -> Result<()> {
+        if offer.video.is_none() {
+            return Err(state_error());
+        }
+        self.offer_mode(offer, true, budget).await
+    }
+
+    async fn offer_mode(
+        &mut self,
+        offer: SessionOffer,
+        reconfigurable: bool,
+        budget: Duration,
+    ) -> Result<()> {
         if self.state() != SessionState::Negotiating {
             return Err(state_error());
         }
         offer.validate_capabilities(self.transport.negotiated_capabilities())?;
         self.exchange(
-            Command::Offer(offer),
+            if reconfigurable {
+                Command::OfferReconfigurable(offer)
+            } else {
+                Command::Offer(offer)
+            },
             SessionState::Preparing,
             Some(offer),
             budget,
         )
         .await?;
+        self.offer = Some(offer);
+        self.reconfigurable = reconfigurable;
         self.lifecycle.transition(SessionState::Preparing)?;
         self.lifecycle.diagnostic("fanp.offer.accepted");
+        Ok(())
+    }
+
+    /// Finish the current media stream before calling this method. After its
+    /// acknowledgment open a new stream and send a keyframe with fresh codec
+    /// configuration. Keep timestamps and sequence numbers continuous.
+    pub async fn reconfigure_video(&mut self, video: VideoConfig, budget: Duration) -> Result<()> {
+        if !self.reconfigurable || self.state() != SessionState::Streaming {
+            return Err(state_error());
+        }
+        let mut offer = self.offer.ok_or_else(state_error)?;
+        offer.video = Some(video);
+        offer.validate_capabilities(self.transport.negotiated_capabilities())?;
+        self.lifecycle.transition(SessionState::Reconfiguring)?;
+        self.exchange(
+            Command::UpdateVideo(video),
+            SessionState::Streaming,
+            Some(offer),
+            budget,
+        )
+        .await?;
+        self.offer = Some(offer);
+        self.lifecycle.transition(SessionState::Streaming)?;
+        self.lifecycle.diagnostic("fanp.video.reconfigured");
         Ok(())
     }
 
@@ -359,6 +427,12 @@ impl<B: SessionBackend> NativeReceiver<B> {
 
     fn apply(&mut self, command: Command) -> Result<Option<SessionOffer>> {
         match command {
+            Command::OfferReconfigurable(_) | Command::UpdateVideo(_) => {
+                Err(FrameArkError::unsupported(
+                    "fanp.video_reconfiguration",
+                    "ordered updates require a media receiver",
+                ))
+            }
             Command::Offer(offer) => {
                 if self.lifecycle.session.state() != SessionState::Negotiating {
                     return Err(state_error());

@@ -18,7 +18,8 @@ class ScreenCaptureEncoder {
     fun run(
         projection: MediaProjection, options: CaptureOptions, density: Int, stop: AtomicBoolean,
         submit: (ByteArray, Long, Boolean, Boolean) -> Unit,
-        progress: (Int, Int, Int, Long) -> Unit,
+        resize: CaptureResizeTracker, reconfigure: (CaptureOptions) -> Unit,
+        progress: (Int, Int, Int, Long, CaptureOptions, Int) -> Unit,
     ) {
         check(Build.VERSION.SDK_INT >= 29)
         var video: MediaCodec? = null
@@ -27,19 +28,24 @@ class ScreenCaptureEncoder {
         var surface: Surface? = null
         var display: VirtualDisplay? = null
         try {
-            val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { video = it }
-            encoder.configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, options.width, options.height).apply {
+            fun prepareVideo(size: CaptureOptions): MediaCodec {
+                val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { video = it }
+                encoder.configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, (if (options.width * options.height > 1280 * 720) 5_000_000 else 2_500_000) * (options.fps / 30))
-                setInteger(MediaFormat.KEY_FRAME_RATE, options.fps)
-                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, options.fps.toFloat())
+                setInteger(MediaFormat.KEY_BIT_RATE, (if (size.width * size.height > 1280 * 720) 5_000_000 else 2_500_000) * (size.fps / 30))
+                setInteger(MediaFormat.KEY_FRAME_RATE, size.fps)
+                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, size.fps.toFloat())
                 // Static screens still advance the media stream and its bounded idle timeout.
-                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / options.fps)
+                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / size.fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-            }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            surface = encoder.createInputSurface()
-            encoder.start()
+                }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                surface = encoder.createInputSurface()
+                encoder.start()
+                return encoder
+            }
+            var active = options
+            var encoder = prepareVideo(active)
             if (options.audio) {
                 val aac = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).also { audio = it }
                 aac.configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
@@ -63,10 +69,12 @@ class ScreenCaptureEncoder {
             val audioOriginUs = (System.nanoTime() - clock) / 1000
             recorder?.startRecording()
             recorder?.let { check(it.recordingState == AudioRecord.RECORDSTATE_RECORDING) }
-            // Exactly one display per OS consent token. Rotation is fit into this fixed canvas.
+            // Exactly one display per OS consent token; later updates resize this display.
             display = projection.createVirtualDisplay("FrameArk capture", options.width, options.height, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null)
             var config = ByteArray(0)
+            var videoNeedsKeyframe = true
+            var updates = 0
             var videos = 0
             var audios = 0
             var nonSilent = 0
@@ -105,9 +113,10 @@ class ScreenCaptureEncoder {
                                         require(info.offset >= 0 && info.size <= buffer.capacity() - info.offset)
                                         buffer.position(info.offset); buffer.limit(info.offset + info.size)
                                         val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+                                        if (isVideo && videoNeedsKeyframe) check(key && config.isNotEmpty())
                                         val payload = copy(buffer)
                                         submit(if (isVideo) AnnexB.accessUnit(config, payload, key) else payload, pts, isVideo, key)
-                                        if (isVideo) { videos++; lastVideo = pts; lastVideoAt = System.nanoTime() }
+                                        if (isVideo) { videos++; lastVideo = pts; lastVideoAt = System.nanoTime(); videoNeedsKeyframe = false }
                                         else { audios++; lastAudio = pts }
                                     }
                                 }
@@ -117,6 +126,26 @@ class ScreenCaptureEncoder {
                 }
             }
             while (!stop.get() && System.nanoTime() - clock < options.seconds * 1_000_000_000L) {
+                resize.take(active)?.let { next ->
+                    val target = requireNotNull(display)
+                    target.surface = null
+                    drain(encoder, true)
+                    encoder.stop()
+                    encoder.release()
+                    video = null
+                    surface?.release()
+                    surface = null
+                    config = ByteArray(0)
+                    videoNeedsKeyframe = true
+                    // Rust serializes FIN -> validated Update -> next stream before new frames.
+                    reconfigure(next)
+                    encoder = prepareVideo(next)
+                    target.resize(next.width, next.height, density)
+                    target.surface = surface
+                    active = next
+                    updates++
+                    lastVideoAt = System.nanoTime()
+                }
                 val source = recorder
                 val aac = audio
                 if (source != null && aac != null) {
@@ -149,10 +178,10 @@ class ScreenCaptureEncoder {
                 drain(encoder, true)
                 val elapsed = System.nanoTime() - clock
                 check(System.nanoTime() - lastVideoAt < 8_000_000_000L) // Fail visibly if capture/encoder stalls.
-                if (elapsed >= nextProgress) { progress(videos, audios, nonSilent, elapsed / 1_000_000_000); nextProgress = elapsed + 250_000_000L }
+                if (elapsed >= nextProgress) { progress(videos, audios, nonSilent, elapsed / 1_000_000_000, active, updates); nextProgress = elapsed + 250_000_000L }
                 Thread.sleep(2)
             }
-            progress(videos, audios, nonSilent, (System.nanoTime() - clock) / 1_000_000_000)
+            progress(videos, audios, nonSilent, (System.nanoTime() - clock) / 1_000_000_000, active, updates)
         } finally {
             // Stop OS capture first. Only whole, already encoded access units are drained by Rust.
             display?.let { runCatching { it.release() } }

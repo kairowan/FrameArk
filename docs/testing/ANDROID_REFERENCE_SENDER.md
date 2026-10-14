@@ -101,5 +101,6 @@ Connection failure codes: `-110` timeout, `-111` endpoint, `-112` TLS setup,
 `-116` closed transport, `-117` other handshake rejection. Later codes
 `-13`/`-14`/`-15` identify Offer/Start/media-open, `-16` invalid media/time,
 `-17` media transport, `-19` producer idle, `-20`/`-21` finish/Stop, and `-22`
-overall deadline. Native stage codes and static source location are safe to
+overall deadline; `-23` identifies rejected/failed capture video reconfiguration.
+Native stage codes and static source location are safe to
 report; do not include the connection ticket or raw exception/log content.

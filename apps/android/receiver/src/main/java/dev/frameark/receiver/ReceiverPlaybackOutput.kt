@@ -11,7 +11,13 @@ object ReceiverPlaybackOutput {
     private var videoSubmitted = 0L
     private var error = false
     private var failureLocation = ""
-    private val video = VideoDecoderRenderer(onRendered = { videoRendered.incrementAndGet() })
+    private var videoSize: VideoDisplaySize? = null
+    private var videoConfigurations = 0L
+    private var videoFormats = 0L
+    private val video = VideoDecoderRenderer(onRendered = { videoRendered.incrementAndGet() }, onFormat = { width, height ->
+        videoSize = VideoDisplaySize(width, height)
+        videoFormats++
+    })
     private val audio = AudioDecoderRenderer(onPcm = { audioRendered.incrementAndGet() })
     private var audioLevel = PlaybackAudioLevel()
     private var audioLevelInitialized = false
@@ -26,6 +32,9 @@ object ReceiverPlaybackOutput {
     }
 
     @Synchronized fun audioLevel(): PlaybackAudioLevel = audioLevel
+    @Synchronized fun videoDisplaySize(): VideoDisplaySize? = videoSize
+    @Synchronized fun videoConfigurationCount(): Long = videoConfigurations
+    @Synchronized fun videoFormatCount(): Long = videoFormats
 
     @Synchronized fun setAudioLevel(value: PlaybackAudioLevel): Boolean {
         audioLevelInitialized = true
@@ -59,6 +68,8 @@ object ReceiverPlaybackOutput {
                     require(config.codec == FrameArkNative.MediaCodecKind.H264)
                     val target = surface?.takeIf { it.isValid } ?: error("video surface unavailable")
                     video.configure(VideoTrackConfig(config.width, config.height, config.frameRateNumerator, config.frameRateDenominator), target)
+                    videoConfigurations++
+                    videoSize = VideoDisplaySize(config.width, config.height)
                     error = false
                 }
                 is FrameArkNative.PlaybackEvent.Audio -> { audio.configure(event.config); error = false }
@@ -83,6 +94,7 @@ object ReceiverPlaybackOutput {
     @Synchronized fun reset() { try { video.reset() } finally { audio.reset() } }
     @Synchronized fun diagnostic(): String =
         "Video submitted: $videoSubmitted; rendered: ${videoRendered.get()}; PCM buffers: ${audioRendered.get()}" +
+            "\nVideo: ${videoSize?.width ?: 0}x${videoSize?.height ?: 0}; configs: $videoConfigurations; formats: $videoFormats" +
             if (error) "\nPlayback failed ($failureLocation). Stop and restart; inspect codec/surface support." else ""
 
     private fun recordFailure(failure: Throwable) {

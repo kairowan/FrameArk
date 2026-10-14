@@ -1132,6 +1132,15 @@ const fn network_policy() -> ReceiverPolicy {
 struct NetworkBackend;
 
 impl SessionBackend for NetworkBackend {
+    fn supports_video_reconfiguration(&self) -> bool {
+        true
+    }
+
+    fn reconfigure_video(&mut self, video: VideoConfig) -> frameark_core::Result<()> {
+        // The renderer enqueues the ordered video config; no audio/clock reset.
+        video.validate()
+    }
+
     fn prepare(&mut self, _offer: SessionOffer) -> frameark_core::Result<()> {
         reset_playback(true);
         Ok(())
@@ -2635,6 +2644,37 @@ mod tests {
         assert!(queue.clock.is_none());
         queue.push(3, &frame(50_000_000)).unwrap();
         assert!(queue.pop().is_some(), "new timeline starts immediately");
+    }
+
+    #[test]
+    fn video_config_boundary_preserves_audio_and_both_playback_clocks() {
+        let mut queue = PlaybackQueue::default();
+        let audio = encode_media_frame(&NativeMediaFrame {
+            kind: MEDIA_KIND_AUDIO,
+            pts: 0,
+            keyframe: false,
+            payload: vec![1],
+        });
+        queue.push(4, &audio).unwrap();
+        assert_eq!(queue.pop().unwrap()[5], 4);
+        let clock = queue.clock;
+        let arrival = queue.arrival_clock;
+        queue.push(4, &audio).unwrap();
+        let video = VideoConfig {
+            codec: MediaCodec::H264,
+            width: 720,
+            height: 1280,
+            frame_rate_numerator: 30,
+            frame_rate_denominator: 1,
+        };
+        queue.push(1, &encode_video_config(video)).unwrap();
+        queue.push(4, &audio).unwrap();
+        for kind in [4, 1, 4] {
+            assert_eq!(queue.pop().unwrap()[5], kind);
+        }
+        assert_eq!(queue.clock, clock);
+        assert_eq!(queue.arrival_clock, arrival);
+        assert_eq!(queue.bytes, 0);
     }
 
     #[test]

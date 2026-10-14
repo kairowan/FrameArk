@@ -158,3 +158,32 @@ platform backend is prepared before `Start`, and its reset hook is called on
 stop, rejected preparation, timeout, cancellation, or receiver drop. The
 profile is control-plane only: it does not carry encoded samples or claim that
 an Android/desktop decoder is already wired.
+
+### Ordered video updates (Experimental extension)
+
+The media-capable receiver additionally accepts request opcode 5,
+`OfferReconfigurable`, with the identical Offer body, and opcode 6, `UpdateVideo`.
+The request payload remains `version:u8=1 | id:u32be | opcode:u8 | body`.
+UpdateVideo has exactly 17 body bytes: H.264 codec `u8=1`, width `u32be`, height
+`u32be`, frame-rate numerator `u32be`, denominator `u32be`. The total request
+payload is 23 bytes. The existing video/capability/receiver bounds are rechecked.
+Unknown opcodes/codecs, truncation and trailing bytes are rejected.
+
+An accepted opcode 5 explicitly selects this extension before Start. After each
+media stream FIN, the receiver accepts either the next sequenced UpdateVideo or
+Stop. A successful update responds with Streaming and the **entire exact updated
+offer**, including unchanged audio and latency; the sender verifies both. Only
+then may it open the next FAM1 stream. Its first video access unit must be a
+keyframe with the new codec configuration. Track IDs, sequence spaces and PTS
+continue; audio output and the Android FAPE playback clock are not reset. Shared
+Rust state passes Streaming → Reconfiguring → Streaming. Error, cancellation or
+deadline closes the session and releases retained output owners.
+
+Maximum 256 updates per authenticated connection, also subject to the existing
+1024-request ceiling. Only H.264 video geometry/rate changes; no audio-track,
+codec, authorization or remote-input renegotiation. Neither control reads nor
+old media reads are cancelled to race the next configuration. The legacy opcode
+1 fixed single-stream profile is byte-compatible. Control-only backends default
+to rejecting the extension; old receivers fail before media, with no fallback.
+Android screen capture requires matching APK/native versions; reference senders
+retain the fixed profile. See [ADR 0128](../../adr/0128-native-video-reconfiguration.md).

@@ -24,13 +24,23 @@ The earlier private-repository interruption and recovery are recorded in the
 
 ## Current interpretation
 
+Native screen capture now negotiates ordered video-only updates within the same
+authenticated QUIC session. Android rebuilds its encoder around one existing
+VirtualDisplay; Receiver rebuilds only video and retains its Activity/Surface
+across size/orientation changes. Audio, timeline and local gain remain unchanged.
+Real two-emulator capture/codec evidence and bounded rejection/cleanup tests are
+recorded in [ADR 0128](adr/0128-native-video-reconfiguration.md) and
+[rotation evidence](evidence/2026-10-14-video-reconfiguration/README.md).
+This closes the initial dynamic-geometry software gap, not physical rotation,
+measured 1080p60, one-hour performance, reconnect or an M2 exit gate.
+
 Receiver-local volume/mute now reaches the real AudioTrack output, with bounded
 gain, D-pad controls, app-private preferences and gain-before-play on reset.
 Live H.264/AAC loopback playback continues during mute/volume/unmute actions.
 See [ADR 0127](adr/0127-receiver-local-audio-controls.md) and
 [evidence](evidence/2026-10-14-audio-controls/README.md). This closes the local
 audio-control software gap, not sender-side remote control, physical loudness,
-audio-route compatibility, dynamic reconfiguration or any M2 exit gate.
+audio-route compatibility or any M2 exit gate. Dynamic geometry is recorded separately above.
 
 Android default-network notifications no longer tear down the Rust listener or
 playback owners. Real QUIC loss tests preserve one authenticated stream through
@@ -79,15 +89,15 @@ session path. A non-exported foreground service owns the one-use OS grant;
 notification/UI stop, screen-off and system revocation end capture. Geometry
 is bounded to 1080p area in either orientation, 30/60 fps requested, maximum
 one-hour session. This closes the initial real-source software gap, **not**
-M2's measured 1080p60, one-hour, dynamic reconfiguration or reconnect gates.
+M2's measured 1080p60, one-hour or reconnect gates; dynamic geometry is recorded above.
 See [capture operations](testing/ANDROID_SCREEN_CAPTURE.md), [ADR 0121](adr/0121-android-screen-capture.md)
 and [actual OS capture evidence](evidence/2026-10-13-screen-capture/README.md).
 
 The separate 30-second generated test mode remains available with its
 [operator guide](testing/ANDROID_REFERENCE_SENDER.md) and
 [reference-stream evidence](evidence/2026-10-13-reference-sender/README.md).
-Both modes require explicit ticket/fingerprint/PIN entry; Sender discovery and
-peer identity proof remain open. M1 still requires physical reference-LAN
+Both modes require explicit ticket/fingerprint/PIN confirmation; discovery and
+optional peer identity proof are described above. M1 still requires physical reference-LAN
 discovery and hardware evidence. No M0–M5 exit gate is newly marked complete.
 
 The Android service now drives real platform codecs and outputs instead of

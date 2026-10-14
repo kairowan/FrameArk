@@ -456,6 +456,22 @@ where
         }
     }
 
+    /// Retains renderer ownership across a negotiated ordered update. Errors or
+    /// cancellation still drop/reset the session; no detached task is spawned.
+    pub(crate) async fn serve_segment(
+        mut self,
+        budget: Duration,
+    ) -> Result<(MediaSession<V, A>, MediaStreamReport)> {
+        if self.session.state() != SessionState::Streaming {
+            return Err(FrameArkError::invalid_state(
+                "fanp.media_receive_state",
+                "media session must be streaming",
+            ));
+        }
+        let report = self.receive_frames(budget).await?;
+        Ok((self.session, report))
+    }
+
     async fn receive_frames(&mut self, budget: Duration) -> Result<MediaStreamReport> {
         let mut report = MediaStreamReport::default();
         loop {
