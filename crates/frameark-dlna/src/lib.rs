@@ -2309,6 +2309,12 @@ impl MediaRendererTcpServer {
         peer: SocketAddr,
         timeout: Duration,
     ) -> Result<SocketAddr, DlnaError> {
+        // Accepted sockets can inherit non-blocking mode from serve_for's
+        // listener (notably on macOS). This adapter performs synchronous I/O;
+        // a partial header/body must wait for the next bytes within the timeout.
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| DlnaError::Io(error.kind()))?;
         stream
             .set_read_timeout(Some(timeout))
             .map_err(|error| DlnaError::Io(error.kind()))?;
