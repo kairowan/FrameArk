@@ -10,6 +10,7 @@
 #[cfg(feature = "android-playback-probe")]
 mod playback_probe;
 mod sender;
+mod sender_discovery;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -849,7 +850,17 @@ struct DiscoveryRuntime {
 }
 
 impl DiscoveryRuntime {
-    fn start(port: u16) -> Option<Self> {
+    fn start(port: u16, certificate: &[u8]) -> Option<Self> {
+        let service = PublishedService::new(DISCOVERY_INSTANCE_NAME, DISCOVERY_HOST_NAME, port)
+            .and_then(|service| service.with_property("proto", "fanp1"))
+            .and_then(|service| service.with_property("ver", "0.1"))
+            .and_then(|service| service.with_property("tls", "pin"))
+            .and_then(|service| service.with_property("media", "h264,opus,aac"))
+            .ok()?;
+        // Larger certificates still support manually shared tickets. No TLS downgrade.
+        let service =
+            frameark_native::discovery::advertise_certificate(service.clone(), certificate)
+                .unwrap_or(service);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
@@ -860,21 +871,13 @@ impl DiscoveryRuntime {
                     let _ = ready_sender.send(false);
                     return;
                 };
-                let Ok(service) =
-                    PublishedService::new(DISCOVERY_INSTANCE_NAME, DISCOVERY_HOST_NAME, port)
-                        .and_then(|service| service.with_property("proto", "fanp1"))
-                        .and_then(|service| service.with_property("ver", "0.1"))
-                        .and_then(|service| service.with_property("tls", "pin"))
-                        .and_then(|service| service.with_property("media", "h264,opus,aac"))
-                else {
-                    let _ = ready_sender.send(false);
-                    return;
-                };
                 let Ok(registration) = discovery.publish(&service) else {
                     let _ = ready_sender.send(false);
+                    let _ = discovery.shutdown();
                     return;
                 };
                 if ready_sender.send(true).is_err() {
+                    unregister_discovery(registration, discovery);
                     return;
                 }
                 while !stop_thread.load(Ordering::Acquire) {
@@ -1068,7 +1071,7 @@ impl NetworkRuntime {
         let (port, certificate_der) = ready_receiver
             .recv()
             .map_err(|_| "FANP startup".to_string())??;
-        let discovery = DiscoveryRuntime::start(port);
+        let discovery = DiscoveryRuntime::start(port, &certificate_der);
         Ok(Self {
             stop,
             join: Some(join),

@@ -3,6 +3,10 @@
 - Status: Accepted for Experimental use
 - Scope: M1 reference sender, not M2 screen capture or a milestone exit
 
+Later additive extensions: [ADR 0121](0121-android-screen-capture.md) adds screen
+capture; [ADR 0124](0124-android-sender-discovery.md) adds untrusted discovery
+candidates while retaining the explicit fingerprint/PIN gate described here.
+
 ## Decision
 
 Ship `dev.frameark.sender` as a separate ARM64 APK alongside Receiver. Android

@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var start: Button
     private lateinit var captureStatus: TextView
+    private lateinit var discovery: DiscoveryPanel
     private var pendingCapture: CaptureRequest? = null
     private val captureHandler = Handler(Looper.getMainLooper())
     private val refreshCapture = object : Runnable {
@@ -68,6 +69,14 @@ class MainActivity : Activity() {
                 confirm.isChecked = false
                 summary.text = result ?: getString(R.string.invalid)
             }
+        }
+        discovery = DiscoveryPanel(this, native, loaded) { candidate ->
+            ticket.setText(candidate)
+            pin.text.clear()
+            confirm.isChecked = false
+            val result = native.summary(candidate)
+            gate.inspect(candidate, result != null)
+            summary.text = result ?: getString(R.string.invalid)
         }
         status = TextView(this).apply { tag = "sender-status"; if (!loaded) text = getString(R.string.unavailable) }
         start = Button(this).apply {
@@ -129,6 +138,7 @@ class MainActivity : Activity() {
             setPadding(24, 32, 24, 24)
             addView(TextView(this@MainActivity).apply { text = getString(R.string.title); textSize = 24f })
             addView(TextView(this@MainActivity).apply { text = getString(R.string.instructions) })
+            addView(discovery)
             listOf(ticket, inspect, summary, confirm, pin, fullHd, start, stop, status).forEach(::addView)
             addView(TextView(this@MainActivity).apply { text = getString(R.string.capture_instructions) })
             listOf(sixty, playbackAudio, capture, captureStop, captureStatus).forEach(::addView)
@@ -224,6 +234,6 @@ class MainActivity : Activity() {
     }
 
     override fun onResume() { super.onResume(); captureHandler.post(refreshCapture) }
-    override fun onPause() { cancel(); captureHandler.removeCallbacks(refreshCapture); super.onPause() }
-    override fun onDestroy() { pendingCapture = null; captureHandler.removeCallbacks(refreshCapture); super.onDestroy() }
+    override fun onPause() { discovery.stop(); cancel(); captureHandler.removeCallbacks(refreshCapture); super.onPause() }
+    override fun onDestroy() { discovery.stop(); pendingCapture = null; captureHandler.removeCallbacks(refreshCapture); super.onDestroy() }
 }

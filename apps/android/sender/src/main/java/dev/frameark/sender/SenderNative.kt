@@ -1,7 +1,11 @@
 package dev.frameark.sender
 
 /** Rust owns trust parsing, sessions, deadlines, timebases and bounded media queues. */
-class SenderNative {
+class SenderNative : DiscoveryBackend {
+    override external fun discoveryStart(): Long
+    override external fun discoveryStatus(id: Long): Int
+    override external fun discoveryTickets(id: Long): Array<String>?
+    override external fun discoveryStop(id: Long)
     fun load(): Boolean = runCatching { System.loadLibrary("frameark_ffi"); version() == 1 }.getOrDefault(false)
     private external fun version(): Int
     external fun summary(ticket: String): String?

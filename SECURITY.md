@@ -364,8 +364,10 @@ archive verification remains a build-stage responsibility: trusted reviewed buil
 code and immutable-artifact digest verification are still required; the index is
 not a signature or a proof of legal completeness.
 
-The experimental Android reference Sender accepts only explicitly pasted,
-bounded private-IPv4 pairing tickets and a separately entered PIN. Tickets
+The experimental Android reference Sender accepts explicitly pasted or
+user-selected discovery candidates as bounded local-IPv4 pairing tickets, with
+a separately entered PIN. Discovery broadcasts are unauthenticated; never
+infer trust from the candidate list. Tickets
 contain an ephemeral **public** TLS certificate and endpoint, not a secret key,
 PIN or Keystore identity. Operators must obtain them through a trusted channel
 and compare the entire TLS SHA-256 on both devices. Sender confirmation binds
@@ -376,6 +378,13 @@ are OS/user controlled and may retain public network metadata. Restarting the
 Receiver invalidates a ticket. The reference Sender is PIN-only and cannot
 satisfy proof-required mode. See [ADR 0120](docs/adr/0120-android-reference-sender.md)
 for resource/time limits, generation ownership and explicit trust limitations.
+The [discovery extension](docs/adr/0124-android-sender-discovery.md) broadcasts
+only the public ephemeral certificate, not the PIN or private key. Selection
+clears previous PIN/confirmation and requires full fingerprint comparison.
+Private-address filtering is not identity authentication. The application cache
+is capped/expired; the underlying mDNS DNS cache has no established strict byte
+cap, so hostile-LAN flood resilience remains unverified. No automatic connection,
+certificate acceptance, background scan or remembered trust is added.
 
 The synthetic source does not capture microphone/screen. That mode cancels on
 pause; Receiver may retain only its idle listener during ticket sharing.

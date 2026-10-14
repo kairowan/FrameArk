@@ -19,6 +19,12 @@ The client must receive the server certificate through an in-scope channel
 and pin those exact DER bytes. mDNS metadata is discovery only and is not a
 certificate authority.
 
+Android Receiver optionally publishes bounded `boot=cert1` public-certificate
+chunks. Android Sender can convert these **untrusted** hints to candidate local
+IPv4 tickets, but requires explicit full fingerprint comparison and separate PIN
+entry before connecting. See [ADR 0124](../../adr/0124-android-sender-discovery.md)
+for the exact TXT profile, limits, lifecycle and older-version fallback.
+
 After the code is accepted, a receiver may run either the caller-owned
 address approval seam or the optional Ed25519 peer-proof flow before capability
 negotiation. The address and pairing code alone are not sender identity proof.
