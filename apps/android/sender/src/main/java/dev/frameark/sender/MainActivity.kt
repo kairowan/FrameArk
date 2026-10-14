@@ -26,6 +26,7 @@ class MainActivity : Activity() {
     private lateinit var start: Button
     private lateinit var captureStatus: TextView
     private lateinit var discovery: DiscoveryPanel
+    private lateinit var identityPanel: SenderIdentityPanel
     private var pendingCapture: CaptureRequest? = null
     private val captureHandler = Handler(Looper.getMainLooper())
     private val refreshCapture = object : Runnable {
@@ -58,6 +59,7 @@ class MainActivity : Activity() {
         }
         val summary = TextView(this)
         val confirm = CheckBox(this).apply { text = getString(R.string.confirm); isSaveEnabled = false; filterTouchesWhenObscured = true }
+        identityPanel = SenderIdentityPanel(this, native, loaded) { pin.text.clear(); confirm.isChecked = false }
         val fullHd = CheckBox(this).apply { text = getString(R.string.full_hd); isChecked = true }
         val inspect = Button(this).apply {
             text = getString(R.string.inspect)
@@ -98,7 +100,8 @@ class MainActivity : Activity() {
                 isEnabled = false
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 status.text = getString(R.string.connecting)
-                worker = Thread({ send(value, code, width, height) }, "frameark-encoder").also { it.start() }
+                val identity = identityPanel.selected()
+                worker = Thread({ send(value, code, width, height, identity) }, "frameark-encoder").also { it.start() }
             }
         }
         val stop = Button(this).apply { text = getString(R.string.stop); setOnClickListener { cancel() } }
@@ -120,7 +123,7 @@ class MainActivity : Activity() {
                     else Point().also { @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealSize(it) }
                 val options = runCatching { CaptureOptions.fit(size.x, size.y, fullHd.isChecked, if (sixty.isChecked) 60 else 30, playbackAudio.isChecked) }.getOrNull()
                 if (options == null) { status.text = getString(R.string.capture_unsupported); return@setOnClickListener }
-                pendingCapture = CaptureRequest(value, code, options)
+                pendingCapture = CaptureRequest(value, code, options, identityPanel.selected())
                 pin.text.clear()
                 confirm.isChecked = false
                 authorizeCapture()
@@ -139,6 +142,7 @@ class MainActivity : Activity() {
             addView(TextView(this@MainActivity).apply { text = getString(R.string.title); textSize = 24f })
             addView(TextView(this@MainActivity).apply { text = getString(R.string.instructions) })
             addView(discovery)
+            addView(identityPanel)
             listOf(ticket, inspect, summary, confirm, pin, fullHd, start, stop, status).forEach(::addView)
             addView(TextView(this@MainActivity).apply { text = getString(R.string.capture_instructions) })
             listOf(sixty, playbackAudio, capture, captureStop, captureStatus).forEach(::addView)
@@ -146,17 +150,21 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(content) })
     }
 
-    private fun send(ticket: String, pin: String, width: Int, height: Int) {
+    private fun send(ticket: String, pin: String, width: Int, height: Int, identity: SenderIdentity?) {
         var id = 0L
         var result = getString(R.string.cancelled)
         try {
             if (cancelled.get()) return
-            id = native.start(ticket, pin, width, height)
+            id = if (identity == null) native.start(ticket, pin, width, height)
+                else native.startWithIdentity(ticket, pin, width, height, 30, true, true, identity.publicKeySpki())
             check(id > 0) { "setup:$id" }
             handle.set(id)
             if (cancelled.get()) native.cancel(id)
-            val deadline = System.nanoTime() + 20_000_000_000L
-            while (!cancelled.get() && native.status(id) == 1 && System.nanoTime() < deadline) Thread.sleep(10)
+            val deadline = System.nanoTime() + if (identity == null) 20_000_000_000L else 65_000_000_000L
+            while (!cancelled.get() && native.status(id) == 1 && System.nanoTime() < deadline) {
+                signPending(native, id, identity)
+                Thread.sleep(10)
+            }
             if (cancelled.get()) return
             check(native.status(id) == 2) { "connect:${native.status(id)}" }
             ReferenceEncoder().run(width, height, 30, cancelled, { payload, pts, video, key ->
@@ -235,5 +243,5 @@ class MainActivity : Activity() {
 
     override fun onResume() { super.onResume(); captureHandler.post(refreshCapture) }
     override fun onPause() { discovery.stop(); cancel(); captureHandler.removeCallbacks(refreshCapture); super.onPause() }
-    override fun onDestroy() { discovery.stop(); pendingCapture = null; captureHandler.removeCallbacks(refreshCapture); super.onDestroy() }
+    override fun onDestroy() { discovery.stop(); identityPanel.dispose(); pendingCapture = null; captureHandler.removeCallbacks(refreshCapture); super.onDestroy() }
 }

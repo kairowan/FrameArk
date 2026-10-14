@@ -12,6 +12,10 @@ class SenderNative : DiscoveryBackend {
     /** Positive generation handle or negative setup error. No automatic retry. */
     external fun start(ticket: String, pin: String, width: Int, height: Int): Long
     external fun startCapture(ticket: String, pin: String, width: Int, height: Int, fps: Int, audio: Boolean): Long
+    external fun identitySummary(spki: ByteArray): String?
+    external fun startWithIdentity(ticket: String, pin: String, width: Int, height: Int, fps: Int, audio: Boolean, reference: Boolean, spki: ByteArray): Long
+    external fun pollSigningRequest(id: Long): ByteArray?
+    external fun submitSignature(id: Long, signature: ByteArray): Int
     /** 1 connecting, 2 streaming, 3 finished, 4 cancelled, negative failure stage. */
     external fun status(id: Long): Int
     /** 0 accepted, 1 bounded backpressure, negative invalid/stale/not-streaming. */

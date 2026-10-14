@@ -80,10 +80,12 @@ class ScreenCaptureService : Service() {
         try {
             if (stop.get()) throw InterruptedException()
             val o = request.options
-            val id = native.startCapture(request.ticket, request.pin, o.width, o.height, o.fps, o.audio)
+            val identity = request.identity
+            val id = if (identity == null) native.startCapture(request.ticket, request.pin, o.width, o.height, o.fps, o.audio)
+                else native.startWithIdentity(request.ticket, request.pin, o.width, o.height, o.fps, o.audio, false, identity.publicKeySpki())
             check(id > 0)
             handle.set(id)
-            transport = CaptureTransport(native, id, stop)
+            transport = CaptureTransport(native, id, stop, identity)
             transport.awaitStreaming()
             ScreenCaptureEncoder().run(value, o, resources.configuration.densityDpi, stop, transport::submit) { video, audio, nonSilent, elapsed ->
                 CaptureStatus.publish(generation, CaptureStatus.Snapshot(true, "sharing", video, audio, nonSilent, elapsed))

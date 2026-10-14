@@ -3,10 +3,13 @@ package dev.frameark.sender
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** OS producer facade. Rust is the only protocol/session state machine. */
-class CaptureTransport(private val native: SenderNative, val id: Long, private val stop: AtomicBoolean) : AutoCloseable {
+class CaptureTransport(private val native: SenderNative, val id: Long, private val stop: AtomicBoolean, private val identity: SenderIdentity? = null) : AutoCloseable {
     fun awaitStreaming() {
-        val deadline = System.nanoTime() + 20_000_000_000L
-        while (!stop.get() && native.status(id) == 1 && System.nanoTime() < deadline) Thread.sleep(10)
+        val deadline = System.nanoTime() + if (identity == null) 20_000_000_000L else 65_000_000_000L
+        while (!stop.get() && native.status(id) == 1 && System.nanoTime() < deadline) {
+            signPending(native, id, identity)
+            Thread.sleep(10)
+        }
         if (stop.get()) throw InterruptedException()
         check(native.status(id) == 2)
     }

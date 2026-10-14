@@ -25,6 +25,10 @@ Sender 支持前台扫描并选择局域网接收器（Experimental，仅本地 
 也保留手动连接。发现广播未经认证，选择后仍须核对 Receiver 上的完整 TLS
 指纹并输入 PIN；不会自动信任或连接。详见[发现边界](docs/adr/0124-android-sender-discovery.md)。
 
+匹配版本还可显式启用[Sender Keystore 身份签名](docs/testing/ANDROID_SENDER_IDENTITY.md)：
+Rust 验证 P-256 挑战签名，Receiver 核对完整发送端指纹并批准，或匹配已明确保存的信任记录。
+仍需 TLS/PIN，默认关闭，不自动记住、不免 PIN、不在失败后降级；真机身份兼容矩阵尚待验证。
+
 按里程碑的证据与未满足退出条件见 [`docs/STATUS.md`](docs/STATUS.md)；所有
 M0–M5 能力目前仍按兼容性矩阵标记为 Experimental/Conditional，未把真机或
 Apple 设备尚未验证的行为写成完成。

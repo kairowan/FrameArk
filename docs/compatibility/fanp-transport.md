@@ -17,6 +17,8 @@ third-party sender has yet been included in a compatibility matrix.
 | Incorrect code | Pass; client and server report `PairingRejected` | `incorrect_code_is_rejected_without_persisting_trust` |
 | Capability offer intersection | Pass; common capabilities are selected and exposed to core session mapping | `capability_intersection_advances_the_shared_core_session` |
 | Optional Ed25519 sender proof | Pass on loopback; a fresh challenge is signed, verified before capability negotiation, and exposed only on the temporary server session | `peer_identity_proof_is_challenge_bound_and_exposed_to_policy` |
+| Optional P-256 v2 sender proof | Pass for real QUIC valid/invalid signature and approve/deny; wrong challenge/key/domain and mutation/truncation rejection | `p256_quic_requires_valid_signature_and_explicit_approval`, `p256_proof_bounds_replay_domain_and_mutation_rejection` |
+| Android Sender Keystore identity | Experimental opt-in for reference/capture; real Keystore/JNI/QUIC fixture checks approval, rejection, cancel, trust match and revoke/restart; no physical-device claim | [identity evidence](../evidence/2026-10-14-sender-identity/README.md) |
 | No common capability | Pass; both peers report a negotiation rejection | `no_common_capability_is_rejected` |
 | Optional Rust→Android proof approval seam | Pass on loopback; proof mode verifies the sender in Rust, queues one bounded `FAPR` public-key event, waits for an explicit request-id decision, and only then accepts the FANP session | `frameark-ffi::proof_enabled_network_runtime_surfaces_verified_event_before_acceptance`, `FrameArkNativeTest` |
 | Malformed/oversized frame or capability payload | Parser rejects before payload interpretation | `frame_header_rejects_bad_magic_versions_and_lengths`, `malformed_and_duplicate_entries_are_rejected` |
@@ -43,7 +45,8 @@ debug formatting. These run over real QUIC loopback, not a mocked transport.
 - No persistent trust or device identity is established.
 - The optional sender proof verifies key possession for one temporary session;
   it does not enroll, revoke, or persist a sender in `frameark-trust`, and no
-  Android/Desktop sender has wired a native keystore signer yet.
+  automatic enrollment is added. Android now has an opt-in Keystore signer;
+  desktop signing and physical identity compatibility remain open.
 - No end-to-end network receiver connects the Rust stream to Android
   MediaCodec/AudioTrack; the Android JNI bridge now accepts bounded FANP
   pairings and forwards encoded frames to the queue. The Android service gates

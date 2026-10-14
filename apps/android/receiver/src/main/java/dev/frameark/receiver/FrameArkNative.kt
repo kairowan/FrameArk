@@ -43,7 +43,7 @@ class FrameArkNative(
         const val EXPECTED_ABI_VERSION = 1
         const val MAX_MEDIA_FRAME_BYTES = 4 * 1024 * 1024
         const val MAX_TRUST_SNAPSHOT_BYTES = 64 * 1024
-        const val MAX_PEER_PROOF_EVENT_BYTES = 4 + 1 + 8 + 1 + 128 + 32
+        const val MAX_PEER_PROOF_EVENT_BYTES = 4 + 1 + 8 + 1 + 128 + 65
         private const val MEDIA_FRAME_HEADER_BYTES = 19
         private const val MEDIA_CONFIG_HEADER_BYTES = 8
         private const val PEER_PROOF_EVENT_HEADER_BYTES = 14
@@ -308,7 +308,7 @@ class FrameArkNative(
         }
         return runCatching {
             require(peer.deviceId.isNotBlank()) { "trusted peer ID is invalid" }
-            require(peer.publicKey.size == 32) { "trusted peer public key is invalid" }
+            require(peer.publicKey.size == 32 || (peer.publicKey.size == 65 && peer.publicKey[0] == 4.toByte())) { "trusted peer public key is invalid" }
             require(peer.label.isNotBlank() && peer.label.length <= 128) {
                 "trusted peer label is invalid"
             }
@@ -377,14 +377,16 @@ class FrameArkNative(
         if (envelope.size < PEER_PROOF_EVENT_HEADER_BYTES ||
             envelope.size > MAX_PEER_PROOF_EVENT_BYTES ||
             !envelope.copyOfRange(0, 4).contentEquals(byteArrayOf('F'.code.toByte(), 'A'.code.toByte(), 'P'.code.toByte(), 'R'.code.toByte())) ||
-            envelope[4].toInt() != 1
+            envelope[4].toInt() !in 1..2
         ) return null
         val buffer = ByteBuffer.wrap(envelope).order(ByteOrder.BIG_ENDIAN)
         val requestId = buffer.getLong(5)
         if (requestId <= 0) return null
         val idLength = envelope[13].toInt() and 0xff
         val keyStart = PEER_PROOF_EVENT_HEADER_BYTES + idLength
-        if (idLength !in 1..128 || keyStart + 32 != envelope.size) return null
+        val keyLength = if (envelope[4].toInt() == 1) 32 else 65
+        if (idLength !in 1..128 || keyStart + keyLength != envelope.size) return null
+        if (keyLength == 65 && envelope[keyStart] != 4.toByte()) return null
         val deviceId = envelope.copyOfRange(14, keyStart).toString(Charsets.UTF_8)
         if (deviceId.isBlank() || deviceId.length > 128 ||
             deviceId.any { !(it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '-' || it == '_' || it == '.') }
@@ -393,7 +395,7 @@ class FrameArkNative(
             requestId = requestId,
             peer = VerifiedPeerKey(
                 deviceId = deviceId,
-                publicKey = envelope.copyOfRange(keyStart, keyStart + 32),
+                publicKey = envelope.copyOfRange(keyStart, keyStart + keyLength),
                 label = "FANP sender proof",
             ),
         )

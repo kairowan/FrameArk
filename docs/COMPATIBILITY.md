@@ -4,6 +4,13 @@ FrameArk is currently pre-alpha. No protocol or device combination is Stable yet
 
 ## Maturity labels
 
+Optional Android Sender identity remains **Experimental**. P-256 Keystore
+signing now reaches Rust verification and Receiver approval/trust matching;
+Ed25519 v1 remains supported. Same-process disposable-emulator JNI/QUIC proof
+tests are not a physical-device matrix. See [identity operations](testing/ANDROID_SENDER_IDENTITY.md)
+and [evidence](evidence/2026-10-14-sender-identity/README.md). Live revocation,
+key attestation/hardware-security guarantees and automatic enrollment are absent.
+
 | Label | Meaning |
 |---|---|
 | Stable | Covered by regression tests and a named device/client matrix with version compatibility commitments |
@@ -34,7 +41,7 @@ no physical-device result is assumed from package delivery alone.
 | Android screen Sender | Experimental | Android 10+ one-use MediaProjection foreground service; optional permitted AudioPlaybackCapture, H.264 + raw AAC-LC through Rust, bounded landscape/portrait canvas, requested 30/60 fps, explicit stop/revocation/lock cleanup. Two-emulator OS capture verifies decoded red/blue pixels, non-silent captured PCM and no audio without opt-in. No measured hardware 1080p60, one-hour stability, dynamic resolution negotiation, reconnect, microphone, protected-media bypass or Apple support claim. [Capture guide](testing/ANDROID_SCREEN_CAPTURE.md) |
 | FrameArk DNS-SD discovery (`_frameark._udp.local.`) | Experimental | `frameark-discovery` validation/event-mapping tests plus bounded CLI browse command; multicast smoke coverage is host-dependent |
 | Cross-platform Rust core build matrix | Experimental | Required CI matrix runs formatting, workspace tests, `framearkd` build, and a bounded startup smoke on `windows-latest` and `macos-latest`; this is not media/session runtime, signing, hardware decoder, or device compatibility evidence |
-| FrameArk Native Protocol control plane | Experimental | `frameark-transport` pairing/capability tests, loopback Ed25519 challenge/proof verification with fresh nonce and a registry-enrollment integration fixture, canonical proof-key fingerprint bridge into `frameark-trust` after caller approval, exact pre-enrolled proof identity auto-admission on the Rust listener reconnect loop with rotated-key and renamed-device rejection tests, caller-owned post-PIN approval callback with pre-accept rejection tests, `frameark-native` fake-backend Offer/Start/Status/Stop lifecycle, three-cycle real pinned-QUIC loopback media teardown/restart evidence, CLI connect/status/end commands, required CI Linux `framearkd` listener smoke, runnable `framearkd` reference receiver, and opt-in bounded stage diagnostics export; no platform sender matrix or live trust revocation and proof-capable sender UX yet |
+| FrameArk Native Protocol control plane | Experimental | `frameark-transport` pairing/capability tests, loopback Ed25519 challenge/proof verification with fresh nonce and a registry-enrollment integration fixture, canonical proof-key fingerprint bridge into `frameark-trust` after caller approval, exact pre-enrolled proof identity auto-admission on the Rust listener reconnect loop with rotated-key and renamed-device rejection tests, caller-owned post-PIN approval callback with pre-accept rejection tests, `frameark-native` fake-backend Offer/Start/Status/Stop lifecycle, three-cycle real pinned-QUIC loopback media teardown/restart evidence, CLI connect/status/end commands, required CI Linux `framearkd` listener smoke, runnable `framearkd` reference receiver, and opt-in bounded stage diagnostics export; no physical platform sender matrix or live trust revocation; opt-in Android Keystore proof UX is available |
 | FrameArk diagnostics recorder | Experimental | Bounded redaction-safe lifecycle/error ring, deterministic support-text export, control-character normalization, and session-identity omission tests; no file persistence, telemetry, or user-consent UI |
 | FrameArk Native encoded media contract | Experimental | `frameark-media` bounded packet and backpressure unit tests; no platform decoder yet |
 | FrameArk Native media-frame wire | Experimental | `frameark-native::media_wire` exact-boundary round-trip and malformed-input tests; no platform decoder yet |

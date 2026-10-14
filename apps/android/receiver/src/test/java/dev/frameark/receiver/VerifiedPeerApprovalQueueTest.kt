@@ -9,6 +9,26 @@ import org.junit.Test
 
 class VerifiedPeerApprovalQueueTest {
     @Test
+    fun p256_verified_key_can_be_explicitly_enrolled_without_compressed_key_fallback() {
+        var calls = 0
+        val fixture = fixture(running = { false }, trust = { calls++; 0 })
+        val queue = VerifiedPeerApprovalQueue(fixture.controller)
+        try {
+            for (key in listOf(ByteArray(64), ByteArray(66), ByteArray(65) { 3 })) {
+                assertEquals(VerifiedPeerApprovalQueue.EnqueueResult.Invalid,
+                    queue.enqueueProof(FrameArkNative.VerifiedPeerKey("sender-p256", key, "Phone")))
+            }
+            val key = ByteArray(65) { 4 }
+            assertEquals(VerifiedPeerApprovalQueue.EnqueueResult.Queued,
+                queue.enqueueProof(FrameArkNative.VerifiedPeerKey("sender-p256", key, "Phone")))
+            key[1] = 9
+            assertEquals(4, queue.pending().single().peer.publicKey[1].toInt())
+            assertEquals(VerifiedPeerApprovalQueue.DecisionResult.Enrolled, queue.approve("sender-p256"))
+            assertEquals(1, calls)
+        } finally { fixture.close() }
+    }
+
+    @Test
     fun proof_requests_are_copied_refreshed_and_enrolled_once() {
         var now = 1_000L
         var trustCalls = 0

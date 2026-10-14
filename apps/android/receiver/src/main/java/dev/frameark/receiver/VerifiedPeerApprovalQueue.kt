@@ -131,7 +131,8 @@ class VerifiedPeerApprovalQueue(
     private fun isValid(peer: FrameArkNative.VerifiedPeerKey): Boolean =
         peer.deviceId.isNotBlank() &&
             peer.deviceId.length <= MAX_ID_LENGTH &&
-            peer.publicKey.size == PUBLIC_KEY_BYTES &&
+            (peer.publicKey.size == PUBLIC_KEY_BYTES ||
+                (peer.publicKey.size == 65 && peer.publicKey[0] == 4.toByte())) &&
             peer.label.isNotBlank() &&
             peer.label.length <= MAX_LABEL_LENGTH
 

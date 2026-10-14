@@ -205,13 +205,15 @@ impl DeviceFingerprint {
         Ok(Self(value))
     }
 
-    /// Derives the canonical fingerprint for one raw 32-byte public key.
+    /// Derives a fingerprint for raw Ed25519 or uncompressed SEC1 P-256.
     ///
     /// This performs hashing only; it does not authenticate a key or verify a
     /// signature. Callers must invoke it only after a protocol-specific
     /// key-possession proof and explicit user approval have succeeded.
     pub fn from_public_key(public_key: &[u8]) -> Result<Self, TrustError> {
-        if public_key.len() != SHA256_PUBLIC_KEY_BYTES {
+        if public_key.len() != SHA256_PUBLIC_KEY_BYTES
+            && !(public_key.len() == 65 && public_key[0] == 4)
+        {
             return Err(TrustError::InvalidPublicKey);
         }
         let digest = digest::digest(&digest::SHA256, public_key);
