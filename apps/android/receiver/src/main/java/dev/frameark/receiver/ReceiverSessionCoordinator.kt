@@ -18,8 +18,6 @@ class ReceiverSessionCoordinator(
 
         data object Starting : State
 
-        data object Recovering : State
-
         data object Running : State
 
         data class Failed(val reason: FailureReason) : State
@@ -43,24 +41,22 @@ class ReceiverSessionCoordinator(
     fun start(): Boolean = synchronized(lock) { startLocked() }
 
     /**
-     * Rebuilds one interrupted session through the same bounded start path.
+     * Refreshes the endpoint view without interpreting a default-route event
+     * as failure of an authenticated Rust-owned QUIC connection.
      *
-     * This is an explicit seam for transport/network observers. It does not
-     * retry indefinitely and never duplicates FANP state in Kotlin.
+     * A connectivity notification is not a transport result. Keep the listener,
+     * certificate, approval and playback owners alive; Rust's existing bounded
+     * I/O deadlines decide whether the connection can continue. This does not
+     * reconnect, migrate addresses, extend a deadline or grant authorization.
      */
-    fun recover(): Boolean = synchronized(lock) {
+    fun onNetworkChanged(): Boolean = synchronized(lock) {
         if (state != State.Running) return false
-        playbackLoop.stop()
-        network?.stop()
-        native.stopReceiver()
-        transitionLocked(State.Recovering)
-        startLocked()
+        network == null || network.refresh() is ReceiverNetworkCoordinator.State.Ready
     }
 
     private fun startLocked(): Boolean {
         when (state) {
             State.Running, State.Starting -> return true
-            State.Recovering -> Unit
             is State.Failed -> stopLocked()
             State.Stopped -> Unit
         }

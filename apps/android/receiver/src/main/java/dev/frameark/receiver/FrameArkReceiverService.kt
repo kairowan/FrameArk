@@ -86,9 +86,13 @@ class FrameArkReceiverService : Service() {
             },
             onNetworkChanged = {
                 mainHandler.post {
-                    val recovered = if (::coordinator.isInitialized) coordinator.recover() else false
-                    if (!recovered) Log.d(TAG, "network change observed outside running session")
-                    if (::networkObserver.isInitialized) networkObserver.markRecoveryComplete()
+                    try {
+                        val retained = ::coordinator.isInitialized && coordinator.onNetworkChanged()
+                        Log.d(TAG, if (retained) "network change; native endpoint retained"
+                            else "network change; endpoint snapshot unavailable")
+                    } finally {
+                        if (::networkObserver.isInitialized) networkObserver.markChangeHandled()
+                    }
                 }
             },
         )
@@ -158,7 +162,7 @@ class FrameArkReceiverService : Service() {
             return START_NOT_STICKY
         }
         if (!networkObserver.start()) {
-            Log.w(TAG, "network observer unavailable; automatic recovery is disabled")
+            Log.w(TAG, "network observer unavailable; native transport remains active")
         }
         startAsForeground()
         return START_STICKY

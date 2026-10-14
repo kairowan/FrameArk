@@ -1,6 +1,6 @@
 # ADR 0070: Android bounded session recovery seam
 
-- Status: Accepted
+- Status: Superseded by [ADR 0126](0126-retain-receiver-on-network-notifications.md)
 - Date: 2026-10-11
 - Scope: M2 Android receiver lifecycle
 
