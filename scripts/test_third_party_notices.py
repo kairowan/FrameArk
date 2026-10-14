@@ -45,6 +45,7 @@ class NoticeTests(unittest.TestCase):
         self.archive.write_bytes(tar_bytes([
             ("fixture-1.0.0/Cargo.toml", manifest), ("fixture-1.0.0/LICENSE-MIT", MIT),
             ("fixture-1.0.0/third party/nested/NOTICE", b"Nested contributor attribution\n"),
+            ("fixture-1.0.0/.cargo_vcs_info.json", json.dumps({"git": {"sha1": "a" * 40}}).encode()),
         ]))
         (self.root / "Cargo.lock").write_text('[[package]]\nname = "fixture"\nversion = "1.0.0"\nsource = "' + notices.REGISTRY + '"\nchecksum = "' + notices.digest(self.archive) + '"\n', encoding="utf-8")
         self.metadata = {"packages": [{"name": "fixture", "version": "1.0.0", "source": notices.REGISTRY,
@@ -56,10 +57,13 @@ class NoticeTests(unittest.TestCase):
         supplement = self.root / "docs/third-party/supplements/fixture/LICENSE"
         supplement.parent.mkdir(parents=True)
         supplement.write_bytes(MIT)
-        self.policy = {"schema": 1, "rustLicenseChoices": {"MIT": "MIT"}, "rustSupplements": {},
+        (supplement.parent / "NOTICE").write_bytes(b"Required fixture attribution\n")
+        self.policy = {"schema": 1, "rustLicenseChoices": {"MIT": "MIT"},
+                       "rustSupplements": {"fixture@1.0.0": {"vcs": "a" * 40, "files": ["fixture/LICENSE"]}},
                        "androidApplications": {app: [coordinate] for app in ("receiver", "sender")},
-                       "android": {coordinate: {"sha256": notices.digest(self.jar), "declaredLicense": "MIT", "noticeScope": "fixture", "files": ["fixture/LICENSE"]}},
-                       "files": {"fixture/LICENSE": {"sha256": notices.sha(MIT), "source": "https://example.invalid/fixture/LICENSE"}}}
+                       "android": {coordinate: {"sha256": notices.digest(self.jar), "declaredLicense": "MIT", "noticeScope": "fixture", "files": ["fixture/LICENSE", "fixture/NOTICE"]}},
+                       "files": {"fixture/LICENSE": {"sha256": notices.sha(MIT), "source": "https://example.invalid/fixture/LICENSE"},
+                                 "fixture/NOTICE": {"sha256": notices.sha(b"Required fixture attribution\n"), "source": "https://example.invalid/fixture/NOTICE"}}}
         write_json(self.root / "docs/third-party/policy.json", self.policy)
         for app in ("receiver", "sender"):
             write_json(self.root / f"apps/android/{app}/build/reports/frameark/release-runtime.json",
@@ -188,6 +192,64 @@ class NoticeTests(unittest.TestCase):
                     changed.writestr(entry, data)
             with self.subTest(operation=operation), self.assertRaises(ValueError):
                 verification.verify({**assets, "third-party-licenses.zip": output.getvalue()}, self.root)
+
+    def rewritten_bundle(self, assets, component_id, suffix, operation):
+        """Keep all attacker-controlled hashes/text/ZIP consistent with the edit."""
+        index = json.loads(assets["third-party-index.json"])
+        bundle = notices.Bundle()
+        bundle.components = index["components"]
+        with zipfile.ZipFile(io.BytesIO(assets["third-party-licenses.zip"])) as archive:
+            bundle.files = {name: archive.read(name) for name in archive.namelist() if name != "third-party-index.json"}
+        component = next(c for c in bundle.components if c["id"] == component_id)
+        record = next(r for r in component["files"] if r["path"].endswith(suffix))
+        if operation == "omit":
+            component["files"].remove(record)
+            del bundle.files[record["path"]]
+        elif operation == "replace":
+            bundle.files[record["path"]] = b"Self-consistent replacement, not the reviewed license.\n"
+            record["sha256"] = notices.sha(bundle.files[record["path"]])
+        elif operation == "source":
+            record["source"] = "https://example.invalid/unreviewed-source"
+        elif operation == "reassign":
+            old_path = record["path"]
+            record["path"] = "unowned/" + Path(old_path).name
+            bundle.files[record["path"]] = bundle.files.pop(old_path)
+        elif operation == "license":
+            component["declaredLicense"] = "Apache-2.0"
+        else:
+            raise AssertionError("unknown fixture mutation")
+        return notices.serialize(bundle, index["cargoLockSha256"], index["androidRuntime"], index["policySha256"])
+
+    def test_self_consistent_maven_notice_edits_rejected_by_policy(self):
+        assets = self.build()
+        for operation in ("omit", "replace", "source"):
+            changed = self.rewritten_bundle(assets, "maven:" + self.coordinate, "/NOTICE", operation)
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                verification.verify(changed, self.root)
+
+    def test_self_consistent_rust_supplement_edits_rejected_by_policy(self):
+        assets = self.build()
+        for operation in ("omit", "replace", "source"):
+            changed = self.rewritten_bundle(assets, "cargo:fixture:1.0.0", "/supplement-LICENSE", operation)
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                verification.verify(changed, self.root)
+
+    def test_self_consistent_runtime_file_omissions_rejected(self):
+        assets = self.build()
+        for component, suffix in (("runtime:rust-stdlib:1.97.0", "/COPYRIGHT-library.html"),
+                                  ("runtime:android-ndk:28.0.123-beta1", "/NOTICE.toolchain")):
+            changed = self.rewritten_bundle(assets, component, suffix, "omit")
+            with self.subTest(component=component), self.assertRaises(ValueError):
+                verification.verify(changed, self.root)
+
+    def test_component_ownership_and_maven_license_metadata_are_bound(self):
+        assets = self.build()
+        changed = self.rewritten_bundle(assets, "cargo:fixture:1.0.0", "/LICENSE-MIT", "reassign")
+        with self.assertRaisesRegex(ValueError, "different component"):
+            verification.verify(changed, self.root)
+        changed = self.rewritten_bundle(assets, "maven:" + self.coordinate, "/NOTICE", "license")
+        with self.assertRaisesRegex(ValueError, "license metadata"):
+            verification.verify(changed, self.root)
 
 
 if __name__ == "__main__":
