@@ -430,3 +430,52 @@ fn real_tcp_dispatches_output_commands_and_returns_backend_rejection() {
     assert_eq!(probe.lock().unwrap().accepted.len(), 6);
     assert_eq!(probe.lock().unwrap().shutdowns, 1);
 }
+
+#[test]
+fn nonblocking_accepted_socket_waits_for_split_request() {
+    let (service, probe) = bound();
+    let mut server = MediaRendererTcpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        service,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let (stream, peer) = server.listener.accept().unwrap();
+        // Model platforms that inherit the non-blocking listener mode. Force
+        // it here so Windows/Linux can reproduce the macOS CI failure too.
+        stream.set_nonblocking(true).unwrap();
+        ready_tx.send(()).unwrap();
+        server.serve_connection(stream, peer)
+    });
+    let request = load();
+    let mut wire = format!("{} {} HTTP/1.1\r\n", request.method, request.target);
+    for (name, value) in request.headers {
+        wire.push_str(&format!("{name}: {value}\r\n"));
+    }
+    wire.push_str("\r\n");
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let header_write = stream.write_all(wire.as_bytes());
+    std::thread::sleep(Duration::from_millis(20));
+    let body_write = stream.write_all(&request.body);
+    let response = read_http_response(&mut stream);
+    let served = worker.join().unwrap();
+    assert!(
+        served.is_ok(),
+        "accepted stream must be blocking: {served:?}"
+    );
+    header_write.unwrap();
+    body_write.unwrap();
+    assert_eq!(response.unwrap().status, 200);
+    assert_eq!(probe.lock().unwrap().accepted.len(), 1);
+    assert_eq!(probe.lock().unwrap().shutdowns, 1);
+}

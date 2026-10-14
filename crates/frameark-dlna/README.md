@@ -69,6 +69,8 @@ for failure/cleanup contracts and follow-up requirements.
 
 `MediaRendererTcpServer` is a deliberately small socket boundary: it serves
 one complete request per call, closes the connection after the response, and
+explicitly uses blocking accepted streams with read/write timeouts even when
+the accept scheduler uses a non-blocking listener. It
 leaves accept-loop scheduling, multicast membership, and media rendering to a
 daemon or platform service. The handler remains reusable for asynchronous
 servers and malformed-request tests.

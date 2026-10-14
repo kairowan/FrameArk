@@ -16,7 +16,8 @@ The earlier private-repository interruption and recovery are recorded in the
 **DLNA output acknowledgment:** typed SetURI/Play/Pause/Stop/Seek/Volume dispatch
 now requires an explicitly bound backend before committing state or success
 events. Unbound/rejected commands fail; fatal failures detach and clean up.
-Eight new regression tests include actual loopback TCP, but use an output
+Nine new regression tests include actual loopback TCP and split requests on
+non-blocking accepted sockets, but use an output
 fixture rather than a decoder. Android DLNA output, live progress feedback,
 correct GENA event-URL/SID routing and the named-controller/two-hour matrix
 remain open; M3 stays Partial. See [ADR 0129](adr/0129-dlna-playback-dispatch.md).

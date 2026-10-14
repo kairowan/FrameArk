@@ -59,12 +59,19 @@ decoder-derived duration need a later generation-bound feedback API.
 
 ## Evidence and remaining work
 
-Eight focused regression tests cover all six output commands, three nonfatal
+Nine focused regression tests cover all six output commands, three nonfatal
 error categories for each command, fatal failure for each command, no-backend
 behavior, invalid arguments, volume endpoints, event sequence preservation,
 constructor/drop cleanup, time bounds, counter saturation and real loopback TCP dispatch.
-The full crate suite contains 53 passing tests. These use an instrumented output
+The full crate suite contains 54 passing tests. These use an instrumented output
 fixture, not a decoder, Android, or a named DLNA controller.
+
+The first macOS CI run failed the real TCP fixture with a broken pipe when
+headers and body arrived separately. A new fixture forced non-blocking mode
+on an accepted socket and reproduced `WouldBlock` locally before the fix.
+The synchronous adapter now explicitly restores blocking mode on each accepted
+stream before setting read/write timeouts. This preserves the non-blocking
+accept scheduler without treating a partial request as a disconnected client.
 
 The new event assertions also exposed an existing interoperability defect:
 GENA routes currently use control URLs rather than the advertised event URLs.
