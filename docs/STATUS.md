@@ -13,6 +13,14 @@ commits remain mandatory; restored settings do not imply a successful release.
 The earlier private-repository interruption and recovery are recorded in the
 [protection audit](BRANCH_PROTECTION.md).
 
+**DLNA output acknowledgment:** typed SetURI/Play/Pause/Stop/Seek/Volume dispatch
+now requires an explicitly bound backend before committing state or success
+events. Unbound/rejected commands fail; fatal failures detach and clean up.
+Eight new regression tests include actual loopback TCP, but use an output
+fixture rather than a decoder. Android DLNA output, live progress feedback,
+correct GENA event-URL/SID routing and the named-controller/two-hour matrix
+remain open; M3 stays Partial. See [ADR 0129](adr/0129-dlna-playback-dispatch.md).
+
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|
 | M0 工程与规范基础 | Rust workspace, Android shell, licenses/governance, CI/security gates including required `framearkd` Linux listener smoke, Windows/macOS Rust workspace format/test/build matrix and bounded `framearkd` startup smoke, ADR series, repository policy checks, Android native-package verification, deterministic SPDX SBOM generation, release APK/source/checksum publication, GitHub OIDC provenance attestations for published artifacts | Non-Linux media/session runtime evidence beyond startup, platform signing policy, and final multi-platform release baseline | Partial |
