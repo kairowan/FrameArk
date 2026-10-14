@@ -60,7 +60,7 @@ never persisted in FTR1, so a transport adapter must verify key possession
 before enqueueing a request and must keep its UI binding access-controlled.
 
 The optional FANP proof listener may take a startup snapshot of the Rust trust
-registry. After the fresh Ed25519 challenge is verified, an exact device-id and
+registry. After the fresh Ed25519 or P-256 challenge is verified, an exact device-id and
 derived public-key fingerprint match is admitted without another prompt; a
 rotated key, renamed device, malformed identity, or missing record falls back
 to the bounded explicit-approval queue. Android trust mutations remain
@@ -375,8 +375,17 @@ the exact inspected ticket and uses fixed-name certificate-pinned TLS; no DNS,
 public-address destination, automatic intent/clipboard connection, insecure
 fallback, persisted ticket or stored PIN is supported. Clipboard/share targets
 are OS/user controlled and may retain public network metadata. Restarting the
-Receiver invalidates a ticket. The reference Sender is PIN-only and cannot
-satisfy proof-required mode. See [ADR 0120](docs/adr/0120-android-reference-sender.md)
+Receiver invalidates a ticket. Sender defaults to PIN-only but can explicitly
+enable [Keystore sender proof](docs/adr/0125-android-sender-keystore-proof.md).
+P-256 private keys never leave Android Keystore; Rust verifies a version-separated
+fresh challenge before exposing a bounded FAPR v2 event. Receiver requires
+explicit approval or a full verified ID/fingerprint match against its startup
+trust snapshot. PIN/TLS checks still apply. Failed/stale signatures, unsupported
+peers, user denial and timeouts never downgrade. One OS signing slot and one
+bounded, generation-scoped JNI request prevent accumulating callbacks; Rust
+can cancel independently of a stuck OS call. No automatic enrollment, silent
+key rotation, live revocation, attestation or hardware-security guarantee is added.
+See [ADR 0120](docs/adr/0120-android-reference-sender.md)
 for resource/time limits, generation ownership and explicit trust limitations.
 The [discovery extension](docs/adr/0124-android-sender-discovery.md) broadcasts
 only the public ephemeral certificate, not the PIN or private key. Selection

@@ -16,8 +16,9 @@ packet captures or permanent device identifiers need to be shared with us.
 2. Connect both to the same trusted LAN. Disable guest/AP isolation if you
    control the router. VPN/private-interface addresses may be unreachable;
    choose the receiver's actual Wi-Fi address. Do not expose a router port.
-3. Open Receiver, leave proof-required mode off for this PIN-only reference
-   sender, and start reception. If one-shot pairing approval is enabled,
+3. Open Receiver, leave proof-required mode off for the default PIN-only path,
+   or explicitly use the [sender identity workflow](ANDROID_SENDER_IDENTITY.md)
+   on both ends. Start reception. If one-shot pairing approval is enabled,
    explicitly approve the next pairing before Send. Keep the PIN private.
 4. For automatic discovery, tap **扫描局域网接收器（15 秒）** in Sender and select
    the reachable, explicitly **unverified** address. Keep Receiver foreground.

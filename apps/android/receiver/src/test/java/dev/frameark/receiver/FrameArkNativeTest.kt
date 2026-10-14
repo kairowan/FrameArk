@@ -211,6 +211,26 @@ class FrameArkNativeTest {
     }
 
     @Test
+    fun p256_event_is_exactly_versioned_and_bounded() {
+        val id = "sender-p256"
+        val key = ByteArray(65) { 4 }
+        val valid = ByteBuffer.allocate(14 + id.length + 65).order(ByteOrder.BIG_ENDIAN)
+            .put("FAPR".toByteArray()).put(2).putLong(43).put(id.length.toByte()).put(id.toByteArray()).put(key).array()
+        var envelope = valid
+        val native = FrameArkNative(libraryLoader = {}, versionProvider = { FrameArkNative.EXPECTED_ABI_VERSION }, pollPeerProofProvider = { envelope })
+        native.load()
+        assertEquals(key.toList(), native.pollPeerProof()?.peer?.publicKey?.toList())
+        for (size in 0 until valid.size) {
+            envelope = valid.copyOf(size); assertNull(native.pollPeerProof())
+        }
+        envelope = valid + 0; assertNull(native.pollPeerProof())
+        for (version in listOf(0, 1, 3)) {
+            envelope = valid.copyOf().also { it[4] = version.toByte() }; assertNull(native.pollPeerProof())
+        }
+        envelope = valid.copyOf().also { it[14 + id.length] = 3 }; assertNull(native.pollPeerProof())
+    }
+
+    @Test
     fun native_busy_trust_mutations_are_not_reported_as_success() {
         var calls = 0
         val bridge = FrameArkNative(

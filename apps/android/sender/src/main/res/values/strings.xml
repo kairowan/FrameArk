@@ -1,5 +1,9 @@
 <resources>
     <string name="app_name">FrameArk Sender</string>
+    <string name="identity_explanation">发送端身份 · Experimental。加载持久 Keystore 公钥后可启用身份签名；接收端也须启用身份验证。两端核对发送端完整指纹后在 Receiver 明确批准。仍需 TLS 指纹确认和 PIN，失败不会回退到无身份模式；不代表自动记住或免 PIN。</string>
+    <string name="identity_load">加载或创建发送端身份（私钥不导出）</string>
+    <string name="identity_use">本次使用发送端身份签名（须 Receiver 开启身份验证）</string>
+    <string name="identity_failed">身份未就绪或密钥库忙，请稍后重试。未替换现有密钥，未启用身份模式。</string>
     <string name="title">FrameArk Sender · Experimental</string>
     <string name="instructions">同一局域网：在 Receiver 启动接收，然后扫描选择接收器；也可分享连接信息并粘贴到下方。核对两端地址及完整 TLS 指纹，再输入接收端 PIN。测试流发送 30 秒画面和短提示音，需要保持前台；屏幕共享使用独立按钮。降低接收端媒体音量。</string>
     <string name="discovery_warning">局域网发现 · Experimental。广播未经认证，发现不代表信任！选中后仍须对照 Receiver 核对完整指纹。旧版接收器或组播隔离可手动连接；自动与手动均仅支持本地 IPv4，不支持纯 IPv6。</string>

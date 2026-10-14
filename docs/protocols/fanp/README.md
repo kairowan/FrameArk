@@ -12,7 +12,7 @@ stable public wire-compatibility promise yet.
 - Scope: local network or test loopback only.
 - Authorization: one six-digit decimal pairing code, valid only for the
   caller-owned process/session.
-- Optional sender identity: Ed25519 challenge/proof, supplied by a caller-owned
+- Optional sender identity: Ed25519 v1 or P-256/SHA-256 v2 challenge/proof, supplied by a caller-owned
   platform signer and verified in Rust before capability negotiation.
 
 The client must receive the server certificate through an in-scope channel
@@ -26,7 +26,7 @@ entry before connecting. See [ADR 0124](../../adr/0124-android-sender-discovery.
 for the exact TXT profile, limits, lifecycle and older-version fallback.
 
 After the code is accepted, a receiver may run either the caller-owned
-address approval seam or the optional Ed25519 peer-proof flow before capability
+address approval seam or the optional peer-proof flow before capability
 negotiation. The address and pairing code alone are not sender identity proof.
 The proof flow binds a fresh server challenge to a bounded device identifier
 and public key; a caller-owned policy then decides whether the verified sender
@@ -94,6 +94,16 @@ failure is rejected before capability negotiation and does not create a
 persistent trust record. A successful proof receives an empty `type = 9`
 acknowledgement on the proof stream; a rejected proof receives the bounded
 `NegotiationRejected` response and no `ClientHello` is accepted.
+
+Proof payload v2 uses the same type 8, with `02 | id_length:u8 | id | key:65 |
+signature:8..72` (max 203 bytes). The key is uncompressed SEC1 P-256 (`04 || X || Y`),
+signature ASN.1 DER ECDSA/SHA-256. Signed bytes are ASCII
+`FrameArk FANP peer authentication v2 P256-SHA256`, NUL, ID length, ID, public
+key and fresh 32-byte nonce, in that order. ID syntax is unchanged. Rust/ring
+verifies key/DER/signature before approval. Unknown versions and failed proofs
+never fall back to v1/PIN-only. V1 remains byte-compatible. See
+[ADR 0125](../../adr/0125-android-sender-keystore-proof.md) for Android SPKI,
+FAPR v2, signer deadlines, trust fingerprint and pre-alpha Rust API migration.
 
 ## Capability negotiation
 

@@ -60,6 +60,17 @@ const PEER_SIGNATURE_BYTES: usize = 64;
 const PEER_CHALLENGE_BYTES: usize = 32;
 const MAX_PEER_DEVICE_ID_BYTES: usize = 64;
 const PEER_TRANSCRIPT_PREFIX: &[u8] = b"FrameArk FANP peer authentication v1\0";
+const P256_TRANSCRIPT_PREFIX: &[u8] = b"FrameArk FANP peer authentication v2 P256-SHA256\0";
+
+/// Platform-owned key identity. Supports raw Ed25519 (32 bytes) or uncompressed
+/// SEC1 P-256 (65 bytes). Private keys never cross this API.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformPeerIdentity {
+    /// Stable caller-owned device identifier (1..=64 ASCII identifier bytes).
+    pub device_id: String,
+    /// Canonical public key, not an X.509 certificate or SPKI wrapper.
+    pub public_key: Vec<u8>,
+}
 
 /// Errors returned by the bounded FANP transport and pairing handshake.
 #[derive(Debug, Eq, PartialEq)]
@@ -146,10 +157,10 @@ pub struct PeerIdentity {
 pub struct PeerIdentityProof {
     /// Stable caller-owned device identifier.
     pub device_id: String,
-    /// Raw Ed25519 public key bytes.
-    pub public_key: [u8; PEER_PUBLIC_KEY_BYTES],
+    /// Raw Ed25519 or uncompressed SEC1 P-256 public key bytes.
+    pub public_key: Vec<u8>,
     /// Signature over the versioned challenge transcript.
-    pub signature: [u8; PEER_SIGNATURE_BYTES],
+    pub signature: Vec<u8>,
 }
 
 impl PeerIdentityProof {
@@ -175,10 +186,15 @@ impl PeerIdentityProof {
         {
             return Err(TransportError::PeerAuthenticationRejected);
         }
+        let version = match self.public_key.as_slice() {
+            key if key.len() == 32 && self.signature.len() == 64 => PEER_PROOF_VERSION,
+            key if key.len() == 65 && key[0] == 4 && (8..=72).contains(&self.signature.len()) => 2,
+            _ => return Err(TransportError::PeerAuthenticationRejected),
+        };
         let mut payload = Vec::with_capacity(
-            2 + self.device_id.len() + PEER_PUBLIC_KEY_BYTES + PEER_SIGNATURE_BYTES,
+            2 + self.device_id.len() + self.public_key.len() + self.signature.len(),
         );
-        payload.push(PEER_PROOF_VERSION);
+        payload.push(version);
         payload.push(self.device_id.len() as u8);
         payload.extend_from_slice(self.device_id.as_bytes());
         payload.extend_from_slice(&self.public_key);
@@ -187,12 +203,17 @@ impl PeerIdentityProof {
     }
 
     fn decode(payload: &[u8]) -> Result<Self, TransportError> {
-        if payload.len() < 2 || payload[0] != PEER_PROOF_VERSION {
+        if payload.len() < 2 || payload.len() > MAX_FRAME_PAYLOAD {
             return Err(TransportError::PeerAuthenticationRejected);
         }
         let id_len = payload[1] as usize;
-        let expected = 2 + id_len + PEER_PUBLIC_KEY_BYTES + PEER_SIGNATURE_BYTES;
-        if id_len == 0 || id_len > MAX_PEER_DEVICE_ID_BYTES || payload.len() != expected {
+        let key_len = match payload[0] {
+            1 => 32,
+            2 => 65,
+            _ => return Err(TransportError::PeerAuthenticationRejected),
+        };
+        if id_len == 0 || id_len > MAX_PEER_DEVICE_ID_BYTES || payload.len() < 2 + id_len + key_len
+        {
             return Err(TransportError::PeerAuthenticationRejected);
         }
         let device_id = std::str::from_utf8(&payload[2..2 + id_len])
@@ -205,21 +226,37 @@ impl PeerIdentityProof {
             return Err(TransportError::PeerAuthenticationRejected);
         }
         let key_start = 2 + id_len;
-        let mut public_key = [0_u8; PEER_PUBLIC_KEY_BYTES];
-        public_key.copy_from_slice(&payload[key_start..key_start + PEER_PUBLIC_KEY_BYTES]);
-        let sig_start = key_start + PEER_PUBLIC_KEY_BYTES;
-        let mut signature_bytes = [0_u8; PEER_SIGNATURE_BYTES];
-        signature_bytes.copy_from_slice(&payload[sig_start..]);
-        Ok(Self {
+        let sig_start = key_start + key_len;
+        let proof = Self {
             device_id,
-            public_key,
-            signature: signature_bytes,
-        })
+            public_key: payload[key_start..sig_start].to_vec(),
+            signature: payload[sig_start..].to_vec(),
+        };
+        proof.encode()?;
+        Ok(proof)
+    }
+
+    fn signing_transcript(device_id: &str, public_key: &[u8], challenge: &[u8; 32]) -> Vec<u8> {
+        if public_key.len() == 32 {
+            return Self::transcript(device_id, challenge);
+        }
+        let mut transcript = P256_TRANSCRIPT_PREFIX.to_vec();
+        transcript.push(device_id.len() as u8);
+        transcript.extend_from_slice(device_id.as_bytes());
+        transcript.extend_from_slice(public_key);
+        transcript.extend_from_slice(challenge);
+        transcript
     }
 
     fn verify(&self, challenge: &[u8; PEER_CHALLENGE_BYTES]) -> Result<(), TransportError> {
-        let transcript = Self::transcript(&self.device_id, challenge);
-        UnparsedPublicKey::new(&signature::ED25519, self.public_key)
+        self.encode()?;
+        let transcript = Self::signing_transcript(&self.device_id, &self.public_key, challenge);
+        let algorithm: &dyn signature::VerificationAlgorithm = if self.public_key.len() == 32 {
+            &signature::ED25519
+        } else {
+            &signature::ECDSA_P256_SHA256_ASN1
+        };
+        UnparsedPublicKey::new(algorithm, &self.public_key)
             .verify(&transcript, &self.signature)
             .map_err(|_| TransportError::PeerAuthenticationRejected)
     }
@@ -518,7 +555,7 @@ impl PairingServer {
         })
     }
 
-    /// Accepts one pairing with a verified Ed25519 sender proof.
+    /// Accepts one pairing with a verified Ed25519 or P-256 sender proof.
     ///
     /// The proof is bound to a fresh server challenge and is verified before
     /// capability negotiation. The caller may still apply its own Rust-owned
@@ -785,6 +822,38 @@ impl PairingClient {
     where
         F: FnOnce(&[u8]) -> Result<[u8; PEER_SIGNATURE_BYTES], TransportError>,
     {
+        Self::connect_with_platform_identity(
+            server_addr,
+            server_name,
+            certificate_der,
+            pairing_code,
+            PlatformPeerIdentity {
+                device_id: identity.device_id,
+                public_key: identity.public_key.to_vec(),
+            },
+            |transcript| async move { sign(&transcript).map(|signature| signature.to_vec()) },
+            operation_timeout,
+        )
+        .await
+    }
+
+    /// Connects with an asynchronous platform signer. Waiting for the signer is
+    /// bounded and does not block the executor driving QUIC or cancellation.
+    /// Version 1 Ed25519 and version 2 P-256 are selected by canonical key shape;
+    /// rejection never retries using another algorithm or PIN-only mode.
+    pub async fn connect_with_platform_identity<F, Fut>(
+        server_addr: SocketAddr,
+        server_name: &str,
+        certificate_der: &[u8],
+        pairing_code: PairingCode,
+        identity: PlatformPeerIdentity,
+        sign: F,
+        operation_timeout: Duration,
+    ) -> Result<PairingSession, TransportError>
+    where
+        F: FnOnce(Vec<u8>) -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, TransportError>>,
+    {
         if !valid_server_name(server_name)
             || certificate_der.is_empty()
             || certificate_der.len() > MAX_CERTIFICATE_BYTES
@@ -792,14 +861,14 @@ impl PairingClient {
             return Err(TransportError::TlsConfiguration);
         }
         let capabilities = CapabilityOffer::default_capabilities();
-        let PeerIdentity {
+        let PlatformPeerIdentity {
             device_id,
             public_key,
         } = identity;
         PeerIdentityProof {
             device_id: device_id.clone(),
-            public_key,
-            signature: [0_u8; PEER_SIGNATURE_BYTES],
+            public_key: public_key.clone(),
+            signature: vec![0_u8; PEER_SIGNATURE_BYTES],
         }
         .encode()?;
         let mut roots = rustls::RootCertStore::empty();
@@ -859,8 +928,10 @@ impl PairingClient {
         }
         let mut challenge = [0_u8; PEER_CHALLENGE_BYTES];
         challenge.copy_from_slice(&challenge_frame.payload);
-        let transcript = PeerIdentityProof::transcript(&device_id, &challenge);
-        let signature = sign(&transcript)?;
+        let transcript = PeerIdentityProof::signing_transcript(&device_id, &public_key, &challenge);
+        let signature = timeout(operation_timeout, sign(transcript))
+            .await
+            .map_err(|_| TransportError::Timeout)??;
         let proof = PeerIdentityProof {
             device_id,
             public_key,
@@ -1042,8 +1113,8 @@ mod tests {
     fn peer_identity_proof_rejects_malformed_identity_and_tampered_signature() {
         let malformed = PeerIdentityProof {
             device_id: "bad identity".to_string(),
-            public_key: [0_u8; PEER_PUBLIC_KEY_BYTES],
-            signature: [0_u8; PEER_SIGNATURE_BYTES],
+            public_key: vec![0_u8; PEER_PUBLIC_KEY_BYTES],
+            signature: vec![0_u8; PEER_SIGNATURE_BYTES],
         };
         assert_eq!(
             malformed.encode(),
@@ -1063,8 +1134,8 @@ mod tests {
         signature_bytes[0] ^= 1;
         let proof = PeerIdentityProof {
             device_id: "sender-1".to_string(),
-            public_key,
-            signature: signature_bytes,
+            public_key: public_key.to_vec(),
+            signature: signature_bytes.to_vec(),
         };
         assert_eq!(
             proof.verify(&challenge),
@@ -1090,6 +1161,164 @@ mod tests {
         header[4] = FANP_PROTOCOL_VERSION;
         header[6..].copy_from_slice(&257_u16.to_be_bytes());
         assert_eq!(decode_header(&header), Err(TransportError::InvalidFrame));
+    }
+
+    fn p256_key() -> signature::EcdsaKeyPair {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = signature::EcdsaKeyPair::generate_pkcs8(
+            &signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+            &rng,
+        )
+        .unwrap();
+        signature::EcdsaKeyPair::from_pkcs8(
+            &signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+            pkcs8.as_ref(),
+            &rng,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn p256_proof_bounds_replay_domain_and_mutation_rejection() {
+        let key = p256_key();
+        let public_key = key.public_key().as_ref().to_vec();
+        let challenge = [9; 32];
+        let transcript =
+            PeerIdentityProof::signing_transcript("p256-sender", &public_key, &challenge);
+        let proof = PeerIdentityProof {
+            device_id: "p256-sender".into(),
+            public_key,
+            signature: key
+                .sign(&ring::rand::SystemRandom::new(), &transcript)
+                .unwrap()
+                .as_ref()
+                .to_vec(),
+        };
+        let encoded = proof.encode().unwrap();
+        assert_eq!(encoded[0], 2);
+        assert_eq!(PeerIdentityProof::decode(&encoded).unwrap(), proof);
+        assert!(proof.verify(&challenge).is_ok());
+        assert!(proof.verify(&[8; 32]).is_err());
+        for len in 0..encoded.len() {
+            assert!(
+                PeerIdentityProof::decode(&encoded[..len])
+                    .and_then(|p| p.verify(&challenge))
+                    .is_err()
+            );
+        }
+        for index in 0..encoded.len() {
+            for mask in [1, 2, 128] {
+                let mut mutated = encoded.clone();
+                mutated[index] ^= mask;
+                assert!(
+                    PeerIdentityProof::decode(&mutated)
+                        .and_then(|p| p.verify(&challenge))
+                        .is_err()
+                );
+            }
+        }
+        let mut changed = proof.clone();
+        changed.signature = key
+            .sign(
+                &ring::rand::SystemRandom::new(),
+                &PeerIdentityProof::transcript("p256-sender", &challenge),
+            )
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        assert!(changed.verify(&challenge).is_err());
+        changed = proof;
+        changed.public_key = p256_key().public_key().as_ref().to_vec();
+        assert!(changed.verify(&challenge).is_err());
+        for length in [0, 7, 73, 256] {
+            changed.signature = vec![0; length];
+            assert!(changed.encode().is_err());
+        }
+        assert!(PeerIdentityProof::decode(&vec![2; 257]).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p256_quic_requires_valid_signature_and_explicit_approval() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for (approved, valid_signature) in [(true, true), (false, true), (true, false)] {
+            let server = PairingServer::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                "localhost",
+                PairingCode::parse("123456").unwrap(),
+            )
+            .unwrap();
+            let key = p256_key();
+            let called = AtomicBool::new(false);
+            let identity = PlatformPeerIdentity {
+                device_id: "p256-sender".into(),
+                public_key: key.public_key().as_ref().to_vec(),
+            };
+            let key_bytes = identity.public_key.clone();
+            let called_ref = &called;
+            let (accepted, connected) = tokio::join!(
+                server.accept_pairing_with_peer_proof(Duration::from_secs(2), |proof| async move {
+                    called_ref.store(true, Ordering::Relaxed);
+                    assert_eq!(proof.public_key, key_bytes);
+                    approved
+                }),
+                PairingClient::connect_with_platform_identity(
+                    server.local_addr().unwrap(),
+                    "localhost",
+                    server.certificate_der(),
+                    PairingCode::parse("123456").unwrap(),
+                    identity,
+                    |transcript| async move {
+                        tokio::task::yield_now().await;
+                        let mut signature = key
+                            .sign(&ring::rand::SystemRandom::new(), &transcript)
+                            .unwrap()
+                            .as_ref()
+                            .to_vec();
+                        if !valid_signature {
+                            signature[0] ^= 1;
+                        }
+                        Ok(signature)
+                    },
+                    Duration::from_secs(2)
+                ),
+            );
+            assert_eq!(called.load(Ordering::Relaxed), valid_signature);
+            assert_eq!(accepted.is_ok(), approved && valid_signature);
+            assert_eq!(connected.is_ok(), approved && valid_signature);
+            server.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn asynchronous_signer_timeout_does_not_authorize_or_block_transport() {
+        let server = PairingServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            "localhost",
+            PairingCode::parse("123456").unwrap(),
+        )
+        .unwrap();
+        let key = p256_key();
+        let identity = PlatformPeerIdentity {
+            device_id: "p256-sender".into(),
+            public_key: key.public_key().as_ref().to_vec(),
+        };
+        let (accepted, connected) = tokio::join!(
+            server.accept_pairing_with_peer_proof(Duration::from_secs(1), |_| async {
+                panic!("unsigned proof reached policy")
+            }),
+            PairingClient::connect_with_platform_identity(
+                server.local_addr().unwrap(),
+                "localhost",
+                server.certificate_der(),
+                PairingCode::parse("123456").unwrap(),
+                identity,
+                |_| std::future::pending(),
+                Duration::from_millis(150)
+            ),
+        );
+        assert!(accepted.is_err());
+        assert!(matches!(connected, Err(TransportError::Timeout)));
+        server.close();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

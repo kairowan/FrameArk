@@ -8,6 +8,10 @@ use frameark_transport::{MAX_PAIRING_TICKET_BYTES, PairingClient, PairingTicket}
 use jni::sys::jstring;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicUsize};
 use std::sync::mpsc::{self, SyncSender, TryRecvError};
+#[path = "sender_identity.rs"]
+mod identity;
+use frameark_transport::PlatformPeerIdentity;
+use identity::SigningBridge;
 
 const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_QUEUE_FRAMES: usize = 128;
@@ -43,6 +47,7 @@ struct Worker {
     finishing: bool,
     join: JoinHandle<()>,
     config: SenderConfig,
+    signing: Arc<SigningBridge>,
 }
 
 #[derive(Clone, Copy)]
@@ -224,6 +229,15 @@ pub extern "system" fn Java_dev_frameark_sender_SenderNative_startCapture(
 }
 
 fn start_sender(ticket: PairingTicket, pin: PairingCode, config: SenderConfig) -> jlong {
+    start_sender_with_identity(ticket, pin, config, None)
+}
+
+fn start_sender_with_identity(
+    ticket: PairingTicket,
+    pin: PairingCode,
+    config: SenderConfig,
+    identity: Option<PlatformPeerIdentity>,
+) -> jlong {
     let Ok(mut slot) = SENDER.lock() else {
         return -2;
     };
@@ -236,11 +250,12 @@ fn start_sender(ticket: PairingTicket, pin: PairingCode, config: SenderConfig) -
     if let Some(previous) = slot.take() {
         let _ = previous.join.join();
     }
-    match Worker::spawn(
+    match Worker::spawn_with_identity(
         ticket.address().into(),
         ticket.certificate().to_vec(),
         pin,
         config,
+        identity,
     ) {
         Ok(worker) => {
             let id = worker.id;
@@ -253,12 +268,30 @@ fn start_sender(ticket: PairingTicket, pin: PairingCode, config: SenderConfig) -
 
 impl Worker {
     // Production callers can reach this only through validated PairingTicket.
+    #[cfg(test)]
     fn spawn(
         address: SocketAddr,
         certificate: Vec<u8>,
         pin: PairingCode,
         config: SenderConfig,
     ) -> Result<Self, ()> {
+        Self::spawn_with_identity(address, certificate, pin, config, None)
+    }
+
+    fn spawn_with_identity(
+        address: SocketAddr,
+        certificate: Vec<u8>,
+        pin: PairingCode,
+        config: SenderConfig,
+        identity: Option<PlatformPeerIdentity>,
+    ) -> Result<Self, ()> {
+        let id = NEXT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| ())?;
+        let signing = Arc::new(SigningBridge::default());
+        let worker_signing = signing.clone();
         let (commands, receiver) = mpsc::sync_channel(MAX_QUEUE_FRAMES);
         let bytes = Arc::new(AtomicUsize::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -277,14 +310,31 @@ impl Worker {
                             until_stopped(
                                 &worker_cancel,
                                 tokio::time::timeout(config.lifetime, async {
-                                    let transport = PairingClient::connect(
-                                        address,
-                                        NETWORK_SERVER_NAME,
-                                        &certificate,
-                                        pin,
-                                        BUDGET,
-                                    )
-                                    .await
+                                    let transport = if let Some(identity) = identity {
+                                        tokio::time::timeout(
+                                            Duration::from_secs(60),
+                                            PairingClient::connect_with_platform_identity(
+                                                address,
+                                                NETWORK_SERVER_NAME,
+                                                &certificate,
+                                                pin,
+                                                identity,
+                                                |transcript| worker_signing.sign(transcript),
+                                                Duration::from_secs(40),
+                                            ),
+                                        )
+                                        .await
+                                        .map_err(|_| -22)?
+                                    } else {
+                                        PairingClient::connect(
+                                            address,
+                                            NETWORK_SERVER_NAME,
+                                            &certificate,
+                                            pin,
+                                            BUDGET,
+                                        )
+                                        .await
+                                    }
                                     .map_err(pairing_failure)?;
                                     let mut sender = NativeSender::new(
                                         transport,
@@ -400,11 +450,12 @@ impl Worker {
                         })
                     });
                 drop(receiver);
+                worker_signing.close();
                 worker_status.store(result.unwrap_or_else(|code| code), Ordering::Release);
             })
             .map_err(|_| ())?;
         Ok(Self {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id,
             commands,
             bytes,
             cancel,
@@ -412,6 +463,7 @@ impl Worker {
             finishing: false,
             join,
             config,
+            signing,
         })
     }
 
@@ -618,6 +670,7 @@ mod tests {
             finishing: false,
             join: thread::spawn(|| ()),
             config: SenderConfig::reference(1280, 720),
+            signing: Arc::new(SigningBridge::default()),
         };
         assert_eq!(worker.submit(frame(MAX_QUEUE_BYTES / 2)), 0);
         assert_eq!(worker.submit(frame(MAX_QUEUE_BYTES / 2)), 0);

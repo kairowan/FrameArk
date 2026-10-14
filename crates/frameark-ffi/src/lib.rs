@@ -51,7 +51,6 @@ const MEDIA_KIND_AUDIO: u8 = 2;
 const MEDIA_CONFIG_MAGIC: &[u8; 4] = b"FAMC";
 const MEDIA_CONFIG_VERSION: u8 = 1;
 const PROOF_EVENT_MAGIC: &[u8; 4] = b"FAPR";
-const PROOF_EVENT_VERSION: u8 = 1;
 const PROOF_EVENT_HEADER_BYTES: usize = 14;
 const PROOF_DECISION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NETWORK_SERVER_NAME: &str = "frameark.local";
@@ -146,6 +145,9 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeTrustPeer
     public_key: JByteArray<'_>,
     label: JString<'_>,
 ) -> jint {
+    if !matches!(env.get_array_length(&public_key), Ok(32 | 65)) {
+        return -3;
+    }
     let Ok(device_id) = env.get_string(&device_id) else {
         return -3;
     };
@@ -300,7 +302,7 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeApproveNe
 
 /// Enables or disables the optional Rust-verified sender-proof approval flow.
 /// Return values: 0 accepted while stopped, -2 active receiver, -3 lock
-/// failure. When enabled, the next network session requires a FANP Ed25519
+/// failure. When enabled, the next network session requires a FANP Ed25519/P-256
 /// proof and exposes only a bounded public-key event to Android.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetPeerProofRequired(
@@ -319,8 +321,8 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeSetPeerPr
     0
 }
 
-/// Polls one Rust-verified sender-proof event. The bounded `FAPR1` envelope
-/// contains only a request id, device id, and raw Ed25519 public key; proof
+/// Polls one Rust-verified sender-proof event. The bounded `FAPR` v1/v2 envelope
+/// contains only a request id, device id, and canonical public key; proof
 /// signatures, addresses, pairing codes, and private material never cross JNI.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativePollPeerProof(
@@ -477,7 +479,7 @@ fn valid_identity_fingerprint(value: &str) -> bool {
 struct PendingPeerProof {
     request_id: u64,
     device_id: String,
-    public_key: [u8; 32],
+    public_key: Vec<u8>,
     expires_at: Instant,
 }
 
@@ -531,6 +533,7 @@ impl PeerProofBridge {
         state.expire();
         if proof.device_id.is_empty()
             || proof.device_id.len() > 128
+            || DeviceFingerprint::from_public_key(&proof.public_key).is_err()
             || state.pending.len() >= MAX_JNI_PROOF_EVENTS
             || state
                 .pending
@@ -551,7 +554,7 @@ impl PeerProofBridge {
         let event = PendingPeerProof {
             request_id: state.next_request_id,
             device_id: proof.device_id.clone(),
-            public_key: proof.public_key,
+            public_key: proof.public_key.clone(),
             expires_at: Instant::now() + ttl,
         };
         state.pending.insert(event.request_id, event.clone());
@@ -632,9 +635,10 @@ impl PeerProofBridge {
 
 fn encode_peer_proof_event(event: &PendingPeerProof) -> Vec<u8> {
     let device_id = event.device_id.as_bytes();
-    let mut encoded = Vec::with_capacity(PROOF_EVENT_HEADER_BYTES + device_id.len() + 32);
+    let mut encoded =
+        Vec::with_capacity(PROOF_EVENT_HEADER_BYTES + device_id.len() + event.public_key.len());
     encoded.extend_from_slice(PROOF_EVENT_MAGIC);
-    encoded.push(PROOF_EVENT_VERSION);
+    encoded.push(if event.public_key.len() == 32 { 1 } else { 2 });
     encoded.extend_from_slice(&event.request_id.to_be_bytes());
     encoded.push(device_id.len() as u8);
     encoded.extend_from_slice(device_id);
@@ -1657,8 +1661,8 @@ mod tests {
         let bridge = PeerProofBridge::default();
         let proof = PeerIdentityProof {
             device_id: "sender-proof".to_string(),
-            public_key: [7_u8; 32],
-            signature: [9_u8; 64],
+            public_key: vec![7_u8; 32],
+            signature: vec![9_u8; 64],
         };
         let request_id = bridge.enqueue(&proof).expect("proof request queued");
         let event = bridge.pop().expect("proof event available");
@@ -1676,15 +1680,15 @@ mod tests {
         for index in 0..MAX_JNI_PROOF_EVENTS {
             let proof = PeerIdentityProof {
                 device_id: format!("sender-{index}"),
-                public_key: [index as u8; 32],
-                signature: [0_u8; 64],
+                public_key: vec![index as u8; 32],
+                signature: vec![0_u8; 64],
             };
             assert!(bridge.enqueue(&proof).is_some());
         }
         let overflow = PeerIdentityProof {
             device_id: "sender-overflow".to_string(),
-            public_key: [1_u8; 32],
-            signature: [0_u8; 64],
+            public_key: vec![1_u8; 32],
+            signature: vec![0_u8; 64],
         };
         assert!(bridge.enqueue(&overflow).is_none());
     }
@@ -1694,8 +1698,8 @@ mod tests {
         let bridge = PeerProofBridge::default();
         let proof = PeerIdentityProof {
             device_id: "sender-approval".to_string(),
-            public_key: [3_u8; 32],
-            signature: [0_u8; 64],
+            public_key: vec![3_u8; 32],
+            signature: vec![0_u8; 64],
         };
         let request_id = bridge.enqueue(&proof).expect("proof request queued");
         let waiter = {
@@ -1716,8 +1720,8 @@ mod tests {
         let bridge = PeerProofBridge::default();
         let proof = PeerIdentityProof {
             device_id: "sender-lifecycle".to_string(),
-            public_key: [9; 32],
-            signature: [0; 64],
+            public_key: vec![9; 32],
+            signature: vec![0; 64],
         };
         let id = bridge.enqueue(&proof).unwrap();
         assert!(bridge.is_pending(id));
@@ -1766,8 +1770,8 @@ mod tests {
         let bridge = PeerProofBridge::default();
         let proof = PeerIdentityProof {
             device_id: "sender-stop".to_string(),
-            public_key: [7; 32],
-            signature: [0; 64],
+            public_key: vec![7; 32],
+            signature: vec![0; 64],
         };
         let id = bridge.enqueue(&proof).unwrap();
         let stop = AtomicBool::new(false);
@@ -1873,13 +1877,13 @@ mod tests {
             .expect("trust key");
         let trusted = PeerIdentityProof {
             device_id: device_id.to_string(),
-            public_key: key,
-            signature: [0_u8; 64],
+            public_key: key.to_vec(),
+            signature: vec![0_u8; 64],
         };
         assert!(proof_matches_trusted_registry(&registry, &trusted));
 
         let rotated = PeerIdentityProof {
-            public_key: [18_u8; 32],
+            public_key: vec![18_u8; 32],
             ..trusted.clone()
         };
         assert!(!proof_matches_trusted_registry(&registry, &rotated));

@@ -22,7 +22,7 @@ data class CaptureOptions(val width: Int, val height: Int, val fps: Int, val aud
 }
 
 /** Deliberately not a data class: toString must never reveal credentials. */
-class CaptureRequest(val ticket: String, val pin: String, val options: CaptureOptions) {
+class CaptureRequest(val ticket: String, val pin: String, val options: CaptureOptions, val identity: SenderIdentity? = null) {
     override fun toString(): String = "CaptureRequest([REDACTED])"
 }
 
