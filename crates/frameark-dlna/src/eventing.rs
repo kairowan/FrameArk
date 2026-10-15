@@ -29,7 +29,21 @@ pub(super) fn state_event_body(
                 "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/AVT/\"><InstanceID val=\"0\">"
                     .to_string();
             value(&mut xml, "TransportState", state.transport_state.as_upnp());
-            value(&mut xml, "TransportStatus", "OK");
+            value(&mut xml, "TransportStatus", state.transport_status());
+            value(&mut xml, "PlaybackStorageMedium", state.playback_medium());
+            value(&mut xml, "PossiblePlaybackStorageMedia", "NETWORK");
+            value(&mut xml, "CurrentPlayMode", "NORMAL");
+            for name in [
+                "RecordStorageMedium",
+                "PossibleRecordStorageMedia",
+                "RecordMediumWriteStatus",
+                "CurrentRecordQualityMode",
+                "PossibleRecordQualityModes",
+                "NextAVTransportURI",
+                "NextAVTransportURIMetaData",
+            ] {
+                value(&mut xml, name, "NOT_IMPLEMENTED");
+            }
             value(&mut xml, "TransportPlaySpeed", "1");
             let tracks = if state.current_uri.is_empty() {
                 "0"
@@ -59,7 +73,7 @@ pub(super) fn state_event_body(
         }
         RENDERING_CONTROL_SERVICE => {
             properties.insert("LastChange".to_string(), format!(
-                "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/RCS/\"><InstanceID val=\"0\"><Volume channel=\"Master\" val=\"{}\"/></InstanceID></Event>", state.volume
+                "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/RCS/\"><InstanceID val=\"0\"><PresetNameList val=\"FactoryDefaults\"/><Volume channel=\"Master\" val=\"{}\"/></InstanceID></Event>", state.volume
             ));
         }
         CONNECTION_MANAGER_SERVICE => {

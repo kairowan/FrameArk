@@ -9,6 +9,10 @@
 mod eventing;
 mod playback;
 mod remote_source;
+mod service_contract;
+mod soap;
+use service_contract::scpd_xml;
+use soap::parse_soap_action;
 #[cfg(test)]
 mod source_tests;
 
@@ -24,6 +28,8 @@ mod playback_tests;
 
 #[cfg(test)]
 mod eventing_tests;
+#[cfg(test)]
+mod service_contract_tests;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
@@ -1058,6 +1064,8 @@ impl TransportState {
 pub struct MediaRendererState {
     /// Current AVTransport state.
     pub transport_state: TransportState,
+    /// Fatal output error, retained until a new source is successfully prepared.
+    pub transport_error: bool,
     /// Current media URL, if one was selected.
     pub current_uri: String,
     /// Current DIDL-Lite metadata, retained as bounded XML text.
@@ -1074,11 +1082,30 @@ impl Default for MediaRendererState {
     fn default() -> Self {
         Self {
             transport_state: TransportState::NoMediaPresent,
+            transport_error: false,
             current_uri: String::new(),
             current_uri_metadata: String::new(),
             position_seconds: 0,
             duration_seconds: None,
             volume: 50,
+        }
+    }
+}
+
+impl MediaRendererState {
+    fn transport_status(&self) -> &'static str {
+        if self.transport_error {
+            "ERROR_OCCURRED"
+        } else {
+            "OK"
+        }
+    }
+
+    fn playback_medium(&self) -> &'static str {
+        if self.current_uri.is_empty() {
+            "NONE"
+        } else {
+            "NETWORK"
         }
     }
 }
@@ -2808,6 +2835,7 @@ impl MediaRendererHttpService {
         }
         self.state = MediaRendererState {
             volume: self.state.volume,
+            transport_error: true,
             ..MediaRendererState::default()
         };
         self.queue_state_event(AVTRANSPORT_SERVICE);
@@ -3242,7 +3270,13 @@ impl MediaRendererHttpService {
             Ok(body) => {
                 if matches!(
                     action.name.as_str(),
-                    "SetAVTransportURI" | "Play" | "Pause" | "Stop" | "Seek" | "SetVolume"
+                    "SetAVTransportURI"
+                        | "Play"
+                        | "Pause"
+                        | "Stop"
+                        | "Seek"
+                        | "SetVolume"
+                        | "SelectPreset"
                 ) {
                     self.queue_state_event(&action.service);
                 }
@@ -3306,6 +3340,7 @@ impl MediaRendererHttpService {
     }
 
     fn invoke(&mut self, action: SoapAction) -> Result<String, SoapFault> {
+        service_contract::validate_inputs(&action)?;
         match action.service.as_str() {
             AVTRANSPORT_SERVICE => self.invoke_avtransport(&action),
             RENDERING_CONTROL_SERVICE => self.invoke_rendering_control(&action),
@@ -3315,12 +3350,28 @@ impl MediaRendererHttpService {
     }
 
     fn invoke_avtransport(&mut self, action: &SoapAction) -> Result<String, SoapFault> {
+        require_instance_zero(action)?;
         match action.name.as_str() {
+            "GetDeviceCapabilities" => Ok(soap_response(
+                AVTRANSPORT_SERVICE,
+                &action.name,
+                "<PlayMedia>NETWORK</PlayMedia><RecMedia>NOT_IMPLEMENTED</RecMedia><RecQualityModes>NOT_IMPLEMENTED</RecQualityModes>",
+            )),
+            "GetTransportSettings" => Ok(soap_response(
+                AVTRANSPORT_SERVICE,
+                &action.name,
+                "<PlayMode>NORMAL</PlayMode><RecQualityMode>NOT_IMPLEMENTED</RecQualityMode>",
+            )),
+            "Next" | "Previous" => {
+                ensure_media_loaded(&self.state)?;
+                // One resource, one track, NORMAL mode: never wrap or fake a playlist.
+                Err(SoapFault::new(711, "Illegal seek target"))
+            }
             "SetAVTransportURI" => {
                 require_instance_zero(action)?;
                 let uri = action.required_arg("CurrentURI")?;
                 validate_media_uri(uri)?;
-                let metadata = action.arg("CurrentURIMetaData").unwrap_or_default();
+                let metadata = action.required_arg("CurrentURIMetaData")?;
                 if metadata.len() > MAX_RENDERER_METADATA_BYTES
                     || !eventing::valid_xml_text(metadata)
                     || !eventing::valid_xml_text(uri)
@@ -3328,18 +3379,34 @@ impl MediaRendererHttpService {
                     return Err(SoapFault::new(402, "Invalid Args"));
                 }
                 let duration = metadata_duration(metadata);
+                let previous_state = self.state.transport_state;
                 self.dispatch_playback(PlaybackCommand::SetUri { uri, metadata })?;
+                // SetURI preserves a playing/paused transport. A replacement that
+                // prepared successfully but cannot resume is no longer atomic:
+                // detach it rather than claim the old source is still intact.
+                if previous_state == TransportState::Playing
+                    && let Err(fault) = self.dispatch_playback(PlaybackCommand::Play)
+                {
+                    if !self.state.transport_error {
+                        self.fail_output();
+                    }
+                    return Err(fault);
+                }
                 self.state.current_uri = uri.to_string();
                 self.state.current_uri_metadata = metadata.to_string();
                 self.state.position_seconds = 0;
                 self.state.duration_seconds = duration;
-                self.state.transport_state = TransportState::Stopped;
+                self.state.transport_state = match previous_state {
+                    TransportState::NoMediaPresent => TransportState::Stopped,
+                    state => state,
+                };
+                self.state.transport_error = false;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
             }
             "Play" => {
                 require_instance_zero(action)?;
-                if action.arg("Speed").unwrap_or("1") != "1" {
-                    return Err(SoapFault::new(712, "Play speed not supported"));
+                if action.required_arg("Speed")? != "1" {
+                    return Err(SoapFault::new(717, "Play speed not supported"));
                 }
                 ensure_media_loaded(&self.state)?;
                 self.dispatch_playback(PlaybackCommand::Play)?;
@@ -3349,6 +3416,12 @@ impl MediaRendererHttpService {
             "Pause" => {
                 require_instance_zero(action)?;
                 ensure_media_loaded(&self.state)?;
+                if !matches!(
+                    self.state.transport_state,
+                    TransportState::Playing | TransportState::PausedPlayback
+                ) {
+                    return Err(SoapFault::new(701, "Transition not available"));
+                }
                 self.dispatch_playback(PlaybackCommand::Pause)?;
                 self.state.transport_state = TransportState::PausedPlayback;
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, ""))
@@ -3363,11 +3436,13 @@ impl MediaRendererHttpService {
             "Seek" => {
                 require_instance_zero(action)?;
                 ensure_media_loaded(&self.state)?;
-                if action.arg("Unit") != Some("REL_TIME") {
-                    return Err(SoapFault::new(710, "Seek mode not supported"));
-                }
                 let target = action.required_arg("Target")?;
-                let position = parse_upnp_time(target)?;
+                let position = match action.required_arg("Unit")? {
+                    "REL_TIME" => parse_upnp_time(target)?,
+                    "TRACK_NR" if target.parse::<u32>().ok() == Some(1) => 0,
+                    "TRACK_NR" => return Err(SoapFault::new(711, "Illegal seek target")),
+                    _ => return Err(SoapFault::new(710, "Seek mode not supported")),
+                };
                 if self
                     .state
                     .duration_seconds
@@ -3384,8 +3459,9 @@ impl MediaRendererHttpService {
             "GetTransportInfo" => {
                 require_instance_zero(action)?;
                 let arguments = format!(
-                    "<CurrentTransportState>{}</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>",
-                    self.state.transport_state.as_upnp()
+                    "<CurrentTransportState>{}</CurrentTransportState><CurrentTransportStatus>{}</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>",
+                    self.state.transport_state.as_upnp(),
+                    self.state.transport_status()
                 );
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, &arguments))
             }
@@ -3397,16 +3473,19 @@ impl MediaRendererHttpService {
                     .map(format_upnp_time)
                     .unwrap_or_else(|| "00:00:00".to_string());
                 let arguments = format!(
-                    "<Track>1</Track><TrackDuration>{duration}</TrackDuration><RelTime>{}</RelTime><AbsTime>NOT_IMPLEMENTED</AbsTime><TrackURI>{}</TrackURI>",
+                    "<Track>{}</Track><TrackDuration>{duration}</TrackDuration><TrackMetaData>{}</TrackMetaData><TrackURI>{}</TrackURI><RelTime>{}</RelTime><AbsTime>{}</AbsTime><RelCount>2147483647</RelCount><AbsCount>2147483647</AbsCount>",
+                    u8::from(!self.state.current_uri.is_empty()),
+                    xml_escape(&self.state.current_uri_metadata),
+                    xml_escape(&self.state.current_uri),
                     format_upnp_time(self.state.position_seconds),
-                    xml_escape(&self.state.current_uri)
+                    format_upnp_time(self.state.position_seconds)
                 );
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, &arguments))
             }
             "GetMediaInfo" => {
                 require_instance_zero(action)?;
                 let arguments = format!(
-                    "<NrTracks>{}</NrTracks><MediaDuration>{}</MediaDuration><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData>",
+                    "<NrTracks>{}</NrTracks><MediaDuration>{}</MediaDuration><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData><NextURI>NOT_IMPLEMENTED</NextURI><NextURIMetaData>NOT_IMPLEMENTED</NextURIMetaData><PlayMedium>{}</PlayMedium><RecordMedium>NOT_IMPLEMENTED</RecordMedium><WriteStatus>NOT_IMPLEMENTED</WriteStatus>",
                     if self.state.current_uri.is_empty() {
                         0
                     } else {
@@ -3417,7 +3496,8 @@ impl MediaRendererHttpService {
                         .map(format_upnp_time)
                         .unwrap_or_else(|| "00:00:00".to_string()),
                     xml_escape(&self.state.current_uri),
-                    xml_escape(&self.state.current_uri_metadata)
+                    xml_escape(&self.state.current_uri_metadata),
+                    self.state.playback_medium()
                 );
                 Ok(soap_response(AVTRANSPORT_SERVICE, &action.name, &arguments))
             }
@@ -3426,7 +3506,22 @@ impl MediaRendererHttpService {
     }
 
     fn invoke_rendering_control(&mut self, action: &SoapAction) -> Result<String, SoapFault> {
+        require_instance_zero(action)?;
         match action.name.as_str() {
+            "ListPresets" => Ok(soap_response(
+                RENDERING_CONTROL_SERVICE,
+                &action.name,
+                "<CurrentPresetNameList>FactoryDefaults</CurrentPresetNameList>",
+            )),
+            "SelectPreset" => {
+                if action.required_arg("PresetName")? != "FactoryDefaults" {
+                    return Err(SoapFault::new(701, "Invalid Name"));
+                }
+                let volume = MediaRendererState::default().volume;
+                self.dispatch_playback(PlaybackCommand::SetVolume { volume })?;
+                self.state.volume = volume;
+                Ok(soap_response(RENDERING_CONTROL_SERVICE, &action.name, ""))
+            }
             "SetVolume" => {
                 require_instance_zero(action)?;
                 if action.arg("Channel") != Some("Master") {
@@ -3478,7 +3573,15 @@ impl MediaRendererHttpService {
                 "<ConnectionIDs>0</ConnectionIDs>",
             )),
             "GetCurrentConnectionInfo" => {
-                let arguments = "<RcsID>0</RcsID><AVTransportID>0</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Output</Direction><Status>OK</Status>";
+                let id = action
+                    .required_arg("ConnectionID")?
+                    .parse::<i32>()
+                    .map_err(|_| SoapFault::new(402, "Invalid Args"))?;
+                if id != 0 {
+                    return Err(SoapFault::new(706, "Invalid connection reference"));
+                }
+                // No PrepareForConnection: static connection 0, no fabricated negotiated codec.
+                let arguments = "<RcsID>0</RcsID><AVTransportID>0</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Input</Direction><Status>Unknown</Status>";
                 Ok(soap_response(
                     CONNECTION_MANAGER_SERVICE,
                     &action.name,
@@ -3528,145 +3631,22 @@ impl SoapFault {
     }
 }
 
-fn parse_soap_action(header: &str, body: &[u8]) -> Result<SoapAction, DlnaError> {
-    let value = header.trim().trim_matches('"');
-    let (service, name) = value
-        .rsplit_once('#')
-        .ok_or(DlnaError::Invalid("SOAPAction"))?;
-    if !matches!(
-        service,
-        AVTRANSPORT_SERVICE | RENDERING_CONTROL_SERVICE | CONNECTION_MANAGER_SERVICE
-    ) || name.is_empty()
-    {
-        return Err(DlnaError::Invalid("SOAPAction"));
-    }
-    validate_field(service, "SOAP service")?;
-    validate_field(name, "SOAP action")?;
-    let body = std::str::from_utf8(body).map_err(|_| DlnaError::Invalid("SOAP UTF-8"))?;
-    if !body.contains("Envelope") || !body.contains("Body") || !body.contains(name) {
-        return Err(DlnaError::Invalid("SOAP envelope"));
-    }
-    let mut args = BTreeMap::new();
-    for arg in [
-        "InstanceID",
-        "CurrentURI",
-        "CurrentURIMetaData",
-        "Speed",
-        "Unit",
-        "Target",
-        "Channel",
-        "DesiredVolume",
-    ] {
-        if let Some(value) = extract_xml_value(body, arg)?
-            && args.insert(arg.to_string(), value).is_some()
-        {
-            return Err(DlnaError::Invalid("duplicate SOAP argument"));
-        }
-    }
-    Ok(SoapAction {
-        service: service.to_string(),
-        name: name.to_string(),
-        args,
-    })
-}
-
-fn extract_xml_value(body: &str, tag: &str) -> Result<Option<String>, DlnaError> {
-    let mut search_from = 0;
-    while let Some(relative) = body[search_from..].find('<') {
-        let start = search_from + relative;
-        let rest = &body[start + 1..];
-        let Some(end) = rest.find('>') else {
-            return Err(DlnaError::Invalid("SOAP XML tag"));
-        };
-        let opening = &rest[..end];
-        let local_name = opening
-            .split_once(':')
-            .map(|(_, local)| local)
-            .unwrap_or(opening)
-            .split_whitespace()
-            .next()
-            .unwrap_or_default();
-        if local_name == tag && !opening.starts_with('/') && !opening.ends_with('/') {
-            let content_start = start + end + 2;
-            let closing_plain = format!("</{tag}>");
-            let closing_prefixed = format!("</u:{tag}>");
-            let (closing_start, closing_len) =
-                if let Some(index) = body[content_start..].find(&closing_plain) {
-                    (content_start + index, closing_plain.len())
-                } else if let Some(index) = body[content_start..].find(&closing_prefixed) {
-                    (content_start + index, closing_prefixed.len())
-                } else {
-                    return Err(DlnaError::Invalid("SOAP XML closing tag"));
-                };
-            let raw = body[content_start..closing_start].trim();
-            if raw.len() > MAX_SOAP_ARGUMENT_BYTES {
-                return Err(DlnaError::TooLarge("SOAP argument"));
-            }
-            if contains_xml_opening(&body[closing_start + closing_len..], tag) {
-                return Err(DlnaError::Invalid("duplicate SOAP argument"));
-            }
-            return Ok(Some(xml_unescape(raw)?));
-        }
-        search_from = start + end + 2;
-    }
-    Ok(None)
-}
-
-fn contains_xml_opening(body: &str, tag: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(relative) = body[search_from..].find('<') {
-        let start = search_from + relative;
-        let rest = &body[start + 1..];
-        let Some(end) = rest.find('>') else {
-            return false;
-        };
-        let opening = &rest[..end];
-        let local_name = opening
-            .split_once(':')
-            .map(|(_, local)| local)
-            .unwrap_or(opening)
-            .split_whitespace()
-            .next()
-            .unwrap_or_default();
-        if local_name == tag && !opening.starts_with('/') && !opening.ends_with('/') {
-            return true;
-        }
-        search_from = start + end + 2;
-    }
-    false
-}
-
-fn xml_unescape(value: &str) -> Result<String, DlnaError> {
-    let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(index) = rest.find('&') {
-        output.push_str(&rest[..index]);
-        let Some(end) = rest[index..].find(';') else {
-            return Err(DlnaError::Invalid("XML entity"));
-        };
-        let entity = &rest[index..=index + end];
-        output.push_str(match entity {
-            "&amp;" => "&",
-            "&lt;" => "<",
-            "&gt;" => ">",
-            "&quot;" => "\"",
-            "&apos;" => "'",
-            _ => return Err(DlnaError::Invalid("XML entity")),
-        });
-        rest = &rest[index + end + 1..];
-    }
-    output.push_str(rest);
-    if output.len() > MAX_SOAP_ARGUMENT_BYTES {
-        return Err(DlnaError::TooLarge("SOAP argument"));
-    }
-    Ok(output)
-}
-
 fn require_instance_zero(action: &SoapAction) -> Result<(), SoapFault> {
-    if action.arg("InstanceID").unwrap_or("0") == "0" {
+    let id = action
+        .required_arg("InstanceID")?
+        .parse::<u32>()
+        .map_err(|_| SoapFault::new(402, "Invalid Args"))?;
+    if id == 0 {
         Ok(())
     } else {
-        Err(SoapFault::new(718, "Invalid InstanceID"))
+        Err(SoapFault::new(
+            if action.service == RENDERING_CONTROL_SERVICE {
+                702
+            } else {
+                718
+            },
+            "Invalid InstanceID",
+        ))
     }
 }
 
@@ -3895,55 +3875,6 @@ fn soap_fault_response(code: u16, description: &str) -> HttpResponse {
         xml_escape(description)
     );
     HttpResponse::xml(500, "Internal Server Error", body)
-}
-
-fn scpd_xml(service: &str) -> String {
-    let (actions, variables): (&[&str], &[(&str, &str, bool)]) = match service {
-        AVTRANSPORT_SERVICE => (
-            &[
-                "SetAVTransportURI",
-                "Play",
-                "Pause",
-                "Stop",
-                "Seek",
-                "GetTransportInfo",
-                "GetPositionInfo",
-                "GetMediaInfo",
-            ],
-            &[
-                ("LastChange", "string", true),
-                ("TransportState", "string", false),
-            ],
-        ),
-        RENDERING_CONTROL_SERVICE => (
-            &["SetVolume", "GetVolume"],
-            &[("LastChange", "string", true), ("Volume", "ui2", false)],
-        ),
-        CONNECTION_MANAGER_SERVICE => (
-            &[
-                "GetProtocolInfo",
-                "GetCurrentConnectionIDs",
-                "GetCurrentConnectionInfo",
-            ],
-            &[
-                ("SourceProtocolInfo", "string", true),
-                ("SinkProtocolInfo", "string", true),
-                ("CurrentConnectionIDs", "string", true),
-            ],
-        ),
-        _ => (&[], &[]),
-    };
-    let mut xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>".to_string();
-    for action in actions {
-        xml.push_str(&format!("<action><name>{action}</name></action>"));
-    }
-    xml.push_str("</actionList><serviceStateTable>");
-    for (name, data_type, evented) in variables {
-        let evented = if *evented { "yes" } else { "no" };
-        xml.push_str(&format!("<stateVariable sendEvents=\"{evented}\"><name>{name}</name><dataType>{data_type}</dataType></stateVariable>"));
-    }
-    xml.push_str("</serviceStateTable></scpd>");
-    xml
 }
 
 fn push_tag(output: &mut String, tag: &str, value: &str) {
@@ -4940,7 +4871,7 @@ mod tests {
             "/upnp/control/avtransport",
             AVTRANSPORT_SERVICE,
             "SetAVTransportURI",
-            "<InstanceID>0</InstanceID><CurrentURI>https://media.example/video.mp4</CurrentURI>",
+            "<InstanceID>0</InstanceID><CurrentURI>https://media.example/video.mp4</CurrentURI><CurrentURIMetaData/>",
         );
         assert_eq!(service.handle(&set_uri).status, 200);
         let mutation = service.drain_events();
@@ -5482,7 +5413,7 @@ mod tests {
             "/upnp/control/avtransport",
             AVTRANSPORT_SERVICE,
             "SetAVTransportURI",
-            "<InstanceID>0</InstanceID><CurrentURI>https://media.example/video.mp4</CurrentURI>",
+            "<InstanceID>0</InstanceID><CurrentURI>https://media.example/video.mp4</CurrentURI><CurrentURIMetaData/>",
         );
         assert_eq!(service.handle(&set_uri).status, 200);
         let seek = soap_request(

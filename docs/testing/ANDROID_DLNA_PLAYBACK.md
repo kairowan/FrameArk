@@ -18,7 +18,10 @@
 NAS/公网服务器托管的 URL，也不跟随重定向。Android HTTPS、图片、字幕和播放列表
 尚未接入。MP3 是允许尝试的 MIME 类型，尚无真实 MP3 解码证据；具体容器内编解码器
 是否可用由系统决定。失败会清空本次媒体状态，需要停止并重新启用以恢复输出后端。
-完整 SCPD/控制端兼容仍待补齐；找不到设备或控制失败请如实反馈，不算测试通过。
+SCPD 已补齐单曲 v1 服务的完整参数/状态变量，但控制端矩阵仍待实测。
+支持 FactoryDefaults 恢复音量 50、TRACK_NR=1 回到起点；Next/Previous 在单曲边界报错。
+替换正在播放的资源会自动播放新资源。所有必需参数须显式传入，包括空元数据元素。
+找不到设备或控制失败请如实反馈，不算测试通过。详见[服务契约](../adr/0132-dlna-service-contracts.md)。
 
 多网卡、其他应用占用 UDP 1900、访客网络/AP 隔离、VPN 和路由器禁止组播都可能导致
 发现失败。此版本不会自动修改防火墙、后台重启或切换到其他接口。
@@ -38,6 +41,7 @@ Always specify the exact authorized serial. These are not distribution APKs.
 The test creates original synthetic H.264 MP4/PCM WAV at runtime; no external
 media, copied fixture or third-party decoder is included. It asserts real TextureView
 pixels, control responses, actual player progress, source replacement/EOS and source
-adapter bounds. A separate case starts the normal private-IPv4 foreground service
+adapter bounds, FactoryDefaults output volume, TRACK_NR and replacement auto-resume.
+A separate case starts the normal private-IPv4 foreground service
 and verifies page-close teardown. Loopback bypass exists only in probe-feature native
 builds; normal APKs cannot start it. See [evidence](../evidence/2026-10-15-dlna-playback/README.md).

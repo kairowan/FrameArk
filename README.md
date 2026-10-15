@@ -27,6 +27,10 @@ Receiver 新增[实验性 DLNA 播放入口](docs/testing/ANDROID_DLNA_PLAYBACK.
 局域网后，可接收控制端自身提供、支持 HTTP Range 的 MP4/MP3/WAV。没有 PIN 认证，
 离开页面即停止；第三方媒体主机、HTTPS、图片、字幕和完整控制端兼容矩阵尚未交付。
 
+三项 DLNA v1 服务现有完整参数/状态变量描述及 19 项动作（单曲模式）：
+支持恢复默认音量、按曲目回到起点及完整媒体查询。必需参数必须显式传入；
+Next/Previous 超出单曲范围会报错，不代表已有播放列表。见[服务契约](docs/adr/0132-dlna-service-contracts.md)。
+
 Sender 支持前台扫描并选择局域网接收器（Experimental，仅本地 IPv4），
 也保留手动连接。发现广播未经认证，选择后仍须核对 Receiver 上的完整 TLS
 指纹并输入 PIN；不会自动信任或连接。详见[发现边界](docs/adr/0124-android-sender-discovery.md)。

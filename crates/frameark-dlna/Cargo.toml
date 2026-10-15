@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 ring.workspace = true
+roxmltree.workspace = true
 rustls = { workspace = true, features = ["std"] }
 
 [dev-dependencies]

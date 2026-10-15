@@ -40,6 +40,7 @@ enum Seen {
 struct Probe {
     accepted: Vec<Seen>,
     reject_next: Option<PlaybackBackendError>,
+    reject_play: Option<PlaybackBackendError>,
     shutdowns: usize,
     feedback: Option<PlaybackFeedback>,
 }
@@ -53,6 +54,11 @@ impl MediaPlaybackBackend for Backend {
     fn apply(&mut self, command: PlaybackCommand<'_>) -> Result<(), PlaybackBackendError> {
         let mut probe = self.0.lock().unwrap();
         if let Some(error) = probe.reject_next.take() {
+            return Err(error);
+        }
+        if matches!(command, PlaybackCommand::Play)
+            && let Some(error) = probe.reject_play.take()
+        {
             return Err(error);
         }
         probe.accepted.push(match command {
@@ -171,18 +177,148 @@ fn bound() -> (MediaRendererHttpService, Arc<Mutex<Probe>>) {
     (service, probe)
 }
 
+#[test]
+fn replacement_preserves_transport_and_failed_resume_invalidates_new_output() {
+    for state in [
+        TransportState::Stopped,
+        TransportState::Playing,
+        TransportState::PausedPlayback,
+    ] {
+        let (mut service, probe) = bound();
+        assert_eq!(service.handle(&load()).status, 200);
+        if state != TransportState::Stopped {
+            assert_eq!(
+                service.handle(&action("Play", "<Speed>1</Speed>")).status,
+                200
+            );
+        }
+        if state == TransportState::PausedPlayback {
+            assert_eq!(service.handle(&action("Pause", "")).status, 200);
+        }
+        assert_eq!(service.handle(&load()).status, 200);
+        assert_eq!(service.state().transport_state, state);
+        if state == TransportState::Playing {
+            assert_eq!(probe.lock().unwrap().accepted.last(), Some(&Seen::Play));
+        }
+    }
+    for error in [PlaybackBackendError::Rejected, PlaybackBackendError::Failed] {
+        let (mut service, probe) = bound();
+        service.handle(&load());
+        service.handle(&action("Play", "<Speed>1</Speed>"));
+        subscribe(&mut service, "/upnp/event/avtransport");
+        probe.lock().unwrap().reject_play = Some(error);
+        assert_fault(service.handle(&load()), 501);
+        assert!(service.state().current_uri.is_empty());
+        assert!(service.state().transport_error);
+        assert_eq!(service.playback_report().fatal_failures, 1);
+        assert_eq!(probe.lock().unwrap().shutdowns, 1);
+        let events = service.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].body.contains("ERROR_OCCURRED"));
+    }
+}
+
 fn action(name: &str, args: &str) -> HttpRequest {
-    let (path, service) = if name.ends_with("Volume") {
-        ("/upnp/control/renderingcontrol", RENDERING_CONTROL_SERVICE)
-    } else {
-        ("/upnp/control/avtransport", AVTRANSPORT_SERVICE)
-    };
+    let (path, service) =
+        if name.ends_with("Volume") || name.ends_with("Preset") || name == "ListPresets" {
+            ("/upnp/control/renderingcontrol", RENDERING_CONTROL_SERVICE)
+        } else {
+            ("/upnp/control/avtransport", AVTRANSPORT_SERVICE)
+        };
     soap_request(
         path,
         service,
         name,
         &format!("<InstanceID>0</InstanceID>{args}"),
     )
+}
+
+#[test]
+fn mandatory_presets_and_track_seek_are_output_acknowledged() {
+    let preset = action("SelectPreset", "<PresetName>FactoryDefaults</PresetName>");
+    let seek = action("Seek", "<Unit>TRACK_NR</Unit><Target>1</Target>");
+    let mut unbound = MediaRendererHttpService::new(renderer_description()).unwrap();
+    assert_fault(unbound.handle(&preset), 501);
+    let (mut service, probe) = bound();
+    assert_eq!(service.handle(&load()).status, 200);
+    assert_eq!(
+        service
+            .handle(&action(
+                "SetVolume",
+                "<Channel>Master</Channel><DesiredVolume>27</DesiredVolume>"
+            ))
+            .status,
+        200
+    );
+    assert_eq!(
+        service
+            .handle(&action(
+                "Seek",
+                "<Unit>REL_TIME</Unit><Target>00:00:19</Target>"
+            ))
+            .status,
+        200
+    );
+    subscribe(&mut service, "/upnp/event/avtransport");
+    subscribe(&mut service, "/upnp/event/renderingcontrol");
+    let before = service.state().clone();
+    for request in [&preset, &seek] {
+        for error in [
+            PlaybackBackendError::Rejected,
+            PlaybackBackendError::Unsupported,
+            PlaybackBackendError::Unavailable,
+        ] {
+            probe.lock().unwrap().reject_next = Some(error);
+            assert_fault(service.handle(request), 501);
+            assert_eq!(service.state(), &before);
+            assert!(service.drain_events().is_empty());
+        }
+    }
+    for name in ["Next", "Previous"] {
+        assert_fault(service.handle(&action(name, "")), 711);
+    }
+    for target in ["0", "2", "4294967296", "-1", "text"] {
+        assert_fault(
+            service.handle(&action(
+                "Seek",
+                &format!("<Unit>TRACK_NR</Unit><Target>{target}</Target>"),
+            )),
+            711,
+        );
+    }
+    assert_eq!(probe.lock().unwrap().accepted.len(), 3);
+    assert_eq!(service.state(), &before);
+    assert_eq!(service.handle(&preset).status, 200);
+    assert_eq!(service.state().volume, 50);
+    let event = service.drain_events().remove(0);
+    assert_eq!(event.service_type, RENDERING_CONTROL_SERVICE);
+    assert!(event.body.contains("FactoryDefaults"));
+    assert!(event.body.contains("val=&quot;50&quot;"));
+    assert_eq!(service.handle(&seek).status, 200);
+    assert_eq!(service.state().position_seconds, 0);
+    assert_eq!(
+        service.drain_events().remove(0).service_type,
+        AVTRANSPORT_SERVICE
+    );
+    assert_eq!(
+        probe.lock().unwrap().accepted[3..],
+        [Seen::Volume(50), Seen::Seek(0)]
+    );
+    probe.lock().unwrap().feedback = Some(PlaybackFeedback::Failed);
+    service.poll_output();
+    let info = service.handle(&action("GetTransportInfo", ""));
+    assert!(
+        String::from_utf8(info.body)
+            .unwrap()
+            .contains("<CurrentTransportStatus>ERROR_OCCURRED</CurrentTransportStatus>")
+    );
+    assert!(
+        service
+            .drain_events()
+            .remove(0)
+            .body
+            .contains("ERROR_OCCURRED")
+    );
 }
 
 fn load() -> HttpRequest {
@@ -306,7 +442,10 @@ fn every_nonfatal_rejection_preserves_state_and_gena_sequence() {
         for request in mutations() {
             let (mut service, probe) = bound();
             assert_eq!(service.handle(&load()).status, 200);
-            assert_eq!(service.handle(&action("Play", "")).status, 200);
+            assert_eq!(
+                service.handle(&action("Play", "<Speed>1</Speed>")).status,
+                200
+            );
             subscribe(&mut service, "/upnp/event/avtransport");
             subscribe(&mut service, "/upnp/event/renderingcontrol");
             let before = service.state().clone();
@@ -403,15 +542,25 @@ fn fatal_failure_clears_media_detaches_backend_and_events_only_terminal_state() 
     for request in mutations() {
         let (mut service, probe) = bound();
         assert_eq!(service.handle(&load()).status, 200);
-        assert_eq!(service.handle(&action("Play", "")).status, 200);
+        assert_eq!(
+            service.handle(&action("Play", "<Speed>1</Speed>")).status,
+            200
+        );
         subscribe(&mut service, "/upnp/event/avtransport");
         subscribe(&mut service, "/upnp/event/renderingcontrol");
         probe.lock().unwrap().reject_next = Some(PlaybackBackendError::Failed);
         assert_fault(service.handle(&request), 501);
-        assert_eq!(service.state(), &MediaRendererState::default());
+        assert_eq!(
+            service.state(),
+            &MediaRendererState {
+                transport_error: true,
+                ..MediaRendererState::default()
+            }
+        );
         let events = service.drain_events();
         assert_eq!(events.len(), 1);
         assert!(events[0].body.contains("NO_MEDIA_PRESENT"));
+        assert!(events[0].body.contains("ERROR_OCCURRED"));
         assert!(!events[0].body.contains("token=fixture"));
         assert_eq!(service.playback_report().fatal_failures, 1);
         assert_eq!(
@@ -419,6 +568,7 @@ fn fatal_failure_clears_media_detaches_backend_and_events_only_terminal_state() 
             Some(PlaybackBackendError::Failed)
         );
         assert_fault(service.handle(&load()), 501);
+        assert!(service.state().transport_error);
         assert_eq!(
             service.playback_report().last_error,
             Some(PlaybackBackendError::Unavailable)
@@ -531,7 +681,7 @@ fn real_tcp_dispatches_output_commands_and_returns_backend_rejection() {
         assert_eq!(exchange(request).status, 200);
     }
     probe.lock().unwrap().reject_next = Some(PlaybackBackendError::Unsupported);
-    assert_fault(exchange(action("Play", "")), 501);
+    assert_fault(exchange(action("Play", "<Speed>1</Speed>")), 501);
     let response = exchange(action("GetTransportInfo", ""));
     assert!(
         String::from_utf8(response.body)

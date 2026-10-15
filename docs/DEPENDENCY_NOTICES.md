@@ -2,6 +2,11 @@
 
 ## Coverage and evidence
 
+DLNA SOAP uses roxmltree 0.21.1 (MIT OR Apache-2.0, MIT selected). Its original
+archive includes both license bodies; the existing locked-crate verification and
+notice collector include them without a supplement. No new transitive package
+or copied UPnP service-template XML is introduced. See [ADR 0132](adr/0132-dlna-service-contracts.md).
+
 The release workflow resolves both applications' `releaseRuntimeClasspath` via
 Gradle's artifact API, recording coordinates and actual JAR hashes. It does not
 scan the whole Gradle cache or treat a POM-only list as the resolved runtime.

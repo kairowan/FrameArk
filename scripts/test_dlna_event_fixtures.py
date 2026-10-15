@@ -26,9 +26,11 @@ class DlnaEventFixtures(unittest.TestCase):
         self.assertEqual(len(inner), 1)
         self.assertEqual(inner[0].tag, rcs + "InstanceID")
         self.assertEqual(inner[0].attrib, {"val": "0"})
-        self.assertEqual(len(inner[0]), 1)
-        self.assertEqual(inner[0][0].tag, rcs + "Volume")
-        self.assertEqual(inner[0][0].attrib, {"channel": "Master", "val": "73"})
+        self.assertEqual(len(inner[0]), 2)
+        self.assertEqual(inner[0][0].tag, rcs + "PresetNameList")
+        self.assertEqual(inner[0][0].attrib, {"val": "FactoryDefaults"})
+        self.assertEqual(inner[0][1].tag, rcs + "Volume")
+        self.assertEqual(inner[0][1].attrib, {"channel": "Master", "val": "73"})
 
 
 if __name__ == "__main__":

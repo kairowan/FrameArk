@@ -486,7 +486,10 @@ fn metadata_limits_reject_before_output_and_accept_xml_whitespace() {
     );
     assert_eq!(service.handle(&action).status, 200);
     assert_eq!(service.playback_report().attempted, 1);
-    assert_eq!(service.state.current_uri_metadata, metadata);
+    assert_eq!(
+        service.state.current_uri_metadata,
+        metadata.replace('\r', "\n")
+    );
     accepted_sid(&mut service, "/upnp/event/avtransport");
     assert_eq!(service.drain_events().len(), 1);
 }
