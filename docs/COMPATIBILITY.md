@@ -24,8 +24,9 @@ key attestation/hardware-security guarantees and automatic enrollment are absent
 DLNA's pre-alpha Rust API now requires `with_backend` for output mutations;
 `new` is unbound and fails valid mutation commands with SOAP 501. `state_mut`
 has been removed. Output acceptance, failure cleanup and TCP dispatch have
-instrumented-backend coverage, not actual decoding or controller compatibility.
-Asynchronous progress and Android output are absent.
+instrumented-backend coverage. The new opt-in Android host additionally has
+real MediaPlayer/pixel/position/EOS coverage on one isolated API 34 emulator,
+not named-controller or physical-device compatibility.
 See [ADR 0129](adr/0129-dlna-playback-dispatch.md). DLNA remains Experimental.
 
 GENA now uses advertised event URLs, service-scoped UUID SIDs, initial SEQ 0,
@@ -33,8 +34,20 @@ unsigned sequence wrap and bounded coalesced LastChange snapshots for InstanceID
 0 / Master volume. Decoded URI metadata is limited to 4 KiB. Initial snapshots
 remain pending after unsubscribe; callbacks require host authorization and
 response-close ordering. `set_capabilities` now returns a validation Result and
-emits ConnectionManager updates. Complete SCPD declarations, timed delivery and
-named-controller validation are still open; see [ADR 0130](adr/0130-dlna-controller-eventing.md).
+emits ConnectionManager updates. The Android host now schedules literal-peer
+callbacks and reconciles decoder feedback. Complete SCPD declarations and
+named-controller validation remain open; see [ADR 0130](adr/0130-dlna-controller-eventing.md)
+and [Android host ADR](adr/0131-android-dlna-player.md).
+
+Android DLNA's current profile is foreground-only, private IPv4, explicit consent,
+no PIN and one player mutually exclusive with FANP. Sources must be served by the
+controller itself over HTTP with exact Range support and known length. MP4, MP3,
+WAV MIME types are allowed, but only original H.264 MP4 and PCM WAV have OS playback
+evidence; MP3, codec variants, physical output and multivendor controllers remain
+unverified. HTTPS, third-party origin approval, images, subtitles, playlists and
+two-hour stability are not delivered. Core HTTPS source fixtures do not imply
+Android HTTPS support. See [test guide](testing/ANDROID_DLNA_PLAYBACK.md) and
+[evidence](evidence/2026-10-15-dlna-playback/README.md).
 
 Android Sender discovery is Experimental: foreground mDNS `boot=cert1` hints,
 bounded local-IPv4 candidates, explicit full TLS fingerprint comparison and PIN.

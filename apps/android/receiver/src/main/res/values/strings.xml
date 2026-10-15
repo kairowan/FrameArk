@@ -54,4 +54,17 @@
     <string name="trust_revoke">Revoke trusted device ID</string>
     <string name="trust_applied">Trust change saved</string>
     <string name="trust_rejected">Trust change rejected or persistence unavailable</string>
+    <string name="dlna_title">Experimental DLNA receiver</string>
+    <string name="dlna_notification">DLNA is enabled on the selected trusted LAN</string>
+    <string name="dlna_native_unavailable">Matching Rust library unavailable</string>
+    <string name="dlna_failed">DLNA could not start (%1$d). Stop the Native receiver first and check the selected LAN.</string>
+    <string name="dlna_stopped">DLNA stopped</string>
+    <string name="dlna_ready">Renderer description: %1$s</string>
+    <string name="dlna_warning">Experimental: trusted LAN only, without PIN authentication. Any LAN controller can change playback. This preview accepts HTTP Range MP4, MP3 and WAV served by the controller itself; HTTPS, other media hosts, images and subtitles are not enabled yet. Stop the Native receiver first. Leaving this screen stops DLNA.</string>
+    <string name="dlna_start">Enable DLNA</string>
+    <string name="dlna_summary">Experimental DLNA: no PIN. Use only a trusted LAN. Leaving this screen stops playback.</string>
+    <string name="dlna_diagnostics">Diagnostics</string>
+    <string name="dlna_stop">Stop DLNA</string>
+    <string name="dlna_no_network">No private IPv4 network is available</string>
+    <string name="dlna_select_network">Choose the trusted LAN address</string>
 </resources>

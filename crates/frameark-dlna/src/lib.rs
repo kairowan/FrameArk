@@ -8,9 +8,15 @@
 
 mod eventing;
 mod playback;
+mod remote_source;
+#[cfg(test)]
+mod source_tests;
+
+pub use remote_source::{MAX_SOURCE_READ_BYTES, RemoteMediaSource, RemoteSourceReport};
 
 pub use playback::{
     MediaPlaybackBackend, PlaybackBackendError, PlaybackCommand, PlaybackDispatchReport,
+    PlaybackFeedback,
 };
 
 #[cfg(test)]
@@ -671,6 +677,7 @@ impl SsdpAdvertisement {
 
     fn notify(&self, alive: bool) -> SsdpMessage {
         let mut headers = BTreeMap::new();
+        headers.insert("host".to_string(), SSDP_MULTICAST_ADDR.to_string());
         headers.insert(
             "cache-control".to_string(),
             format!("max-age={}", self.max_age_seconds),
@@ -695,6 +702,7 @@ impl SsdpAdvertisement {
 
     fn response(&self) -> SsdpMessage {
         let mut headers = BTreeMap::new();
+        headers.insert("ext".to_string(), String::new());
         headers.insert(
             "cache-control".to_string(),
             format!("max-age={}", self.max_age_seconds),
@@ -846,7 +854,7 @@ impl SsdpMessage {
             }
             let name = name.to_ascii_lowercase();
             let value = value.trim();
-            if value.is_empty() {
+            if value.is_empty() && name != "ext" {
                 return Err(DlnaError::Invalid("SSDP header value"));
             }
             if value.len() > MAX_FIELD_BYTES || headers.insert(name, value.to_string()).is_some() {
@@ -891,7 +899,9 @@ impl SsdpMessage {
         output.extend_from_slice(b"\r\n");
         for (name, value) in &self.headers {
             validate_field(name, "SSDP header name")?;
-            validate_field(value, "SSDP header value")?;
+            if name != "ext" || !value.is_empty() {
+                validate_field(value, "SSDP header value")?;
+            }
             output.extend_from_slice(name.as_bytes());
             output.extend_from_slice(b": ");
             output.extend_from_slice(value.as_bytes());
@@ -986,6 +996,11 @@ impl DeviceDescription {
         }
         let mut xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>".to_owned()
             + "<root xmlns=\"urn:schemas-upnp-org:device-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><device>";
+        push_tag(
+            &mut xml,
+            "deviceType",
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+        );
         push_tag(&mut xml, "friendlyName", &self.friendly_name);
         push_tag(&mut xml, "manufacturer", &self.manufacturer);
         push_tag(&mut xml, "modelName", &self.model_name);
@@ -1522,7 +1537,7 @@ pub struct GenaCallbackClient {
 impl GenaCallbackClient {
     /// Creates a client with one connect/read/write timeout for each callback.
     pub fn new(timeout: Duration) -> Result<Self, DlnaError> {
-        if timeout.is_zero() {
+        if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
             return Err(DlnaError::Invalid("GENA callback timeout"));
         }
         Ok(Self { timeout })
@@ -1539,13 +1554,16 @@ impl GenaCallbackClient {
         }
         let (authority, _) = callback_authority_and_target(&event.callback_url)?;
         let address = callback_socket_address(&authority)?;
+        let deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or(DlnaError::Invalid("GENA callback timeout"))?;
         send_gena_callback_with_connector(event, self.timeout, |_scheme, _authority, timeout| {
             let stream = connect_callback(address, timeout)?;
             stream
                 .set_read_timeout(Some(timeout))
                 .and_then(|_| stream.set_write_timeout(Some(timeout)))
                 .map_err(|error| DlnaError::Io(error.kind()))?;
-            Ok(stream)
+            Ok(DeadlineSocket { stream, deadline })
         })
     }
 }
@@ -2297,7 +2315,10 @@ pub struct MediaRendererTcpServer {
     listener: TcpListener,
     service: MediaRendererHttpService,
     read_timeout: Duration,
+    request_filter: Option<Box<RequestFilter>>,
 }
+
+type RequestFilter = dyn FnMut(SocketAddr, &HttpRequest) -> bool + Send;
 
 impl MediaRendererTcpServer {
     /// Binds a listener and rejects a zero read timeout before accepting work.
@@ -2306,7 +2327,7 @@ impl MediaRendererTcpServer {
         service: MediaRendererHttpService,
         read_timeout: Duration,
     ) -> Result<Self, DlnaError> {
-        if read_timeout.is_zero() {
+        if read_timeout.is_zero() || Instant::now().checked_add(read_timeout).is_none() {
             return Err(DlnaError::Invalid("HTTP read timeout"));
         }
         let listener = TcpListener::bind(address).map_err(|error| DlnaError::Io(error.kind()))?;
@@ -2314,7 +2335,17 @@ impl MediaRendererTcpServer {
             listener,
             service,
             read_timeout,
+            request_filter: None,
         })
+    }
+
+    /// Installs a host-owned peer/request gate, before resources or SOAP dispatch.
+    /// Rejected requests receive 403 and never reach the service/backend.
+    pub fn set_request_filter(
+        &mut self,
+        filter: impl FnMut(SocketAddr, &HttpRequest) -> bool + Send + 'static,
+    ) {
+        self.request_filter = Some(Box::new(filter));
     }
 
     /// Returns the OS-assigned listener address, including an ephemeral port.
@@ -2369,15 +2400,40 @@ impl MediaRendererTcpServer {
         stream
             .set_write_timeout(Some(timeout))
             .map_err(|error| DlnaError::Io(error.kind()))?;
-        let request = read_http_request(stream)?;
+        let request = read_http_request(&mut DeadlineSocket {
+            stream: stream
+                .try_clone()
+                .map_err(|error| DlnaError::Io(error.kind()))?,
+            deadline: Instant::now()
+                .checked_add(timeout)
+                .ok_or(DlnaError::Invalid("HTTP read timeout"))?,
+        })?;
+        if self
+            .request_filter
+            .as_mut()
+            .is_some_and(|filter| !filter(peer, &request))
+        {
+            stream
+                .write_all(&HttpResponse::empty(403, "Forbidden").encode()?)
+                .map_err(|error| DlnaError::Io(error.kind()))?;
+            return Ok(peer);
+        }
         if self.service.stream_file_response(&request, stream)? {
             return Ok(peer);
         }
         let response = self.service.handle(&request);
         let delivered = response.encode().and_then(|encoded| {
-            stream
+            let mut response_stream = DeadlineSocket {
+                stream: stream
+                    .try_clone()
+                    .map_err(|error| DlnaError::Io(error.kind()))?,
+                deadline: Instant::now()
+                    .checked_add(timeout)
+                    .ok_or(DlnaError::Invalid("HTTP write timeout"))?,
+            };
+            response_stream
                 .write_all(&encoded)
-                .and_then(|_| stream.flush())
+                .and_then(|_| response_stream.flush())
                 .map_err(|error| DlnaError::Io(error.kind()))
         });
         if delivered.is_err()
@@ -2429,11 +2485,11 @@ impl MediaRendererTcpServer {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
                     served += 1;
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let timeout = self.read_timeout.min(remaining);
-                    if timeout.is_zero() {
-                        break Ok(served);
-                    }
+                    // The scheduling window bounds admission, not the time a
+                    // newly accepted client gets to send its request. Otherwise
+                    // arriving near the window edge gets an arbitrary ~0 ms
+                    // timeout and valid split requests fail nondeterministically.
+                    let timeout = self.read_timeout;
                     let mut stream = stream;
                     let _ = self.serve_connection_with_timeout(&mut stream, peer, timeout);
                 }
@@ -2502,7 +2558,41 @@ fn write_file_headers(
         .map_err(|error| DlnaError::Io(error.kind()))
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, DlnaError> {
+/// One total I/O deadline; bytes arriving just before each timeout cannot renew it.
+struct DeadlineSocket {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineSocket {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|value| !value.is_zero())
+            .ok_or_else(|| std::io::ErrorKind::TimedOut.into())
+    }
+}
+impl Read for DeadlineSocket {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        let read = self.stream.read(buffer)?;
+        self.remaining()?;
+        Ok(read)
+    }
+}
+impl Write for DeadlineSocket {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        let written = self.stream.write(buffer)?;
+        self.remaining()?;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn read_http_request<R: Read>(stream: &mut R) -> Result<HttpRequest, DlnaError> {
     let mut bytes = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     loop {
@@ -2672,9 +2762,9 @@ impl MediaRendererHttpService {
         }
     }
 
-    /// Returns the acknowledged command state, not a live decoder position.
-    /// Duration currently comes from metadata; asynchronous decoder feedback
-    /// and progress reconciliation are not supplied by this control boundary.
+    /// Returns acknowledged command state and the last accepted output feedback.
+    /// Hosts must call `poll_output` regularly; `handle` also polls before each
+    /// request. Without backend feedback, duration comes only from metadata.
     pub fn state(&self) -> &MediaRendererState {
         &self.state
     }
@@ -2701,21 +2791,60 @@ impl MediaRendererHttpService {
             Err(error) => {
                 self.playback_report.last_error = Some(error);
                 if error == PlaybackBackendError::Failed {
-                    self.playback_report.fatal_failures =
-                        self.playback_report.fatal_failures.saturating_add(1);
-                    if let Some(mut backend) = self.playback.take() {
-                        backend.shutdown();
-                    }
-                    self.state = MediaRendererState {
-                        volume: self.state.volume,
-                        ..MediaRendererState::default()
-                    };
-                    self.queue_state_event(AVTRANSPORT_SERVICE);
+                    self.fail_output();
                 } else {
                     self.playback_report.rejected = self.playback_report.rejected.saturating_add(1);
                 }
                 Err(SoapFault::new(501, "Action Failed"))
             }
+        }
+    }
+
+    fn fail_output(&mut self) {
+        self.playback_report.last_error = Some(PlaybackBackendError::Failed);
+        self.playback_report.fatal_failures = self.playback_report.fatal_failures.saturating_add(1);
+        if let Some(mut backend) = self.playback.take() {
+            backend.shutdown();
+        }
+        self.state = MediaRendererState {
+            volume: self.state.volume,
+            ..MediaRendererState::default()
+        };
+        self.queue_state_event(AVTRANSPORT_SERVICE);
+    }
+
+    /// Reconciles one nonblocking, generation-filtered observation from the host.
+    /// Position-only changes do not produce LastChange notifications.
+    pub fn poll_output(&mut self) {
+        let feedback = self
+            .playback
+            .as_mut()
+            .and_then(|backend| backend.feedback());
+        match feedback {
+            Some(PlaybackFeedback::Failed) => self.fail_output(),
+            Some(PlaybackFeedback::Progress {
+                position_seconds,
+                duration_seconds,
+            }) if !self.state.current_uri.is_empty() => {
+                if duration_seconds.is_some_and(|duration| position_seconds > duration) {
+                    self.fail_output();
+                    return;
+                }
+                let changed = self.state.duration_seconds != duration_seconds;
+                self.state.position_seconds = position_seconds;
+                self.state.duration_seconds = duration_seconds;
+                if changed {
+                    self.queue_state_event(AVTRANSPORT_SERVICE);
+                }
+            }
+            Some(PlaybackFeedback::Ended) if !self.state.current_uri.is_empty() => {
+                self.state.transport_state = TransportState::Stopped;
+                if let Some(duration) = self.state.duration_seconds {
+                    self.state.position_seconds = duration;
+                }
+                self.queue_state_event(AVTRANSPORT_SERVICE);
+            }
+            _ => {}
         }
     }
 
@@ -2772,6 +2901,22 @@ impl MediaRendererHttpService {
     pub fn drain_events(&mut self) -> Vec<GenaEvent> {
         self.expire_subscriptions();
         std::mem::take(&mut self.pending_events)
+    }
+
+    /// Revalidates an already-drained notification immediately before delivery.
+    /// UDA initial snapshots remain eligible after unsubscribe; host destination
+    /// authorization/revocation policy is still required for every notification.
+    pub fn event_is_deliverable(&mut self, event: &GenaEvent) -> bool {
+        self.expire_subscriptions();
+        event.sequence == 0
+            || self
+                .gena
+                .subscriptions
+                .get(&event.sid)
+                .is_some_and(|subscription| {
+                    subscription.service_type == event.service_type
+                        && subscription.callback_url == event.callback_url
+                })
     }
 
     /// Reaps expired leases and pending events. May be called by a host timer.
@@ -2879,6 +3024,7 @@ impl MediaRendererHttpService {
 
     /// Applies one parsed request and returns an HTTP response.
     pub fn handle(&mut self, request: &HttpRequest) -> HttpResponse {
+        self.poll_output();
         self.expire_subscriptions();
         let path = request.target.split('?').next().unwrap_or(&request.target);
         match request.method.as_str() {
@@ -3851,6 +3997,15 @@ fn validate_callback_url(callback_url: &str) -> Result<(), DlnaError> {
         .ok_or(DlnaError::Invalid("GENA callback URL"))?;
     validate_media_uri(&format!("{}://{rest}", scheme.to_ascii_lowercase()))
         .map_err(|_| DlnaError::Invalid("GENA callback URL"))
+}
+
+/// Returns a validated literal callback address without performing DNS.
+/// Hosts may use this to bind a callback to the controller's transport peer.
+pub fn callback_literal_address(callback_url: &str) -> Result<IpAddr, DlnaError> {
+    validate_callback_url(callback_url)?;
+    media_uri_host(callback_url)?
+        .parse()
+        .map_err(|_| DlnaError::Invalid("callback requires literal address"))
 }
 
 fn callback_authority_and_target(callback_url: &str) -> Result<(String, String), DlnaError> {

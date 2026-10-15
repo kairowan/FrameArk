@@ -54,4 +54,17 @@
     <string name="trust_revoke">撤销此设备 ID 的信任</string>
     <string name="trust_applied">信任更改已保存</string>
     <string name="trust_rejected">信任更改被拒绝，或无法保存</string>
+    <string name="dlna_title">实验性 DLNA 接收器</string>
+    <string name="dlna_notification">已在选定的可信局域网启用 DLNA</string>
+    <string name="dlna_native_unavailable">缺少匹配的 Rust 动态库</string>
+    <string name="dlna_failed">DLNA 启动失败（%1$d）。请先停止 Native 接收器，并检查所选局域网。</string>
+    <string name="dlna_stopped">DLNA 已停止</string>
+    <string name="dlna_ready">接收器描述地址：%1$s</string>
+    <string name="dlna_warning">实验性功能：仅用于可信局域网，不使用 PIN 认证。局域网内的控制端都能改变播放。本预览仅接收控制端自身提供、支持 HTTP Range 的 MP4、MP3 和 WAV；尚未启用 HTTPS、其他媒体主机、图片和字幕。请先停止 Native 接收器。离开本页面会停止 DLNA。</string>
+    <string name="dlna_start">启用 DLNA</string>
+    <string name="dlna_summary">实验性 DLNA：无 PIN 认证，仅用于可信局域网。离开本页面会停止播放。</string>
+    <string name="dlna_diagnostics">诊断信息</string>
+    <string name="dlna_stop">停止 DLNA</string>
+    <string name="dlna_no_network">未找到私有 IPv4 网络</string>
+    <string name="dlna_select_network">选择可信局域网地址</string>
 </resources>
