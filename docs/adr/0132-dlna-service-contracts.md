@@ -58,6 +58,11 @@ locked package, no extra transitive packages. Cargo archive verification and not
 generation include its upstream license texts. The parser has no entity resolver;
 DTDs are rejected, including empty DTDs. Input remains <=16 KiB, <=128 XML nodes,
 flat scalar arguments and existing per-argument/4 KiB decoded-metadata bounds.
+A nonrecursive lexical depth pass runs before DOM parsing, allowing only four
+element levels and recognizing comments, CDATA, processing instructions and quoted
+attributes. XML correctness is still validated by roxmltree. This is necessary
+because the initial node-only bound failed the macOS small-stack regression;
+increasing the worker stack or skipping that test is not the fix.
 Only one correctly namespaced Envelope/Body/action is accepted; body action must
 match SOAPAction and the service route. Nonempty SOAP headers, nested arguments,
 foreign argument namespaces and unsupported arguments are rejected. This is a

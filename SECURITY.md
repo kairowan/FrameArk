@@ -19,7 +19,9 @@ The project aims to acknowledge complete reports within 72 hours and provide an 
 ## DLNA output boundary
 
 SOAP parsing uses locked roxmltree with no entity resolver, DTD rejection,
-a 16 KiB body/128-node budget and scalar-only arguments. Envelope, service and
+a 16 KiB body/128-node budget and scalar-only arguments. A nonrecursive lexical
+pass rejects nesting beyond four levels before DOM parsing; node count alone
+is not a parser stack bound. Envelope, service and
 action namespaces must match; required inputs are explicit and duplicates,
 unknown inputs and malformed IDs fail before dispatch. These are bounded
 protocol checks, not sender authentication. Media fetch/callback authorization
