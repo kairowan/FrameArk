@@ -4,6 +4,71 @@ use super::*;
 
 const ENVELOPE: &str = "http://schemas.xmlsoap.org/soap/envelope/";
 
+// Check lexical nesting without recursion BEFORE the DOM parser. A node count
+// alone does not bound the parser's call stack on small-stack platform workers.
+// SOAP here is Envelope / Body / action / scalar argument: at most four levels.
+// This scanner only supplies a resource limit; roxmltree still validates XML.
+fn check_depth(text: &str) -> Result<(), DlnaError> {
+    let invalid = || DlnaError::Invalid("SOAP XML depth or markup");
+    let mut offset = 0;
+    let mut depth = 0_u8;
+    while let Some(relative) = text[offset..].find('<') {
+        let start = offset + relative;
+        let rest = &text[start..];
+        let skip = if rest.starts_with("<!--") {
+            Some((4, "-->"))
+        } else if rest.starts_with("<![CDATA[") {
+            Some((9, "]]>"))
+        } else if rest.starts_with("<?") {
+            Some((2, "?>"))
+        } else {
+            None
+        };
+        if let Some((prefix, end)) = skip {
+            offset = start + prefix + rest[prefix..].find(end).ok_or_else(invalid)? + end.len();
+            continue;
+        }
+        // DTDs, entity declarations and all other <! constructs are forbidden.
+        if rest.starts_with("<!") {
+            return Err(invalid());
+        }
+        let mut quote = None;
+        let end = rest
+            .bytes()
+            .enumerate()
+            .skip(1)
+            .find_map(|(index, byte)| {
+                if let Some(delimiter) = quote {
+                    if byte == delimiter {
+                        quote = None;
+                    }
+                } else if matches!(byte, b'\'' | b'"') {
+                    quote = Some(byte);
+                } else if byte == b'>' {
+                    return Some(index);
+                }
+                None
+            })
+            .ok_or_else(invalid)?;
+        if rest.starts_with("</") {
+            depth = depth.checked_sub(1).ok_or_else(invalid)?;
+        } else {
+            depth = depth.checked_add(1).ok_or_else(invalid)?;
+            if depth > 4 {
+                return Err(invalid());
+            }
+            if rest.as_bytes()[end - 1] == b'/' {
+                depth -= 1;
+            }
+        }
+        offset = start + end + 1;
+    }
+    if depth != 0 {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub(super) fn parse_soap_action(header: &str, bytes: &[u8]) -> Result<SoapAction, DlnaError> {
     let invalid = || DlnaError::Invalid("SOAP envelope");
     if bytes.len() > MAX_BODY_BYTES {
@@ -20,10 +85,7 @@ pub(super) fn parse_soap_action(header: &str, bytes: &[u8]) -> Result<SoapAction
         return Err(invalid());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-    // Also reject an empty DTD, which the XML library intentionally permits.
-    if text.contains("<!DOCTYPE") {
-        return Err(invalid());
-    }
+    check_depth(text)?;
     let document = roxmltree::Document::parse_with_options(
         text,
         roxmltree::ParsingOptions {

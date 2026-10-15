@@ -58,6 +58,20 @@ fn fault(response: HttpResponse, code: u16) {
 const INSTANCE: &str = "<InstanceID>0</InstanceID>";
 
 #[test]
+fn soap_depth_is_bounded_before_recursive_xml_work_on_small_stacks() {
+    std::thread::Builder::new().stack_size(128 * 1024).spawn(|| {
+        let header = format!("\"{AVTRANSPORT_SERVICE}#GetTransportInfo\"");
+        for depth in [5, 16, 64, 129, 512] {
+            let body = format!("{}0{}", "<node>".repeat(depth), "</node>".repeat(depth));
+            assert!(parse_soap_action(&header, body.as_bytes()).is_err());
+        }
+        // '<' and '>' in comments, CDATA and quoted attributes are not nesting.
+        let request = format!("<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" marker=\"&lt; > /&gt;\"><!-- <fake><fake> --><s:Body><a:GetTransportInfo xmlns:a=\"{AVTRANSPORT_SERVICE}\"><InstanceID><![CDATA[0]]></InstanceID></a:GetTransportInfo></s:Body></s:Envelope>");
+        assert_eq!(parse_soap_action(&header, request.as_bytes()).unwrap().arg("InstanceID"), Some("0"));
+    }).unwrap().join().unwrap();
+}
+
+#[test]
 fn lastchange_covers_all_indirectly_evented_declared_state() {
     let service = acknowledging_test_service();
     for kind in [AVTRANSPORT_SERVICE, RENDERING_CONTROL_SERVICE] {
