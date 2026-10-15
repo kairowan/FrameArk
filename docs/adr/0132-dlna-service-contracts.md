@@ -73,6 +73,19 @@ Existing private-IPv4 consent, peer-pinned origin, no redirects, explicit TLS ro
 redaction, output acknowledgment, subscription limits and callback policy remain.
 Unknown XML fields fail safely; no unchecked field can become an output command.
 
+Windows CI also exposed a source-cancellation race, reproduced locally on the
+29th repeated run: shutdown of the cloned handle did not reliably finish an
+already-blocked read before its one-second timeout. Connected HTTP/TLS I/O now
+uses nonblocking reads/writes, retries only WouldBlock/Interrupted, and checks
+revocation and the original deadline before/after each attempt. WouldBlock sleeps
+at most one millisecond; there is no busy readiness loop or reset of the request
+deadline. Other errors (including OS TimedOut) remain terminal. Connect still has
+its bounded total deadline. This preserves the synchronous platform-byte API,
+not a real-time latency/throughput promise, and adds no dependency or ABI change.
+Keep the original cancellation timing test; do not enlarge its threshold to
+hide the failure. A synchronized test also revokes a pending read without any
+socket shutdown, proving that cancellation does not rely on that OS wakeup.
+
 ## Verification and remaining work
 
 Rust tests independently assert the v1 inventory and output order, resolve every
@@ -96,3 +109,5 @@ Rollback is a reviewed revert; no keys, tags, releases or data migration are inv
 - [UPnP ConnectionManager:1, static connection 0](https://upnp.org/specs/av/UPnP-av-ConnectionManager-v1-Service.pdf)
 - [roxmltree 0.21.1 parsing options](https://docs.rs/roxmltree/0.21.1/roxmltree/struct.ParsingOptions.html)
 - [roxmltree upstream MIT license](https://docs.rs/crate/roxmltree/0.21.1/source/LICENSE-MIT)
+- [Rust TcpStream nonblocking semantics](https://doc.rust-lang.org/std/net/struct.TcpStream.html#method.set_nonblocking)
+- [Windows socket options and timeout caveats](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-setsockopt)

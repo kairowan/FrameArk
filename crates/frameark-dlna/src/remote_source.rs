@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// Maximum bytes returned or cached by one random-access read.
 pub const MAX_SOURCE_READ_BYTES: usize = 64 * 1024;
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const SOURCE_IO_POLL: Duration = Duration::from_millis(1);
 
 /// Payload-free source I/O counters, not evidence of decoded/rendered output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -61,6 +62,9 @@ impl Endpoint {
                 .ok_or(DlnaError::Io(std::io::ErrorKind::TimedOut))?;
             match TcpStream::connect_timeout(address, remaining) {
                 Ok(socket) => {
+                    socket
+                        .set_nonblocking(true)
+                        .map_err(|error| DlnaError::Io(error.kind()))?;
                     let clone = socket
                         .try_clone()
                         .map_err(|error| DlnaError::Io(error.kind()))?;
@@ -176,6 +180,28 @@ struct DeadlineTcp {
 }
 
 impl DeadlineTcp {
+    // Do not rely on shutdown of a cloned handle waking an already-blocked
+    // recv on every platform. Retry only nonblocking WouldBlock/Interrupted,
+    // always against the original deadline and revocation flag. In particular,
+    // this never retries a Windows SO_RCVTIMEO failure on an uncertain socket.
+    fn io(
+        &mut self,
+        mut operation: impl FnMut(&mut TcpStream) -> std::io::Result<usize>,
+    ) -> std::io::Result<usize> {
+        loop {
+            self.remaining()?;
+            let result = operation(&mut self.socket);
+            let remaining = self.remaining()?;
+            match result {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(SOURCE_IO_POLL.min(remaining));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                other => return other,
+            }
+        }
+    }
+
     fn remaining(&self) -> std::io::Result<Duration> {
         if self.closed.load(Ordering::Acquire) {
             // `write_all` and TLS may retry Interrupted indefinitely. Revocation
@@ -191,21 +217,16 @@ impl DeadlineTcp {
 
 impl Read for DeadlineTcp {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.socket.set_read_timeout(Some(self.remaining()?))?;
-        let read = self.socket.read(buffer)?;
-        self.remaining()?;
-        Ok(read)
+        self.io(|socket| socket.read(buffer))
     }
 }
 
 impl Write for DeadlineTcp {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.socket.set_write_timeout(Some(self.remaining()?))?;
-        let written = self.socket.write(buffer)?;
-        self.remaining()?;
-        Ok(written)
+        self.io(|socket| socket.write(buffer))
     }
     fn flush(&mut self) -> std::io::Result<()> {
+        self.remaining()?;
         self.socket.flush()
     }
 }
@@ -262,7 +283,10 @@ impl Drop for DeadlineStream {
 ///
 /// One read is allowed at a time; concurrent reads return a bounded error. Close
 /// may run concurrently and interrupts active socket I/O without waiting on the
-/// read/cache lock. A connect already in progress has the same total deadline.
+/// read/cache lock. Connected I/O retries nonblocking readiness with at most a
+/// one-millisecond sleep, rechecking revocation and the original total deadline.
+/// This is not a real-time scheduling guarantee. A connect already in progress
+/// has the same total deadline.
 pub struct RemoteMediaSource {
     endpoint: Endpoint,
     length: u64,
@@ -458,6 +482,100 @@ impl Drop for RemoteMediaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_read_observes_revocation_without_socket_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut stream = DeadlineTcp {
+            socket,
+            deadline: Instant::now() + Duration::from_secs(5),
+            closed: closed.clone(),
+        };
+        let (started, ready) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            let result = stream.io(|socket| {
+                let result = socket.read(&mut [0]);
+                if first {
+                    assert_eq!(
+                        result.as_ref().unwrap_err().kind(),
+                        std::io::ErrorKind::WouldBlock
+                    );
+                    first = false;
+                    started.send(()).unwrap();
+                    resumed.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                result
+            });
+            done.send(result.unwrap_err().kind()).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Deliberately do not shutdown either socket: progress must depend on
+        // our cancellation flag, not platform-specific wakeup behavior.
+        closed.store(true, Ordering::Release);
+        resume.send(()).unwrap();
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(1)).unwrap(),
+            std::io::ErrorKind::ConnectionAborted
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn pending_io_retries_keep_original_deadline_and_terminal_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut stream = DeadlineTcp {
+            socket,
+            deadline: Instant::now() + Duration::from_secs(1),
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let mut calls = 0;
+            assert_eq!(
+                stream
+                    .io(|_| {
+                        calls += 1;
+                        Err(kind.into())
+                    })
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+            assert_eq!(calls, 1);
+        }
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            stream.deadline = Instant::now() + Duration::from_millis(30);
+            let start = Instant::now();
+            let mut calls = 0;
+            assert_eq!(
+                stream
+                    .io(|_| {
+                        calls += 1;
+                        Err(kind.into())
+                    })
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::TimedOut
+            );
+            assert!(calls > 1);
+            assert!(start.elapsed() < Duration::from_secs(1));
+        }
+    }
 
     #[test]
     fn revoked_io_is_terminal_not_retryable_interrupted() {
