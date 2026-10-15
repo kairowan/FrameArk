@@ -55,6 +55,14 @@ race despite shutdown; the one-second cancellation regression is retained, with
 additional cancellation-without-shutdown and terminal-error/deadline tests.
 No physical-device latency or throughput guarantee follows from these fixtures.
 
+RAOP/mirror RTSP adapters use explicit nonblocking accepted sockets, bounded
+incremental framing and one total read/dispatch/write deadline, clamped to the
+runtime's original deadline. Transient I/O is retried; expiry is `Io(TimedOut)`.
+The `bind` timeout parameter now means the entire accepted connection budget and
+must be nonzero and <=60 seconds. One-request-per-connection behavior remains;
+there is no persistent/pipelined RTSP or Apple pairing/output compatibility claim.
+See [ADR 0134](adr/0134-airplay-rtsp-io.md) for migration and regression evidence.
+
 Android DLNA's current profile is foreground-only, private IPv4, explicit consent,
 no PIN and one player mutually exclusive with FANP. Sources must be served by the
 controller itself over HTTP with exact Range support and known length. MP4, MP3,

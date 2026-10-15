@@ -26,6 +26,9 @@ Its unchanged focused rerun and 40 consecutive repetitions passed, followed by
 full workspace passes. This is an unresolved intermittent RTSP follow-up, not an
 image fix or a claim that rerunning repaired it; no assertion/timeout was relaxed.
 
+Subsequent follow-up: [ADR 0134](../../adr/0134-airplay-rtsp-io.md) records a
+deterministic reproducer and correction in the shared RTSP accepted-I/O layer.
+
 ## Isolated Android execution
 
 Agent-owned API 34 x86_64 AVD `frameark_proof_ui`, serial `emulator-5582`, Windows,

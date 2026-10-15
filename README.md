@@ -18,6 +18,11 @@ Android HTTP Range media/photo player with isolated-emulator pixel/control evide
 its controller matrix remains open. AirPlay remains protocol foundations,
 not Apple-device interoperability claims.
 
+The Experimental RAOP/mirror TCP adapters now share bounded incremental RTSP
+framing and one monotonic read/write deadline, including delayed/partial I/O on
+Windows. They remain caller-owned single-request adapters, not an authenticated
+Apple receiver. See [RTSP I/O contract](docs/adr/0134-airplay-rtsp-io.md).
+
 **实验性预览：Native 播放与真实屏幕采集开发中。** Sender 保留 30 秒测试流，
 新增 Android 10+ 系统授权屏幕共享，可选捕获允许共享的播放音频（不采集麦克风）。
 真机结果由设备持有人自行安装并反馈，不把模拟器或请求 60 fps 等同真机验收。
