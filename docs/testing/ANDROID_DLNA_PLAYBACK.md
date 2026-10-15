@@ -37,6 +37,9 @@ in `build/probe-jni/x86_64`; build Receiver app/test APKs using
 `-PframearkPlaybackProbe=true`. Install only on an agent-owned isolated emulator,
 then run `dev.frameark.receiver.DlnaPlaybackTest` with InstrumentationTestRunner.
 Always specify the exact authorized serial. These are not distribution APKs.
+Before running, verify `sys.boot_completed=1` and an up, non-loopback private
+IPv4 interface on that isolated emulator. The normal foreground-host test
+requires that interface; loopback-only cold boot is not a passing substitute.
 
 The test creates original synthetic H.264 MP4/PCM WAV at runtime; no external
 media, copied fixture or third-party decoder is included. It asserts real TextureView

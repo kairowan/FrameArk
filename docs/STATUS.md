@@ -48,6 +48,9 @@ retained fatal error events and bounded namespace-aware SOAP parsing. Preset/see
 wait for output acknowledgment; replacement preserves playing/paused state and
 fails closed if resume fails. TCP tests obtain schemas and invoke every advertised
 action; this does not close third-party clients, full media support or soak gates.
+CI-driven follow-ups bound XML depth before DOM recursion and replace blocking
+source I/O with cancellation-aware nonblocking retries; the Windows cancellation
+regression keeps its original one-second threshold.
 See [ADR 0132](adr/0132-dlna-service-contracts.md). M3 remains Partial.
 
 | Milestone | Evidence already merged | Exit gate still open | Status |

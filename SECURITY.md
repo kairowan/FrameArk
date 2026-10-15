@@ -61,7 +61,11 @@ verified hostname/SNI and pinned IPs. No downgrade exists.
 
 Reads require exact 206 ranges, at most 64 KiB per read/cache and known length
 up to 64 GiB. Total connect/request/read deadlines are bounded; a source close
-interrupts active socket reads. At most two opaque source handles cover replacement;
+interrupts active socket reads. Connected reads/writes use nonblocking retries
+with at most a one-millisecond sleep and recheck cancellation plus the original
+deadline; cancellation does not depend on shutdown waking a blocked OS call.
+This is not a real-time latency guarantee; connect remains deadline-bounded.
+At most two opaque source handles cover replacement;
 handles/commands/consumer tokens are never reused. Strong ETags, if supplied, are
 checked on later reads alongside MIME and total length. Without a strong validator,
 a same-size/type replacement cannot be detected. No media/URLs are logged.

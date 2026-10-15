@@ -49,6 +49,12 @@ are covered. Missing InstanceID/Speed/metadata and extra arguments now fail 402;
 clients must send empty CurrentURIMetaData explicitly. XML line endings normalize.
 This is Experimental service coverage, not UPnP/DLNA certification or a client matrix.
 
+Remote-source cancellation now uses nonblocking connected I/O with short bounded
+waits and unchanged total deadlines. Windows CI exposed a pending-read wakeup
+race despite shutdown; the one-second cancellation regression is retained, with
+additional cancellation-without-shutdown and terminal-error/deadline tests.
+No physical-device latency or throughput guarantee follows from these fixtures.
+
 Android DLNA's current profile is foreground-only, private IPv4, explicit consent,
 no PIN and one player mutually exclusive with FANP. Sources must be served by the
 controller itself over HTTP with exact Range support and known length. MP4, MP3,
