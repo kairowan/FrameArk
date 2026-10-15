@@ -60,7 +60,8 @@
     <string name="dlna_failed">DLNA 启动失败（%1$d）。请先停止 Native 接收器，并检查所选局域网。</string>
     <string name="dlna_stopped">DLNA 已停止</string>
     <string name="dlna_ready">接收器描述地址：%1$s</string>
-    <string name="dlna_warning">实验性功能：仅用于可信局域网，不使用 PIN 认证。局域网内的控制端都能改变播放。本预览仅接收控制端自身提供、支持 HTTP Range 的 MP4、MP3 和 WAV；尚未启用 HTTPS、其他媒体主机、图片和字幕。请先停止 Native 接收器。离开本页面会停止 DLNA。</string>
+    <string name="dlna_warning">实验性功能：仅用于可信局域网，不使用 PIN 认证。局域网内的控制端都能改变播放。接收控制端自身提供、支持 HTTP Range 的 MP4、MP3、WAV 与 JPEG/PNG 静态图片。图片不超过 16 MiB，并按显示上限降采样。尚未启用 HTTPS、其他媒体主机和字幕。请先停止 Native 接收器。离开本页面会停止 DLNA。</string>
+    <string name="dlna_image_description">通过 DLNA 接收的图片</string>
     <string name="dlna_start">启用 DLNA</string>
     <string name="dlna_summary">实验性 DLNA：无 PIN 认证，仅用于可信局域网。离开本页面会停止播放。</string>
     <string name="dlna_diagnostics">诊断信息</string>

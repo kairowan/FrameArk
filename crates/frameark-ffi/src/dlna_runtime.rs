@@ -117,6 +117,8 @@ impl Runtime {
                     "http-get:*:video/mp4:*".into(),
                     "http-get:*:audio/mpeg:*".into(),
                     "http-get:*:audio/wav:*".into(),
+                    "http-get:*:image/jpeg:*".into(),
+                    "http-get:*:image/png:*".into(),
                 ])
                 .map_err(|_| ())?,
             )
@@ -490,6 +492,24 @@ mod tests {
         socket.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200"));
         assert!(response.contains("MediaRenderer:1"));
+        let body = "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:GetProtocolInfo xmlns:u=\"urn:schemas-upnp-org:service:ConnectionManager:1\"/></s:Body></s:Envelope>";
+        let mut protocol = std::net::TcpStream::connect(address).unwrap();
+        protocol
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        protocol.write_all(format!("POST /upnp/control/connectionmanager HTTP/1.1\r\nHost: fixture\r\nSOAPACTION: \"urn:schemas-upnp-org:service:ConnectionManager:1#GetProtocolInfo\"\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        let mut capabilities = String::new();
+        protocol.read_to_string(&mut capabilities).unwrap();
+        assert!(capabilities.starts_with("HTTP/1.1 200"));
+        for mime in [
+            "video/mp4",
+            "audio/mpeg",
+            "audio/wav",
+            "image/jpeg",
+            "image/png",
+        ] {
+            assert!(capabilities.contains(&format!("http-get:*:{mime}:*")));
+        }
         for callback in [
             "http://192.168.1.2/cb",
             "http://localhost/cb",

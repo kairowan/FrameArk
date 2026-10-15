@@ -14,6 +14,7 @@ import android.view.Surface
 /** Process-local surface/output ownership, never a second protocol state machine. */
 internal object DlnaOutputOwner {
     @Volatile var surface: Surface? = null
+    @Volatile var images: DlnaImageTarget? = null
     @Volatile var output: DlnaPlayerOutput? = null
     @Volatile var failure = 0
 }
@@ -43,7 +44,7 @@ class DlnaReceiverService : Service() {
             lock = getSystemService(WifiManager::class.java)?.createMulticastLock("frameark.dlna")?.apply { setReferenceCounted(false); acquire() }
             DlnaOutputOwner.failure = DlnaNative.start(bind)
             started = DlnaOutputOwner.failure == 0
-            if (started) DlnaOutputOwner.output = DlnaPlayerOutput(DlnaNative.outputToken()) { DlnaOutputOwner.surface }
+            if (started) DlnaOutputOwner.output = DlnaPlayerOutput(DlnaNative.outputToken(), DlnaOutputOwner.images) { DlnaOutputOwner.surface }
             else stopSelf()
         } catch (_: Exception) { DlnaOutputOwner.failure = -4; stopSelf() }
         return START_NOT_STICKY
