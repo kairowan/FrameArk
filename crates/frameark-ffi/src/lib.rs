@@ -7,6 +7,9 @@
 
 #![allow(unsafe_code)]
 
+mod dlna_output;
+mod dlna_runtime;
+mod dlna_source;
 #[cfg(feature = "android-playback-probe")]
 mod playback_probe;
 mod sender;
@@ -1314,6 +1317,9 @@ pub extern "system" fn Java_dev_frameark_receiver_FrameArkNative_nativeStartRece
     };
     if state.session.is_some() {
         return 1;
+    }
+    if dlna_runtime::is_running() {
+        return -6;
     }
     let session = match prepare_receiver_session(&state) {
         Ok(session) => session,

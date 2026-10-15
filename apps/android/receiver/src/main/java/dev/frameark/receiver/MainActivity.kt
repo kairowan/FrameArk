@@ -285,6 +285,10 @@ class MainActivity : Activity() {
             addView(start)
             addView(stop)
             addView(refresh)
+            addView(Button(this@MainActivity).apply {
+                text = getString(R.string.dlna_title)
+                setOnClickListener { startActivity(Intent(this@MainActivity, DlnaActivity::class.java)) }
+            })
             addView(shareConnection)
             addView(requirePairingApproval)
             addView(approveNextPairing)

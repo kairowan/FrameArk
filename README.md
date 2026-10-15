@@ -13,13 +13,19 @@ FrameArk 是一个以 Rust 为核心的跨平台投屏与媒体接收框架。�
 Receiver has foreground Android H.264/AAC output. Sender offers both a
 30-second generated reference stream and explicit Android 10+ screen sharing
 with optional permitted playback audio over pinned QUIC. Physical performance,
-one-hour stability and recovery gates remain open. DLNA and AirPlay remain
-bounded protocol foundations, not Apple-device interoperability claims.
+one-hour stability and recovery gates remain open. DLNA now has an opt-in
+Android HTTP Range media player with isolated-emulator pixel/control evidence;
+its controller matrix remains open. AirPlay remains protocol foundations,
+not Apple-device interoperability claims.
 
 **实验性预览：Native 播放与真实屏幕采集开发中。** Sender 保留 30 秒测试流，
 新增 Android 10+ 系统授权屏幕共享，可选捕获允许共享的播放音频（不采集麦克风）。
 真机结果由设备持有人自行安装并反馈，不把模拟器或请求 60 fps 等同真机验收。
 操作见[参考测试流](docs/testing/ANDROID_REFERENCE_SENDER.md)与[屏幕共享说明](docs/testing/ANDROID_SCREEN_CAPTURE.md)。
+
+Receiver 新增[实验性 DLNA 播放入口](docs/testing/ANDROID_DLNA_PLAYBACK.md)：显式选择可信
+局域网后，可接收控制端自身提供、支持 HTTP Range 的 MP4/MP3/WAV。没有 PIN 认证，
+离开页面即停止；第三方媒体主机、HTTPS、图片、字幕和完整控制端兼容矩阵尚未交付。
 
 Sender 支持前台扫描并选择局域网接收器（Experimental，仅本地 IPv4），
 也保留手动连接。发现广播未经认证，选择后仍须核对 Receiver 上的完整 TLS
@@ -122,14 +128,17 @@ codec, or claims Android hardware playback yet. The `frameark-dlna` crate additi
 caller-owned HTTP/SOAP renderer contracts and one-shot IPv4 SSDP multicast
 announcements. Its [output binding](docs/adr/0129-dlna-playback-dispatch.md)
 now requires backend acknowledgment before committing playback control state;
-unbound output mutations fail instead of simulating success. No Android DLNA
-decoder is included by this boundary. [GENA eventing](docs/adr/0130-dlna-controller-eventing.md)
+unbound output mutations fail instead of simulating success. The opt-in
+[Android host](docs/adr/0131-android-dlna-player.md) now binds this boundary to
+Rust-owned random-access media reads and a single-Looper OS MediaPlayer.
+[GENA eventing](docs/adr/0130-dlna-controller-eventing.md)
 now follows advertised event URLs with service-scoped random SIDs, initial SEQ 0,
 bounded coalesced updates and AVTransport/RenderingControl LastChange XML.
 Callback delivery uses an explicitly plain-HTTP client or caller-injected
-HTTP/HTTPS stream boundary. Timed notification scheduling, complete SCPD schemas,
-decoder feedback and named-client interoperability remain future work; callback
-authorization and DNS/address policy belong to the Rust host.
+HTTP/HTTPS stream boundary. The Android host rate-limits callbacks and accepts
+decoder position/end/failure feedback; complete SCPD schemas, images/subtitles,
+broader origin approval and named-client interoperability remain open. URL and
+callback authorization/address pinning stay in Rust, not the platform player.
 
 The executable FANP profile is documented in
 [docs/protocols/fanp/README.md](docs/protocols/fanp/README.md), with current

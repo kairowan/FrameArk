@@ -3,6 +3,154 @@
 use super::*;
 use crate::tests::{acknowledging_test_service, renderer_description, soap_request};
 
+#[test]
+fn drained_events_recheck_live_lease_but_preserve_initial_snapshot() {
+    let mut service = acknowledging_test_service();
+    let sid = accepted_sid(&mut service, "/upnp/event/renderingcontrol");
+    let initial = service.drain_events().remove(0);
+    volume(&mut service, 35);
+    let update = service.drain_events().remove(0);
+    assert!(service.event_is_deliverable(&update));
+    assert_eq!(
+        service
+            .handle(&request(
+                "UNSUBSCRIBE",
+                "/upnp/event/renderingcontrol",
+                &format!("SID: {sid}\r\n")
+            ))
+            .status,
+        200
+    );
+    assert!(service.event_is_deliverable(&initial));
+    assert!(!service.event_is_deliverable(&update));
+    assert_eq!(
+        callback_literal_address("http://127.0.0.1/cb").unwrap(),
+        "127.0.0.1".parse::<IpAddr>().unwrap()
+    );
+    assert!(callback_literal_address("http://private.invalid/cb").is_err());
+}
+
+#[test]
+fn ssdp_required_host_ext_and_media_renderer_type_round_trip() {
+    assert!(GenaCallbackClient::new(Duration::MAX).is_err());
+    assert!(
+        MediaRendererTcpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            acknowledging_test_service(),
+            Duration::MAX
+        )
+        .is_err()
+    );
+    let advertisement = SsdpAdvertisement::new(
+        "upnp:rootdevice",
+        "uuid:fixture::upnp:rootdevice",
+        "http://192.168.1.2/device.xml",
+        300,
+        "fixture/1 UPnP/1.0 FrameArk/0.1",
+    )
+    .unwrap();
+    for alive in [true, false] {
+        let wire = advertisement.notify(alive).encode().unwrap();
+        assert_eq!(
+            SsdpMessage::parse(&wire)
+                .unwrap()
+                .headers
+                .get("host")
+                .map(String::as_str),
+            Some("239.255.255.250:1900")
+        );
+    }
+    let wire = advertisement.response().encode().unwrap();
+    assert_eq!(
+        SsdpMessage::parse(&wire)
+            .unwrap()
+            .headers
+            .get("ext")
+            .map(String::as_str),
+        Some("")
+    );
+    assert!(SsdpMessage::parse(b"HTTP/1.1 200 OK\r\nST: \r\n\r\n").is_err());
+    assert!(
+        renderer_description()
+            .to_xml()
+            .unwrap()
+            .contains("<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>")
+    );
+}
+
+#[test]
+fn callback_slow_trickle_cannot_extend_total_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let worker = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                other => panic!("fixture accept {other:?}"),
+            }
+        };
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        read_http_request(&mut socket).unwrap();
+        for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" {
+            if socket.write_all(&[*byte]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    let mut service = acknowledging_test_service();
+    service.handle(&subscribe(
+        "/upnp/event/avtransport",
+        &format!("http://{address}/cb"),
+    ));
+    let event = service.drain_events().remove(0);
+    let started = Instant::now();
+    assert!(
+        GenaCallbackClient::new(Duration::from_millis(100))
+            .unwrap()
+            .send(&event)
+            .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_millis(700));
+    worker.join().unwrap();
+}
+
+#[test]
+fn http_request_slow_trickle_cannot_hold_renderer_after_deadline() {
+    let mut server = MediaRendererTcpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        acknowledging_test_service(),
+        Duration::from_millis(100),
+    )
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let worker = std::thread::spawn(move || server.serve_for(Duration::from_secs(1), 1).unwrap());
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let started = Instant::now();
+    for byte in b"GET /device.xml HTTP/1.1\r\nHost: fixture\r\n\r\n" {
+        if worker.is_finished() || socket.write_all(&[*byte]).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(worker.join().unwrap(), 1);
+    assert!(started.elapsed() < Duration::from_millis(700));
+}
+
 fn subscribe(path: &str, callback: &str) -> HttpRequest {
     request(
         "SUBSCRIBE",

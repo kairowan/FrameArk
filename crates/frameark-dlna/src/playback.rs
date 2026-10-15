@@ -62,9 +62,29 @@ pub trait MediaPlaybackBackend: Send {
     /// Execute exactly one already-validated output command.
     fn apply(&mut self, command: PlaybackCommand<'_>) -> Result<(), PlaybackBackendError>;
 
+    /// Poll one latest decoder observation without blocking. The Rust host must
+    /// reject stale source/command generations before returning an observation.
+    fn feedback(&mut self) -> Option<PlaybackFeedback> {
+        None
+    }
+
     /// Release output, sources, queues and workers. Must be bounded/idempotent.
     /// Called on fatal failure or when the owning service is dropped.
     fn shutdown(&mut self);
+}
+
+/// Decoder observations accepted only from the currently bound Rust host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackFeedback {
+    /// Actual decoder position and duration in whole seconds.
+    Progress {
+        position_seconds: u64,
+        duration_seconds: Option<u64>,
+    },
+    /// The current source reached normal end of playback.
+    Ended,
+    /// Asynchronous output failure; the service detaches and shuts down output.
+    Failed,
 }
 
 /// Payload-free, saturating dispatch counters for diagnostics.

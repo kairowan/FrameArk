@@ -18,6 +18,7 @@ android-playback-probe = []
 frameark-api = { path = "../frameark-api" }
 frameark-core.workspace = true
 frameark-discovery = { path = "../frameark-discovery" }
+frameark-dlna = { path = "../frameark-dlna" }
 frameark-media = { path = "../frameark-media" }
 frameark-native = { path = "../frameark-native" }
 frameark-transport = { path = "../frameark-transport" }

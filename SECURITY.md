@@ -26,8 +26,49 @@ contract, not forced cancellation of arbitrary platform code. Diagnostics
 contain counters and fixed error classes only. URL/metadata values must not be
 logged or handed to an unvetted platform URL fetcher: source authorization,
 DNS/address pinning, redirects and resource bounds remain Rust-host policy.
-This change adds no network exposure or production backend. See
-[ADR 0129](docs/adr/0129-dlna-playback-dispatch.md).
+The original boundary is described in [ADR 0129](docs/adr/0129-dlna-playback-dispatch.md).
+
+### Opt-in Android DLNA host
+
+The new [Experimental Android host](docs/adr/0131-android-dlna-player.md) adds
+network exposure only after explicit foreground consent and selection of a
+private IPv4 interface. It is mutually exclusive with FANP; it is not enabled on
+boot or by opening the page. DLNA has **no PIN or sender authentication**. Any
+reachable private-IPv4 controller can control this opted-in player; private IP
+classification is not authentication or same-subnet isolation. Use only a trusted
+LAN. Leaving the page stops the listener/discovery/output. No Internet binding,
+automatic firewall rule, background restart or production signing is added.
+
+Rust pins media connections to the request's transport peer. Literal URI hosts
+must match; hostname authorities connect only to that peer without DNS and retain
+their HTTP Host header. This is a constrained peer-origin policy, not proof of
+hostname ownership. Ports on that peer are not restricted. HTTP may be observed
+or modified by the LAN; cross-host media, HTTPS (no Android root-store adapter),
+redirects, credentials, compressed/chunked bodies and unknown/oversized lengths
+are rejected. The core source supports HTTPS only with explicit trusted roots,
+verified hostname/SNI and pinned IPs. No downgrade exists.
+
+Reads require exact 206 ranges, at most 64 KiB per read/cache and known length
+up to 64 GiB. Total connect/request/read deadlines are bounded; a source close
+interrupts active socket reads. At most two opaque source handles cover replacement;
+handles/commands/consumer tokens are never reused. Strong ETags, if supplied, are
+checked on later reads alongside MIME and total length. Without a strong validator,
+a same-size/type replacement cannot be detected. No media/URLs are logged.
+
+Callbacks must have a literal address equal to their subscriber's transport peer.
+The host has no callback DNS, redirect, retry or third-party fetch path. The callback
+I/O deadline is total, not renewed by slow bytes; HTTP request reads and control
+response writes also have total deadlines. Active leases and queues remain bounded
+(16 leases; 32 service + 32 host pending events), with at most one attempted callback
+every 200 ms. Failed callback attempts are counted and not retried. Initial snapshots
+can outlive unsubscribe according to UPnP, but are discarded with host shutdown.
+
+OS commands wait at most five seconds; timeout/fatal error clears media state and
+revokes sources. Old consumer tokens cannot poll a replacement runtime; stale or
+duplicate acknowledgments/feedback are rejected. All MediaPlayer calls use one
+Looper. OS teardown is requested asynchronously: Rust can revoke network I/O but
+cannot forcibly preempt a wedged platform codec. Instrumentation loopback startup
+requires the existing opt-in native probe feature, absent from delivery builds.
 
 ## Android local playback preferences
 

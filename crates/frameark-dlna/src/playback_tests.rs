@@ -4,6 +4,28 @@ use super::*;
 use crate::tests::{renderer_description, soap_request};
 use std::sync::Mutex;
 
+#[test]
+fn accepted_split_request_gets_configured_timeout_not_scheduler_remainder() {
+    let mut server = MediaRendererTcpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        MediaRendererHttpService::new(renderer_description()).unwrap(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let mut socket = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket
+        .write_all(b"GET /device.xml HTTP/1.1\r\nHost: ")
+        .unwrap();
+    let worker = std::thread::spawn(move || server.serve_for(Duration::from_millis(5), 1).unwrap());
+    std::thread::sleep(Duration::from_millis(30));
+    socket.write_all(b"fixture\r\n\r\n").unwrap();
+    assert_eq!(read_http_response(&mut socket).unwrap().status, 200);
+    assert_eq!(worker.join().unwrap(), 1);
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Seen {
     Uri(String, String),
@@ -19,11 +41,15 @@ struct Probe {
     accepted: Vec<Seen>,
     reject_next: Option<PlaybackBackendError>,
     shutdowns: usize,
+    feedback: Option<PlaybackFeedback>,
 }
 
 struct Backend(Arc<Mutex<Probe>>);
 
 impl MediaPlaybackBackend for Backend {
+    fn feedback(&mut self) -> Option<PlaybackFeedback> {
+        self.0.lock().unwrap().feedback.take()
+    }
     fn apply(&mut self, command: PlaybackCommand<'_>) -> Result<(), PlaybackBackendError> {
         let mut probe = self.0.lock().unwrap();
         if let Some(error) = probe.reject_next.take() {
@@ -43,6 +69,98 @@ impl MediaPlaybackBackend for Backend {
     fn shutdown(&mut self) {
         self.0.lock().unwrap().shutdowns += 1;
     }
+}
+
+#[test]
+fn actual_progress_end_and_failure_reconcile_without_position_events() {
+    let (mut service, probe) = bound();
+    assert_eq!(service.handle(&load()).status, 200);
+    assert_eq!(
+        service.handle(&action("Play", "<Speed>1</Speed>")).status,
+        200
+    );
+    subscribe(&mut service, "/upnp/event/avtransport");
+    probe.lock().unwrap().feedback = Some(PlaybackFeedback::Progress {
+        position_seconds: 3,
+        duration_seconds: Some(59),
+    });
+    service.poll_output();
+    assert_eq!(service.state().duration_seconds, Some(59));
+    assert_eq!(service.state().position_seconds, 3);
+    assert_eq!(service.drain_events().len(), 1);
+    probe.lock().unwrap().feedback = Some(PlaybackFeedback::Progress {
+        position_seconds: 4,
+        duration_seconds: Some(59),
+    });
+    service.poll_output();
+    assert!(service.drain_events().is_empty());
+    probe.lock().unwrap().feedback = Some(PlaybackFeedback::Ended);
+    service.poll_output();
+    assert_eq!(service.state().transport_state, TransportState::Stopped);
+    assert_eq!(service.state().position_seconds, 59);
+    assert_eq!(service.drain_events().len(), 1);
+    probe.lock().unwrap().feedback = Some(PlaybackFeedback::Failed);
+    service.poll_output();
+    assert!(service.state().current_uri.is_empty());
+    assert_eq!(service.playback_report().fatal_failures, 1);
+    assert_eq!(probe.lock().unwrap().shutdowns, 1);
+    drop(service);
+    assert_eq!(probe.lock().unwrap().shutdowns, 1);
+}
+
+#[test]
+fn invalid_decoder_position_detaches_output() {
+    let (mut service, probe) = bound();
+    service.handle(&load());
+    probe.lock().unwrap().feedback = Some(PlaybackFeedback::Progress {
+        position_seconds: 61,
+        duration_seconds: Some(60),
+    });
+    service.poll_output();
+    assert!(service.state().current_uri.is_empty());
+    assert_eq!(probe.lock().unwrap().shutdowns, 1);
+}
+
+#[test]
+fn transport_peer_gate_rejects_before_backend_or_resource_access() {
+    let (service, probe) = bound();
+    let mut server = MediaRendererTcpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        service,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    server.set_request_filter(|peer, request| {
+        assert!(peer.ip().is_loopback());
+        request.target == "/device.xml"
+    });
+    let address = server.local_addr().unwrap();
+    let worker = std::thread::spawn(move || {
+        assert_eq!(server.serve_for(Duration::from_secs(2), 2).unwrap(), 2);
+    });
+    for (request, status) in [
+        (load(), 403),
+        (
+            HttpRequest::parse(b"GET /device.xml HTTP/1.1\r\nHost: fixture\r\n\r\n").unwrap(),
+            200,
+        ),
+    ] {
+        let body = request.body;
+        let mut bytes = format!("{} {} HTTP/1.1\r\n", request.method, request.target);
+        for (key, value) in request.headers {
+            bytes.push_str(&format!("{key}: {value}\r\n"));
+        }
+        bytes.push_str("\r\n");
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket.write_all(bytes.as_bytes()).unwrap();
+        socket.write_all(&body).unwrap();
+        assert_eq!(read_http_response(&mut socket).unwrap().status, status);
+    }
+    worker.join().unwrap();
+    assert!(probe.lock().unwrap().accepted.is_empty());
 }
 
 fn bound() -> (MediaRendererHttpService, Arc<Mutex<Probe>>) {

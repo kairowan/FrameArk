@@ -18,24 +18,36 @@ now requires an explicitly bound backend before committing state or success
 events. Unbound/rejected commands fail; fatal failures detach and clean up.
 Nine new regression tests include actual loopback TCP and split requests on
 non-blocking accepted sockets, but use an output
-fixture rather than a decoder. Android DLNA output, live progress feedback
-and the named-controller/two-hour matrix remain open; M3 stays Partial.
+fixture rather than a decoder. The subsequent Android host below adds actual
+output and feedback; the named-controller/two-hour matrix remains open. M3 stays Partial.
 See [ADR 0129](adr/0129-dlna-playback-dispatch.md).
 
 **DLNA controller eventing:** advertised event routes, service-scoped UUID SIDs,
 SEQ 0/wrap behavior, initial snapshot isolation, bounded coalescing and LastChange
 encoding now have 13 additional Rust tests, including actual HTTP callback and
-failed-response cleanup. The crate has 67 passing tests; independent Python XML
-fixture validation checks both layers. Complete SCPD schemas, timed callback
-delivery and actual decoder/controller integration remain open. This does not
+failed-response cleanup. That increment had 67 passing tests; independent Python XML
+fixture validation checks both layers. Complete SCPD schemas and named-controller
+integration remain open. This does not
 close M3; see [ADR 0130](adr/0130-dlna-controller-eventing.md).
+
+**Android DLNA vertical player:** explicit foreground/private-IPv4 opt-in, SSDP
+host, peer-origin HTTP Range source, opaque JNI byte adapter, single-Looper
+MediaPlayer and shared Rust Session are connected. Real decoder progress/EOS/error
+feedback, five-second acknowledged commands, restart consumer tokens, source
+revocation and timed peer-only callbacks are implemented. Isolated API 34 tests
+verify original MP4 decoded pixels and controls, WAV replacement/progress/EOS and
+page-close service cleanup; no owner's device is operated. Full services/SCPD,
+images/subtitles, broader origin approval/Android HTTPS, MP3/runtime codec coverage,
+named Android/iOS/desktop controllers and two-hour playback remain open. See
+[ADR 0131](adr/0131-android-dlna-player.md) and
+[evidence](evidence/2026-10-15-dlna-playback/README.md). M3 is still Partial.
 
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|
 | M0 工程与规范基础 | Rust workspace, Android shell, licenses/governance, CI/security gates including required `framearkd` Linux listener smoke, Windows/macOS Rust workspace format/test/build matrix and bounded `framearkd` startup smoke, ADR series, repository policy checks, Android native-package verification, deterministic SPDX SBOM generation, release APK/source/checksum publication, GitHub OIDC provenance attestations for published artifacts | Non-Linux media/session runtime evidence beyond startup, platform signing policy, and final multi-platform release baseline | Partial |
 | M1 Native 纵向闭环 | mDNS publication/browse, bounded Sender discovery/select/explicit-confirmation UI, QUIC/TLS temporary pairing, capability negotiation, FANP control/media, fixture CLI, `framearkd`, loopback H.264+Opus delivery, repeated loopback teardown/restart, clock-preserving FAPE JNI playback, foreground Android H.264/AAC decode/output, installable reference Sender with ticket/PIN UI, three consecutive two-emulator UI-driven 1080p30 runs with 900 rendered frames each | Physical reference-LAN discovery/authorization/1080p30 hardware playback is not recorded; Opus output and measured sync/performance remain open | Partial |
 | M2 Android Receiver MVP | Foreground service, pairing display, foreground Rust-verified proof allow/deny UI with native expiry queries and pause dismissal, delayed-approval QUIC regression and cancellation-safe Rust queue, optional Android one-shot post-PIN approval gate, experimental trust approve/revoke settings UI, bounded Rust `PendingTrustRequests` approval queue with monotonic expiry, bounded Kotlin `VerifiedPeerApprovalQueue` with proof-key copying, TTL/capacity/replay guards and explicit approve/reject outcomes, caller-owned FANP post-PIN approval callback boundary, optional FANP Ed25519/P-256 sender challenge/proof verification with opt-in Android Keystore signing with Rust-exposed temporary identity, optional proof-required Rust listener with 16-entry `FAPR` event queue and explicit JNI decision before session acceptance, real proof-mode loopback approval evidence, canonical proof-key fingerprint bridge into `frameark-trust`, exact pre-enrolled proof identity auto-admission on the Rust reconnect loop with rotated-key and renamed-device rejection tests, explicit Android JNI/Kotlin raw-key enrollment seam after proof approval, encrypted snapshot rollback in the Android trust controller, multicast-lock lifecycle, Keystore identity gate, alias/fingerprint JNI identity bridge, Rust-owned trust registry JNI bridge, encrypted Android Keystore AES-GCM snapshot adapter with bounded JNI FTR1 export/import, JNI queue/package gate, Kotlin bounded config dispatch, non-destructive ConnectivityManager endpoint refresh, stable JNI pairing material across notification storms, real QUIC media continuity through two one-second UDP blackouts with timeout/cancellation cleanup tests | Physical sender identity integration, desktop signing, live trust revocation and streamlined persistent enrollment UX, physical 1080p60 one-hour stability and short-disconnect evidence | Partial |
-| M3 DLNA/media push | SSDP, bounded HTTP/SOAP, AVTransport/RenderingControl/ConnectionManager with duration-bounded `REL_TIME` Seek, GENA leases/NOTIFY, DIDL-Lite, Range/file resources, URI authority validation, caller-injected DNS-aware public/local network policy, caller-injected HTTP/HTTPS stream callback boundary, bounded MIME/DLNA response format probe, caller-owned format-probe connector, bounded caller-owned remote media range fetch with exact `206 Content-Range` validation, bounded known-length multi-range streaming with contiguous chunk scheduling, explicit-root Rustls HTTPS media connector with SNI/timeouts and local TLS fixture evidence, and bounded payload-free DLNA replay traces | Named Android/iOS/desktop controller matrix, two-hour Seek run, redirect-follow policy (if ever enabled), and decoder-backed format probing | Partial |
+| M3 DLNA/media push | Bounded SSDP/HTTP/SOAP services, service-scoped GENA/LastChange, DIDL-Lite, Range/file resources, explicit-root TLS and URL-policy foundations; opt-in Android peer-origin HTTP player with Rust random-access sources/shared Session, acknowledged OS commands, live progress/EOS/error feedback, bounded callback host, isolated-emulator MP4 pixels/controls and WAV replacement/EOS | Complete mandatory services/SCPD, images/subtitles/playlists, broader approved media origins and Android HTTPS, MP3/codec/device coverage, named Android/iOS/desktop controller matrix and two-hour playback/Seek | Partial |
 | M4 RAOP/AirPlay media | Bounded RTSP/RTP, RAOP audio/session contracts, plist/SDP, redaction-safe clear/AES-CTR/other-protection classification, jitter/loss policy, controls/metadata, pre-request caller-owned RAOP/mirror RTSP peer authorization, HLS playlist and segment safety boundaries, caller-owned HTTP/HTTPS HLS playlist/segment connectors with bounded response/MIME/content-length checks and no redirects, explicit-root Rustls HLS connector with SNI/timeouts and local TLS fixture evidence, bounded payload-free AirPlay replay trace, and optional bounded FIFO HLS segment cache with byte/entry eviction | Apple pairing/verification, encrypted/FairPlay media, adaptive/persistent cache policy, decoder/output, long-run sync/reconnect and named Apple matrix | Partial |
 | M5 AirPlay screen mirror | Mirror RTSP lifecycle, UDP/RTP filtering, H.264 and conditional H.265 single-NAL/AP/FU assembly, AAC/PCM audio, orientation, 90 kHz clock, loss/reconfiguration tests, and redaction-safe `MirrorCompatibilityReport` decisions for clear-IP, AWDL, FairPlay/DRM, unknown transport, and pairing states | Apple pairing/encryption, decoder/output, iPhone/iPad/Mac Beta matrix, and real AWDL/DRM interoperability evidence | Partial |
 
