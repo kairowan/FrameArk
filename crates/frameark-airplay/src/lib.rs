@@ -13,10 +13,16 @@ use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod rtsp_io;
+#[cfg(test)]
+mod rtsp_io_tests;
+
 /// Maximum RTSP message size accepted before parsing.
 pub const MAX_RTSP_BYTES: usize = 64 * 1024;
 /// Maximum RTSP body size accepted before parsing.
 pub const MAX_RTSP_BODY_BYTES: usize = 32 * 1024;
+/// Maximum total read/dispatch/write budget for one accepted RTSP connection.
+pub const MAX_RTSP_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 /// Maximum RTP payload size accepted by the bounded audio contract.
 pub const MAX_RTP_PAYLOAD_BYTES: usize = 64 * 1024;
 /// Maximum datagram buffer used by the RTP socket adapter.
@@ -112,7 +118,7 @@ pub enum AirplayError {
     Invalid(&'static str),
     /// A caller supplied an invalid session field.
     InvalidField(&'static str),
-    /// The operating system rejected a bounded RTP socket operation.
+    /// The operating system rejected a bounded network operation, or its deadline expired.
     Io(ErrorKind),
 }
 
@@ -313,7 +319,7 @@ impl Display for AirplayError {
             Self::TooLarge(field) => write!(formatter, "AirPlay {field} exceeds its bound"),
             Self::Invalid(field) => write!(formatter, "invalid AirPlay {field}"),
             Self::InvalidField(field) => write!(formatter, "invalid AirPlay field {field}"),
-            Self::Io(kind) => write!(formatter, "AirPlay RTP socket operation failed: {kind}"),
+            Self::Io(kind) => write!(formatter, "AirPlay network operation failed: {kind}"),
         }
     }
 }
@@ -414,36 +420,8 @@ impl RtspMessage {
         if body.len() > MAX_RTSP_BODY_BYTES {
             return Err(AirplayError::TooLarge("RTSP body"));
         }
-        let text = std::str::from_utf8(&bytes[..header_end])
-            .map_err(|_| AirplayError::Invalid("RTSP UTF-8"))?;
-        let mut lines = text.split("\r\n");
-        let start_line = parse_start_line(
-            lines
-                .next()
-                .ok_or(AirplayError::Invalid("RTSP start line"))?,
-        )?;
-        let mut headers = BTreeMap::new();
-        for line in lines {
-            let (name, value) = line
-                .split_once(':')
-                .ok_or(AirplayError::Invalid("RTSP header"))?;
-            if name.is_empty()
-                || !name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            {
-                return Err(AirplayError::Invalid("RTSP header name"));
-            }
-            let name = name.to_ascii_lowercase();
-            let value = value.trim();
-            if value.is_empty()
-                || value.len() > 2048
-                || headers.insert(name, value.to_string()).is_some()
-            {
-                return Err(AirplayError::Invalid("RTSP duplicate or oversized header"));
-            }
-        }
-        if let Some(length) = headers.get("content-length") {
+        let mut message = parse_rtsp_head(&bytes[..header_end])?;
+        if let Some(length) = message.headers.get("content-length") {
             let declared = length
                 .parse::<usize>()
                 .map_err(|_| AirplayError::Invalid("RTSP content length"))?;
@@ -451,11 +429,8 @@ impl RtspMessage {
                 return Err(AirplayError::Invalid("RTSP content length"));
             }
         }
-        Ok(Self {
-            start_line,
-            headers,
-            body: body.to_vec(),
-        })
+        message.body = body.to_vec();
+        Ok(message)
     }
 
     /// Encodes one deterministic RTSP/1.0 message.
@@ -503,6 +478,44 @@ impl RtspMessage {
             .parse()
             .map_err(|_| AirplayError::Invalid("RTSP CSeq"))
     }
+}
+
+// Shared by complete-message parsing and incremental TCP framing. A partial
+// body's declared length is inspected only after the entire head validates.
+fn parse_rtsp_head(bytes: &[u8]) -> Result<RtspMessage, AirplayError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| AirplayError::Invalid("RTSP UTF-8"))?;
+    let mut lines = text.split("\r\n");
+    let start_line = parse_start_line(
+        lines
+            .next()
+            .ok_or(AirplayError::Invalid("RTSP start line"))?,
+    )?;
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or(AirplayError::Invalid("RTSP header"))?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(AirplayError::Invalid("RTSP header name"));
+        }
+        let name = name.to_ascii_lowercase();
+        let value = value.trim();
+        if value.is_empty()
+            || value.len() > 2048
+            || headers.insert(name, value.to_string()).is_some()
+        {
+            return Err(AirplayError::Invalid("RTSP duplicate or oversized header"));
+        }
+    }
+    Ok(RtspMessage {
+        start_line,
+        headers,
+        body: Vec::new(),
+    })
 }
 
 fn parse_start_line(line: &str) -> Result<RtspStartLine, AirplayError> {
@@ -2241,13 +2254,13 @@ pub struct RaopRtspTcpServer {
 }
 
 impl RaopRtspTcpServer {
-    /// Binds a listener with a non-zero bounded read timeout.
+    /// Binds with a non-zero total connection budget, at most 60 seconds.
     pub fn bind(
         address: SocketAddr,
         session: RaopSession,
         read_timeout: Duration,
     ) -> Result<Self, AirplayError> {
-        if read_timeout.is_zero() {
+        if read_timeout.is_zero() || read_timeout > MAX_RTSP_CONNECTION_DURATION {
             return Err(AirplayError::Invalid("RAOP RTSP read timeout"));
         }
         let listener =
@@ -2296,28 +2309,19 @@ impl RaopRtspTcpServer {
         if !authorize(peer) {
             return Err(AirplayError::Invalid("RAOP RTSP peer"));
         }
-        self.serve_connection(stream, peer, self.read_timeout)
+        self.serve_connection(stream, peer, Instant::now() + self.read_timeout)
     }
 
     fn serve_connection(
         &mut self,
-        mut stream: std::net::TcpStream,
+        stream: std::net::TcpStream,
         peer: SocketAddr,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<SocketAddr, AirplayError> {
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(|error| AirplayError::Io(error.kind()))?;
-        stream
-            .set_write_timeout(Some(timeout))
-            .map_err(|error| AirplayError::Io(error.kind()))?;
-        let request = read_rtsp_request(&mut stream)?;
+        let mut connection = rtsp_io::Connection::new(stream, deadline)?;
+        let request = connection.read_request()?;
         let response = self.session.handle(&request)?;
-        let encoded = response.encode()?;
-        stream
-            .write_all(&encoded)
-            .and_then(|_| stream.flush())
-            .map_err(|error| AirplayError::Io(error.kind()))?;
+        connection.write_response(&response.encode()?)?;
         Ok(peer)
     }
 
@@ -2345,12 +2349,11 @@ impl RaopRtspTcpServer {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
                     served += 1;
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let timeout = self.read_timeout.min(remaining);
-                    if timeout.is_zero() {
+                    let connection_deadline = deadline.min(Instant::now() + self.read_timeout);
+                    if connection_deadline <= Instant::now() {
                         break Ok(served);
                     }
-                    let _ = self.serve_connection(stream, peer, timeout);
+                    let _ = self.serve_connection(stream, peer, connection_deadline);
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(1));
@@ -3734,13 +3737,13 @@ pub struct MirrorRtspTcpServer {
 }
 
 impl MirrorRtspTcpServer {
-    /// Binds a listener with a non-zero bounded read timeout.
+    /// Binds with a non-zero total connection budget, at most 60 seconds.
     pub fn bind(
         address: SocketAddr,
         session: MirrorSession,
         read_timeout: std::time::Duration,
     ) -> Result<Self, AirplayError> {
-        if read_timeout.is_zero() {
+        if read_timeout.is_zero() || read_timeout > MAX_RTSP_CONNECTION_DURATION {
             return Err(AirplayError::Invalid("mirror RTSP read timeout"));
         }
         let listener =
@@ -3789,28 +3792,19 @@ impl MirrorRtspTcpServer {
         if !authorize(peer) {
             return Err(AirplayError::Invalid("mirror RTSP peer"));
         }
-        self.serve_connection(stream, peer, self.read_timeout)
+        self.serve_connection(stream, peer, Instant::now() + self.read_timeout)
     }
 
     fn serve_connection(
         &mut self,
-        mut stream: std::net::TcpStream,
+        stream: std::net::TcpStream,
         peer: SocketAddr,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<SocketAddr, AirplayError> {
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(|error| AirplayError::Io(error.kind()))?;
-        stream
-            .set_write_timeout(Some(timeout))
-            .map_err(|error| AirplayError::Io(error.kind()))?;
-        let request = read_rtsp_request(&mut stream)?;
+        let mut connection = rtsp_io::Connection::new(stream, deadline)?;
+        let request = connection.read_request()?;
         let response = self.session.handle(&request)?;
-        let encoded = response.encode()?;
-        stream
-            .write_all(&encoded)
-            .and_then(|_| stream.flush())
-            .map_err(|error| AirplayError::Io(error.kind()))?;
+        connection.write_response(&response.encode()?)?;
         Ok(peer)
     }
 
@@ -3843,12 +3837,11 @@ impl MirrorRtspTcpServer {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
                     served += 1;
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let timeout = self.read_timeout.min(remaining);
-                    if timeout.is_zero() {
+                    let connection_deadline = deadline.min(Instant::now() + self.read_timeout);
+                    if connection_deadline <= Instant::now() {
                         break Ok(served);
                     }
-                    let _ = self.serve_connection(stream, peer, timeout);
+                    let _ = self.serve_connection(stream, peer, connection_deadline);
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(1));
@@ -3874,48 +3867,6 @@ impl MirrorRtspTcpServer {
         }
         Ok(peers)
     }
-}
-
-fn read_rtsp_request(stream: &mut std::net::TcpStream) -> Result<RtspMessage, AirplayError> {
-    let mut bytes = Vec::with_capacity(4096);
-    let mut chunk = [0_u8; 4096];
-    loop {
-        if bytes.len() >= MAX_RTSP_BYTES {
-            return Err(AirplayError::TooLarge("RTSP request"));
-        }
-        if rtsp_request_complete(&bytes) {
-            return RtspMessage::parse(&bytes);
-        }
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|error| AirplayError::Io(error.kind()))?;
-        if read == 0 {
-            return Err(AirplayError::Invalid("RTSP request"));
-        }
-        let remaining = MAX_RTSP_BYTES - bytes.len();
-        bytes.extend_from_slice(&chunk[..read.min(remaining)]);
-    }
-}
-
-fn rtsp_request_complete(bytes: &[u8]) -> bool {
-    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return false;
-    };
-    let header = &bytes[..header_end];
-    let Some(length_line) = header
-        .split(|byte| *byte == b'\n')
-        .find(|line| line.len() >= 15 && line[..15].eq_ignore_ascii_case(b"content-length:"))
-    else {
-        return true;
-    };
-    let Ok(length) = std::str::from_utf8(&length_line[15..])
-        .unwrap_or_default()
-        .trim()
-        .parse::<usize>()
-    else {
-        return true;
-    };
-    bytes.len() >= header_end + 4 + length
 }
 
 fn parse_mirror_transport(value: &str, server_port: u16) -> Result<MirrorTransport, AirplayError> {

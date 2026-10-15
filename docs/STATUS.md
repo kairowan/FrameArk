@@ -62,6 +62,14 @@ are explicit; six Android cases pass three consecutive runs, with 284 Rust and
 [evidence](evidence/2026-10-15-dlna-images/README.md). This does not close
 the named-controller, physical-device, subtitle or two-hour M3 gates.
 
+**RTSP connection I/O correction:** deterministic regressions reproduce the earlier
+Windows intermittent failure on both RAOP and mirror adapters. They now share
+explicit nonblocking reads/writes, safe incremental frame lengths and an absolute
+deadline that cannot be renewed by slow bytes or response writing. Runtime expiry
+closes the accepted stream and preserves the listener for the next request. This
+strengthens M4/M5 transport only; pairing, output and Apple-device gates remain open.
+See [ADR 0134](adr/0134-airplay-rtsp-io.md).
+
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|
 | M0 工程与规范基础 | Rust workspace, Android shell, licenses/governance, CI/security gates including required `framearkd` Linux listener smoke, Windows/macOS Rust workspace format/test/build matrix and bounded `framearkd` startup smoke, ADR series, repository policy checks, Android native-package verification, deterministic SPDX SBOM generation, release APK/source/checksum publication, GitHub OIDC provenance attestations for published artifacts | Non-Linux media/session runtime evidence beyond startup, platform signing policy, and final multi-platform release baseline | Partial |

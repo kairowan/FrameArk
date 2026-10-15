@@ -280,6 +280,23 @@ state. This hook is an integration boundary, not Apple pairing or sender
 authentication: deployments must bind it to an authenticated RTSP/pairing
 identity and still enforce TLS, rate limits, and network policy.
 
+Both accepted RTSP paths explicitly select nonblocking mode and retry only
+WouldBlock/Interrupted under one monotonic read/dispatch/write deadline. Slow
+bytes, partial writes and phase changes do not renew it; `serve_for` passes its
+original absolute deadline, not a new relative budget. Configured per-connection
+budgets must be nonzero and <=60 seconds. Scheduler/OS delays and bounded parsing
+CPU are not forcibly preempted, so this is not a hard real-time guarantee.
+TCP framing validates the complete header before admitting a body, rejects
+duplicate/malformed/oversized lengths without arithmetic overflow, retains at
+most 64 KiB total/32 KiB body, and treats premature EOF as a failure. Header scan
+work is incremental; complete-message parsing retains the same grammar.
+These are one-request fixtures, not persistent/pipelined production RTSP. Already
+buffered trailing bytes are rejected; no second request is processed. A valid
+request may change the session before response I/O fails, as before; the host
+must own recovery/teardown and must not infer peer receipt from local dispatch.
+No new listener, authentication bypass, key handling or default network exposure
+is introduced. See [ADR 0134](docs/adr/0134-airplay-rtsp-io.md).
+
 The RAOP RTP jitter buffer caps retained packets, rejects duplicate and late
 sequence numbers, handles 16-bit sequence wrap, and requires the caller to
 declare a missing-packet recovery point. It does not conceal loss, authenticate
