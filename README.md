@@ -14,7 +14,7 @@ Receiver has foreground Android H.264/AAC output. Sender offers both a
 30-second generated reference stream and explicit Android 10+ screen sharing
 with optional permitted playback audio over pinned QUIC. Physical performance,
 one-hour stability and recovery gates remain open. DLNA now has an opt-in
-Android HTTP Range media player with isolated-emulator pixel/control evidence;
+Android HTTP Range media/photo player with isolated-emulator pixel/control evidence;
 its controller matrix remains open. AirPlay remains protocol foundations,
 not Apple-device interoperability claims.
 
@@ -24,8 +24,10 @@ not Apple-device interoperability claims.
 操作见[参考测试流](docs/testing/ANDROID_REFERENCE_SENDER.md)与[屏幕共享说明](docs/testing/ANDROID_SCREEN_CAPTURE.md)。
 
 Receiver 新增[实验性 DLNA 播放入口](docs/testing/ANDROID_DLNA_PLAYBACK.md)：显式选择可信
-局域网后，可接收控制端自身提供、支持 HTTP Range 的 MP4/MP3/WAV。没有 PIN 认证，
-离开页面即停止；第三方媒体主机、HTTPS、图片、字幕和完整控制端兼容矩阵尚未交付。
+局域网后，可接收控制端自身提供、支持 HTTP Range 的 MP4/MP3/WAV 和 JPEG/PNG。
+图片最多 16 MiB，按比例缩放显示，支持 JPEG 八种 EXIF 方向；暂停保留画面，停止清屏。
+没有 PIN 认证，离开页面即停止；第三方媒体主机、HTTPS、字幕和完整控制端兼容矩阵尚未交付。
+图片的尺寸、内存与动画限制见[图片输出契约](docs/adr/0133-android-dlna-images.md)。
 
 三项 DLNA v1 服务现有完整参数/状态变量描述及 19 项动作（单曲模式）：
 支持恢复默认音量、按曲目回到起点及完整媒体查询。必需参数必须显式传入；

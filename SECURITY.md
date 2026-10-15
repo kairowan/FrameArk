@@ -70,6 +70,20 @@ handles/commands/consumer tokens are never reused. Strong ETags, if supplied, ar
 checked on later reads alongside MIME and total length. Without a strong validator,
 a same-size/type replacement cannot be detected. No media/URLs are logged.
 
+JPEG/PNG preparation is separately capped in Rust at 16 MiB encoded. Android reads
+only the opaque Rust handle, validates magic/MIME and decoder-reported dimensions
+(each <=32768, <=100 million original pixels), then samples to <=4096 per edge and
+<=4,194,304 ARGB8888 pixels. A JPEG orientation transform can transiently retain
+two decoded bitmaps plus encoded bytes; these limits are not a whole-process heap
+guarantee. Allocation failure is reported as output failure. Only unexposed decoder
+temporaries are explicitly recycled; published images lose app references on
+replacement/close and are reclaimed after Android's renderer releases them.
+No EXIF location, filename, image contents or decoder exception is logged. Commands
+still have the existing five-second deadline, source reads remain revocable, and
+closed/stale UI callbacks cannot replace the current picture. Native platform
+decoding cannot be forcibly interrupted mid-call, so users must keep Android
+patched; these bounds are not a decoder sandbox. See [ADR 0133](docs/adr/0133-android-dlna-images.md).
+
 Callbacks must have a literal address equal to their subscriber's transport peer.
 The host has no callback DNS, redirect, retry or third-party fetch path. The callback
 I/O deadline is total, not renewed by slow bytes; HTTP request reads and control

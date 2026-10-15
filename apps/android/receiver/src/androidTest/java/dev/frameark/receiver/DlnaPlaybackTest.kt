@@ -5,6 +5,7 @@ package dev.frameark.receiver
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.ExifInterface
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -12,6 +13,7 @@ import android.media.MediaMuxer
 import android.test.InstrumentationTestCase
 import android.view.TextureView
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -23,6 +25,161 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Original synthetic media -> HTTP Range -> Rust -> MediaDataSource -> real OS player. */
 class DlnaPlaybackTest : InstrumentationTestCase() {
+    fun testImageTargetRejectsStaleAndClosedWork() {
+        val context = instrumentation.targetContext
+        val activity = instrumentation.startActivitySync(Intent(context, DlnaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val red = Bitmap.createBitmap(80, 40, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        val green = Bitmap.createBitmap(80, 40, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) }
+        try {
+            await("surface available") { DlnaOutputOwner.surface?.isValid == true }
+            val target = requireNotNull(DlnaOutputOwner.images)
+            val result = AtomicInteger(-1)
+            target.present(1, red, { false }) { result.set(if (it) 1 else 0) }
+            await("stale display rejected") { result.get() == 0 }
+            result.set(-1)
+            target.present(2, green, { true }) { result.set(if (it) 1 else 0) }
+            await("current display accepted") { result.get() == 1 }
+            target.retire(1, null)
+            instrumentation.waitForIdleSync()
+            awaitPicture(activity, Color.GREEN)
+            instrumentation.runOnMainSync { target.close() }
+            result.set(-1)
+            target.present(2, red, { true }) { result.set(if (it) 1 else 0) }
+            await("closed display rejected") { result.get() == 0 }
+            awaitPicture(activity, Color.BLACK)
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+            red.recycle() // Rejected work never published this bitmap to RenderThread.
+        }
+    }
+
+    fun testStillDecoderBoundsShortReadsAndAllJpegOrientations() {
+        val context = instrumentation.targetContext
+        val expected = listOf(
+            listOf(Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW),
+            listOf(Color.GREEN, Color.RED, Color.YELLOW, Color.BLUE),
+            listOf(Color.YELLOW, Color.BLUE, Color.GREEN, Color.RED),
+            listOf(Color.BLUE, Color.YELLOW, Color.RED, Color.GREEN),
+            listOf(Color.RED, Color.BLUE, Color.GREEN, Color.YELLOW),
+            listOf(Color.BLUE, Color.RED, Color.YELLOW, Color.GREEN),
+            listOf(Color.YELLOW, Color.GREEN, Color.BLUE, Color.RED),
+            listOf(Color.GREEN, Color.YELLOW, Color.RED, Color.BLUE),
+        )
+        val original = Bitmap.createBitmap(80, 40, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 40) for (x in 0 until 80) original.setPixel(x, y, expected[0][(if (y >= 20) 2 else 0) + if (x >= 40) 1 else 0])
+        val file = File(context.cacheDir, "original-dlna-orientation.jpg")
+        try {
+            for (orientation in 1..8) {
+                file.outputStream().use { assertTrue(original.compress(Bitmap.CompressFormat.JPEG, 100, it)) }
+                ExifInterface(file.absolutePath).apply { setAttribute(ExifInterface.TAG_ORIENTATION, orientation.toString()); saveAttributes() }
+                val decoded = memorySource(file.readBytes()).use { DlnaImageDecoder.decode(it, 1) { true } }
+                try {
+                    assertEquals(if (orientation <= 4) 80 else 40, decoded.width)
+                    assertEquals(if (orientation <= 4) 40 else 80, decoded.height)
+                    val positions = listOf(1 to 1, 3 to 1, 1 to 3, 3 to 3)
+                    for ((index, point) in positions.withIndex()) assertColor(expected[orientation - 1][index], decoded.getPixel(decoded.width * point.first / 4, decoded.height * point.second / 4))
+                } finally { decoded.recycle() }
+            }
+        } finally { original.recycle(); assertTrue(file.delete()) }
+        val large = photo(Color.BLUE, 4000, 3000, Bitmap.CompressFormat.JPEG)
+        val sampled = memorySource(large).use { DlnaImageDecoder.decode(it, 1) { true } }
+        try { assertEquals(2000, sampled.width); assertEquals(1500, sampled.height); assertColor(Color.BLUE, sampled.getPixel(1000, 750)) } finally { sampled.recycle() }
+        val png = photo(Color.RED)
+        for (action in listOf<() -> Unit>(
+            { memorySource(png).use { DlnaImageDecoder.decode(it, 1) { true }.recycle() } },
+            { memorySource(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)).use { DlnaImageDecoder.decode(it, 2) { true }.recycle() } },
+            { memorySource(png, 16L * 1024 * 1024 + 1).use { DlnaImageDecoder.decode(it, 2) { true }.recycle() } },
+            { memorySource(png).use { DlnaImageDecoder.decode(it, 2) { false }.recycle() } },
+            { memorySource(png, png.size.toLong() + 10).use { DlnaImageDecoder.decode(it, 2) { true }.recycle() } },
+        )) { try { action(); fail("invalid image accepted") } catch (_: Exception) { } }
+    }
+
+    fun testStillImagePixelsTransportReplacementAndFailureCleanup() {
+        val context = instrumentation.targetContext
+        val native = FrameArkNative()
+        assertTrue(native.load() is FrameArkNative.LoadResult.Loaded)
+        assertTrue(native.setDeviceIdentity(AndroidDeviceIdentityStore().getOrCreate()))
+        val origin = Origin(byteArrayOf(), wave(), photo(Color.RED), photo(Color.GREEN, 80, 160, Bitmap.CompressFormat.JPEG))
+        val activity = instrumentation.startActivitySync(Intent(context, DlnaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        try {
+            await("surface available") { DlnaOutputOwner.surface?.isValid == true }
+            assertEquals(0, DlnaNative.startProbe())
+            DlnaOutputOwner.output = DlnaPlayerOutput(DlnaNative.outputToken(), DlnaOutputOwner.images) { DlnaOutputOwner.surface }
+            val endpoint = URI(requireNotNull(DlnaNative.descriptionUrl()))
+            fun action(name: String, args: String = "") = soap(endpoint, name, args)
+            fun ok(name: String, args: String = "") { val result = action(name, args); assertTrue(result, result.startsWith("HTTP/1.1 200")) }
+            fun load(path: String) = ok("SetAVTransportURI", "<CurrentURI>http://127.0.0.1:${origin.port}/$path</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>")
+            load("photo.png")
+            assertTrue(action("GetTransportInfo").contains("STOPPED"))
+            awaitPicture(activity, Color.BLACK)
+            ok("Play", "<Speed>1</Speed>")
+            awaitPicture(activity, Color.RED)
+            assertTrue(action("GetPositionInfo").contains("<TrackDuration>00:00:00</TrackDuration>"))
+            assertTrue(action("GetPositionInfo").contains("<RelTime>00:00:00</RelTime>"))
+            ok("Pause")
+            awaitPicture(activity, Color.RED)
+            assertTrue(action("GetTransportInfo").contains("PAUSED_PLAYBACK"))
+            ok("Seek", "<Unit>TRACK_NR</Unit><Target>1</Target>")
+            assertTrue(action("Seek", "<Unit>REL_TIME</Unit><Target>00:00:01</Target>").contains("<errorCode>711</errorCode>"))
+            ok("SetVolume", "<Channel>Master</Channel><DesiredVolume>35</DesiredVolume>")
+            ok("Stop")
+            awaitPicture(activity, Color.BLACK)
+            ok("Play", "<Speed>1</Speed>")
+            awaitPicture(activity, Color.RED)
+            repeat(3) {
+                load("photo.jpg")
+                awaitPicture(activity, Color.GREEN)
+                assertTrue(action("GetTransportInfo").contains("PLAYING"))
+                load("photo.png")
+                awaitPicture(activity, Color.RED)
+            }
+            val screenshot = instrumentation.uiAutomation.takeScreenshot()
+            File(context.getExternalFilesDir(null), "dlna-image.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            screenshot.recycle()
+            val bad = action("SetAVTransportURI", "<CurrentURI>http://127.0.0.1:${origin.port}/broken.png</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>")
+            assertTrue(bad, bad.startsWith("HTTP/1.1 500"))
+            await("invalid image fails closed") { action("GetTransportInfo").contains("ERROR_OCCURRED") }
+            awaitPicture(activity, Color.BLACK)
+            assertTrue(origin.reads.get() >= 16)
+            instrumentation.sendStatus(0, android.os.Bundle().apply { putString("stream", "\nDLNA images: actual PNG/JPEG screen pixels; 3 replacements; timeless seek, pause/stop/replay and malformed-image cleanup; Range requests=${origin.reads.get()}\n") })
+        } finally {
+            val output = DlnaOutputOwner.output
+            output?.close(); DlnaOutputOwner.output = null; DlnaNative.stop()
+            await("image output closed") { output?.isClosed() != false }
+            origin.close()
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
+    private fun awaitPicture(activity: android.app.Activity, color: Int) {
+        await("actual picture screen pixels") {
+            val screenshot = instrumentation.uiAutomation.takeScreenshot()
+            try {
+                var point = 0 to 0
+                instrumentation.runOnMainSync {
+                    val view = activity.findViewById<android.view.ViewGroup>(android.R.id.content).findViewWithTag<android.widget.ImageView>("dlna-picture")
+                    val xy = IntArray(2); view.getLocationOnScreen(xy)
+                    point = xy[0] + view.width / 2 to xy[1] + view.height / 2
+                }
+                similarColor(color, screenshot.getPixel(point.first, point.second))
+            } finally { screenshot.recycle() }
+        }
+    }
+
+    private fun similarColor(expected: Int, actual: Int) = kotlin.math.abs(Color.red(expected) - Color.red(actual)) < 35 && kotlin.math.abs(Color.green(expected) - Color.green(actual)) < 35 && kotlin.math.abs(Color.blue(expected) - Color.blue(actual)) < 35
+    private fun assertColor(expected: Int, actual: Int) { assertTrue("expected $expected, actual $actual", similarColor(expected, actual)) }
+
+    private fun memorySource(bytes: ByteArray, length: Long = bytes.size.toLong()) = RustMediaDataSource(1, object : DlnaSourceAccess {
+        override fun sourceSize(id: Long) = length
+        override fun sourceRead(id: Long, position: Long, size: Int): ByteArray = if (position >= bytes.size) byteArrayOf() else bytes.copyOfRange(position.toInt(), minOf(bytes.size, position.toInt() + size, position.toInt() + 31))
+        override fun sourceClose(id: Long) = Unit
+    })
+
+    private fun photo(color: Int, width: Int = 160, height: Int = 80, format: Bitmap.CompressFormat = Bitmap.CompressFormat.PNG): ByteArray {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        try { bitmap.eraseColor(color); return ByteArrayOutputStream().use { assertTrue(bitmap.compress(format, 100, it)); it.toByteArray() } } finally { bitmap.recycle() }
+    }
+
     fun testExplicitForegroundServiceStopsWhenPageCloses() {
         val context = instrumentation.targetContext
         val address = java.net.NetworkInterface.getNetworkInterfaces().toList()
@@ -56,7 +213,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
         assertTrue(native.setDeviceIdentity(AndroidDeviceIdentityStore().getOrCreate()))
         val videoFile = File(context.cacheDir, "dlna-original-test.mp4")
         encodeVideo(videoFile)
-        val origin = Origin(videoFile.readBytes(), wave())
+        val origin = Origin(videoFile.readBytes(), wave(), photo(Color.GREEN))
         val activity = instrumentation.startActivitySync(Intent(context, DlnaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         try {
             await("surface available") { DlnaOutputOwner.surface?.isValid == true }
@@ -64,7 +221,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
             val token = DlnaNative.outputToken()
             assertTrue(token > 0)
             assertNull(DlnaNative.pollCommand(token + 1))
-            DlnaOutputOwner.output = DlnaPlayerOutput(token) { DlnaOutputOwner.surface }
+            DlnaOutputOwner.output = DlnaPlayerOutput(token, DlnaOutputOwner.images) { DlnaOutputOwner.surface }
             assertEquals(FrameArkNative.ReceiverResult.Failed(-6), native.startReceiver())
             val endpoint = URI(requireNotNull(DlnaNative.descriptionUrl()))
             fun action(name: String, args: String = ""): String = soap(endpoint, name, args)
@@ -82,7 +239,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
                 var red = false
                 instrumentation.runOnMainSync {
                     val view = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
-                    val texture = (view.getChildAt(0) as android.view.ViewGroup).let { group -> (0 until group.childCount).map(group::getChildAt).filterIsInstance<TextureView>().single() }
+                    val texture = view.findViewWithTag<TextureView>("dlna-video")
                     val bitmap = texture.bitmap
                     if (bitmap != null) {
                         val pixel = bitmap.getPixel(bitmap.width / 2, bitmap.height / 2)
@@ -112,6 +269,10 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
             ok("Stop")
             assertTrue(action("GetTransportInfo").contains("STOPPED"))
             ok("Play", "<Speed>1</Speed>")
+            load("photo.png")
+            awaitPicture(activity, Color.GREEN)
+            load("video.mp4")
+            await("video output restarts after picture") { DlnaOutputOwner.output?.diagnostic()?.contains("video-start notifications: 2") == true }
             load("tone.wav") // Replacement revokes the old source, with a different OS player.
             assertTrue("replacing a playing source resumes the new OS player", action("GetTransportInfo").contains("PLAYING"))
             await("WAV decoder position advances") { action("GetPositionInfo").contains("<RelTime>00:00:01</RelTime>") }
@@ -119,7 +280,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
             assertTrue("Range reads reached the origin", origin.reads.get() >= 4)
             assertNull("stale consumer never gets another runtime's work", DlnaNative.pollCommand(token + 1))
             instrumentation.sendStatus(0, android.os.Bundle().apply {
-                putString("stream", "\nDLNA original MP4: decoded red pixels, Play/Pause/Seek/Stop/replay, FactoryDefaults volume and TRACK_NR; WAV replacement auto-resumes: position + EOS; HTTP Range requests=${origin.reads.get()}; ${DlnaOutputOwner.output?.diagnostic()}\n")
+                putString("stream", "\nDLNA original MP4: decoded red pixels, Play/Pause/Seek/Stop/replay, FactoryDefaults volume and TRACK_NR; image/video round trip; WAV replacement auto-resumes: position + EOS; HTTP Range requests=${origin.reads.get()}; ${DlnaOutputOwner.output?.diagnostic()}\n")
             })
         } finally {
             val output = DlnaOutputOwner.output
@@ -181,7 +342,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
         }
     }
 
-    private class Origin(private val mp4: ByteArray, private val wav: ByteArray) : AutoCloseable {
+    private class Origin(private val mp4: ByteArray, private val wav: ByteArray, private val png: ByteArray = byteArrayOf(), private val jpeg: ByteArray = byteArrayOf()) : AutoCloseable {
         private val socket = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
         private val closed = AtomicBoolean()
         val reads = AtomicInteger()
@@ -195,8 +356,13 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
                         val first = requireNotNull(reader.readLine())
                         val headers = generateSequence { reader.readLine()?.takeIf(String::isNotEmpty) }.take(32).toList()
                         val range = Regex("(?i)range: bytes=(\\d+)-(\\d+)").matchEntire(headers.first { it.startsWith("range:", true) })!!
-                        val bytes = if (first.contains("/tone.wav")) wav else mp4
-                        val mime = if (first.contains("/tone.wav")) "audio/wav" else "video/mp4"
+                        val (bytes, mime) = when {
+                            first.contains("/tone.wav") -> wav to "audio/wav"
+                            first.contains("/photo.png") -> png to "image/png"
+                            first.contains("/photo.jpg") -> jpeg to "image/jpeg"
+                            first.contains("/broken.png") -> ByteArray(128) to "image/png"
+                            else -> mp4 to "video/mp4"
+                        }
                         val start = range.groupValues[1].toInt(); val end = range.groupValues[2].toInt()
                         check(start >= 0 && end >= start && end < bytes.size && end - start < 65_536)
                         val response = "HTTP/1.1 206 Partial Content\r\nContent-Length: ${end-start+1}\r\nContent-Range: bytes $start-$end/${bytes.size}\r\nContent-Type: $mime\r\nETag: \"original-fixture\"\r\nConnection: close\r\n\r\n"

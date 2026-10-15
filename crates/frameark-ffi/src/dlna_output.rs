@@ -12,6 +12,20 @@ use std::sync::atomic::AtomicU64;
 static NEXT_COMMAND: AtomicU64 = AtomicU64::new(1);
 static OUTPUT: OnceLock<Mutex<Option<OutputBridge>>> = OnceLock::new();
 
+// Internal JNI command 8 prepares a still image; argument 1=JPEG, 2=PNG.
+// The OS decoder also checks dimensions/sampling before allocating pixels.
+const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+fn preparation(mime: &str, length: u64) -> Result<(i64, i64), Error> {
+    match mime {
+        "video/mp4" | "audio/mpeg" | "audio/wav" | "audio/x-wav" => Ok((1, 0)),
+        "image/jpeg" | "image/png" if (1..=MAX_IMAGE_BYTES).contains(&length) => {
+            Ok((8, if mime == "image/jpeg" { 1 } else { 2 }))
+        }
+        _ => Err(Error::Unsupported),
+    }
+}
+
 fn output() -> &'static Mutex<Option<OutputBridge>> {
     OUTPUT.get_or_init(|| Mutex::new(None))
 }
@@ -281,6 +295,12 @@ impl AndroidDlnaBackend {
             let _ = session.transition(SessionState::Closed);
         }
     }
+
+    fn is_image(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|(_, source)| matches!(source.mime_type(), "image/jpeg" | "image/png"))
+    }
 }
 
 impl MediaPlaybackBackend for AndroidDlnaBackend {
@@ -296,14 +316,9 @@ impl MediaPlaybackBackend for AndroidDlnaBackend {
                 RemoteMediaSource::open(uri, policy, vec![origin], None, Duration::from_secs(2))
                     .map_err(|_| Error::Rejected)?,
             );
-            if !matches!(
-                source.mime_type(),
-                "video/mp4" | "audio/mpeg" | "audio/wav" | "audio/x-wav"
-            ) {
-                return Err(Error::Unsupported);
-            }
+            let (kind, argument) = preparation(source.mime_type(), source.len())?;
             let id = dlna_source::register(source.clone()).map_err(|_| Error::Unavailable)?;
-            if let Err(error) = self.bridge.command(1, id, 0) {
+            if let Err(error) = self.bridge.command(kind, id, argument) {
                 dlna_source::revoke(id);
                 return Err(error);
             }
@@ -312,6 +327,11 @@ impl MediaPlaybackBackend for AndroidDlnaBackend {
             }
             self.prepare_session(id)?;
             return Ok(());
+        }
+        if matches!(command, PlaybackCommand::Seek { position_seconds } if position_seconds > 0)
+            && self.is_image()
+        {
+            return Err(Error::Unsupported);
         }
         let source = self.source.as_ref().map_or(0, |(id, _)| *id);
         let (kind, argument) = match command {
@@ -359,7 +379,14 @@ impl MediaPlaybackBackend for AndroidDlnaBackend {
         ) {
             self.close_session();
         }
-        value
+        value.or_else(|| {
+            // Stills have no advancing media clock or automatic EOS. This is
+            // protocol semantics, not invented decoder progress or duration.
+            self.is_image().then_some(PlaybackFeedback::Progress {
+                position_seconds: 0,
+                duration_seconds: Some(0),
+            })
+        })
     }
 
     fn shutdown(&mut self) {
@@ -445,6 +472,140 @@ pub extern "system" fn Java_dev_frameark_receiver_DlnaNative_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn still_preparation_is_typed_and_bounded_before_output() {
+        for (mime, kind) in [("image/jpeg", 1), ("image/png", 2)] {
+            assert_eq!(preparation(mime, 1), Ok((8, kind)));
+            assert_eq!(preparation(mime, MAX_IMAGE_BYTES), Ok((8, kind)));
+            for length in [0, MAX_IMAGE_BYTES + 1, u64::MAX] {
+                assert_eq!(preparation(mime, length), Err(Error::Unsupported));
+            }
+        }
+        for mime in [
+            "image/gif",
+            "image/svg+xml",
+            "image/webp",
+            "text/html",
+            "image/jpg",
+        ] {
+            assert_eq!(preparation(mime, 100), Err(Error::Unsupported));
+        }
+        assert_eq!(preparation("video/mp4", MAX_IMAGE_BYTES + 1), Ok((1, 0)));
+        assert_eq!(preparation("audio/mpeg", 100), Ok((1, 0)));
+    }
+
+    #[test]
+    fn image_source_commands_keep_rust_session_and_timeless_seek_semantics() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(1))
+                    }
+                    other => panic!("bounded image origin accept: {other:?}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") && request.len() < 4096 {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .contains("Range: bytes=0-0")
+            );
+            socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Type: image/jpeg\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/100\r\n\r\n\xff").unwrap();
+        });
+        let bridge = OutputBridge::new().unwrap();
+        let output = bridge.clone();
+        let worker = thread::spawn(move || {
+            let mut backend = AndroidDlnaBackend::new(
+                output,
+                Arc::new(Mutex::new(address.ip())),
+                DeviceId::try_from("image-fixture".to_string()).unwrap(),
+                true,
+            );
+            backend
+                .apply(PlaybackCommand::SetUri {
+                    uri: &format!("http://{address}/photo"),
+                    metadata: "",
+                })
+                .unwrap();
+            assert_eq!(
+                backend.session.as_ref().unwrap().state(),
+                SessionState::Preparing
+            );
+            assert_eq!(
+                backend.feedback(),
+                Some(PlaybackFeedback::Progress {
+                    position_seconds: 0,
+                    duration_seconds: Some(0)
+                })
+            );
+            assert_eq!(
+                backend.apply(PlaybackCommand::Seek {
+                    position_seconds: 1
+                }),
+                Err(Error::Unsupported)
+            );
+            backend.apply(PlaybackCommand::Play).unwrap();
+            assert_eq!(
+                backend.session.as_ref().unwrap().state(),
+                SessionState::Streaming
+            );
+            backend.apply(PlaybackCommand::Pause).unwrap();
+            backend.apply(PlaybackCommand::Stop).unwrap();
+            assert_eq!(
+                backend.session.as_ref().unwrap().state(),
+                SessionState::Closed
+            );
+            backend.apply(PlaybackCommand::Play).unwrap();
+            assert_eq!(
+                backend.session.as_ref().unwrap().state(),
+                SessionState::Streaming
+            );
+            backend.shutdown();
+            assert_eq!(
+                backend.session.as_ref().unwrap().state(),
+                SessionState::Closed
+            );
+        });
+        let mut source = 0;
+        for expected in [8, 2, 3, 4, 2] {
+            let command = await_command(&bridge);
+            assert_eq!(command.kind, expected);
+            if expected == 8 {
+                source = command.source;
+                assert_eq!(command.argument, 1);
+            }
+            assert_ne!(source, 0);
+            assert_eq!(command.source, source);
+            assert!(bridge.acknowledge(command.id, true));
+        }
+        worker.join().unwrap();
+        origin.join().unwrap();
+        assert!(dlna_source::report(source).is_none());
+        assert_eq!(bridge.poll().unwrap().kind, 7);
+    }
 
     fn await_command(bridge: &OutputBridge) -> Command {
         let deadline = Instant::now() + Duration::from_secs(2);

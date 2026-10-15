@@ -1,6 +1,7 @@
 package dev.frameark.receiver
 
 import android.media.AudioAttributes
+import android.graphics.Bitmap
 import android.media.MediaPlayer
 import android.os.Handler
 import android.os.HandlerThread
@@ -10,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** OS player ownership only: every MediaPlayer call runs on this one Looper. */
-internal class DlnaPlayerOutput(private val token: Long, private val surface: () -> Surface?) : AutoCloseable {
+internal class DlnaPlayerOutput(private val token: Long, private val images: DlnaImageTarget? = null, private val surface: () -> Surface?) : AutoCloseable {
     init { require(token > 0) }
     private val thread = HandlerThread("FrameArk DLNA output").apply { start() }
     private val handler = Handler(thread.looper)
@@ -18,6 +19,8 @@ internal class DlnaPlayerOutput(private val token: Long, private val surface: ()
     private val closed = AtomicBoolean()
     private var player: MediaPlayer? = null
     private var source: RustMediaDataSource? = null
+    private var image: Bitmap? = null
+    private val revision = AtomicLong()
     private var pending = 0L
     private var accepted = 0L
     private var volume = 0.5f
@@ -59,11 +62,19 @@ internal class DlnaPlayerOutput(private val token: Long, private val surface: ()
         val argument = command[3]
         check(id > 0 && pending == 0L)
         pending = id
-        if (kind == 1L) {
+        if (kind == 1L || kind == 8L) {
             releasePlayer(keepPending = true)
-            val target = surface()?.takeIf { it.isValid } ?: error("surface unavailable")
             val data = RustMediaDataSource(command[2])
             source = data
+            if (kind == 8L) {
+                check(images != null)
+                image = DlnaImageDecoder.decode(data, argument) { running.get() }
+                prepared = true
+                status = "Image prepared"
+                displayImage(null, id)
+                return
+            }
+            val target = surface()?.takeIf { it.isValid } ?: error("surface unavailable")
             val next = MediaPlayer()
             player = next
             next.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build())
@@ -75,7 +86,7 @@ internal class DlnaPlayerOutput(private val token: Long, private val surface: ()
                     instance.setVolume(volume, volume)
                     dimensions = size(instance.videoWidth, instance.videoHeight)
                     status = "Prepared"
-                    finish(id)
+                    displayVideo(id)
                 } catch (_: Exception) { fail() }
             }
             next.setOnSeekCompleteListener { instance ->
@@ -110,6 +121,17 @@ internal class DlnaPlayerOutput(private val token: Long, private val surface: ()
             finish(id)
             return
         }
+        val still = image
+        if (still != null && prepared) {
+            when (kind) {
+                2L -> { status = "Showing image"; displayImage(still, id) }
+                3L -> { status = "Image paused"; finish(id) }
+                4L -> { status = "Image stopped"; displayImage(null, id) }
+                5L -> { require(argument == 0L); finish(id) }
+                else -> error("unsupported image output operation")
+            }
+            return
+        }
         val active = player?.takeIf { prepared } ?: error("output unavailable")
         when (kind) {
             2L -> { active.start(); status = "Playing"; finish(id) }
@@ -128,6 +150,29 @@ internal class DlnaPlayerOutput(private val token: Long, private val surface: ()
     }
 
     private fun isCurrent(instance: MediaPlayer): Boolean = running.get() && player === instance
+
+    private fun displayImage(bitmap: Bitmap?, id: Long) {
+        val generation = revision.get()
+        requireNotNull(images).present(token, bitmap, { running.get() && revision.get() == generation }) { accepted ->
+            handler.post {
+                if (running.get() && revision.get() == generation && pending == id) {
+                    if (accepted) finish(id) else fail()
+                }
+            }
+        }
+    }
+
+    private fun displayVideo(id: Long) {
+        val target = images ?: run { finish(id); return }
+        val generation = revision.get()
+        target.video(token, { running.get() && revision.get() == generation }) { accepted ->
+            handler.post {
+                if (running.get() && revision.get() == generation && pending == id) {
+                    if (accepted) finish(id) else fail()
+                }
+            }
+        }
+    }
 
     private fun finish(id: Long) {
         if (pending != id) return
@@ -152,12 +197,16 @@ internal class DlnaPlayerOutput(private val token: Long, private val surface: ()
     }
 
     private fun releasePlayer(keepPending: Boolean = false) {
+        revision.incrementAndGet()
         prepared = false
         accepted = 0
         dimensions = null
         if (!keepPending) pending = 0
         val old = player
         player = null
+        val oldImage = image
+        image = null
+        images?.retire(token, oldImage)
         // Revoke network reads first so OS teardown cannot wait on a live origin.
         runCatching { source?.close() }
         source = null

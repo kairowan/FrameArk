@@ -58,9 +58,14 @@ No physical-device latency or throughput guarantee follows from these fixtures.
 Android DLNA's current profile is foreground-only, private IPv4, explicit consent,
 no PIN and one player mutually exclusive with FANP. Sources must be served by the
 controller itself over HTTP with exact Range support and known length. MP4, MP3,
-WAV MIME types are allowed, but only original H.264 MP4 and PCM WAV have OS playback
-evidence; MP3, codec variants, physical output and multivendor controllers remain
-unverified. HTTPS, third-party origin approval, images, subtitles, playlists and
+WAV, JPEG and PNG MIME types are allowed. Original H.264 MP4, PCM WAV and static
+JPEG/PNG have isolated-emulator OS output evidence; MP3, codec variants, physical
+output and multivendor controllers remain unverified. Images use bounded sampled
+sRGB output, FIT_CENTER and JPEG's eight EXIF orientations; PNG EXIF, animation,
+HDR/wide-gamut fidelity and slideshow scheduling are not supported. Still position
+and duration are zero, Pause holds, Stop clears, Play reuses the retained picture.
+See [image contract](adr/0133-android-dlna-images.md).
+HTTPS, third-party origin approval, subtitles, playlists and
 two-hour stability are not delivered. Core HTTPS source fixtures do not imply
 Android HTTPS support. See [test guide](testing/ANDROID_DLNA_PLAYBACK.md) and
 [evidence](evidence/2026-10-15-dlna-playback/README.md).

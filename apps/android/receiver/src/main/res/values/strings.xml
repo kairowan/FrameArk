@@ -60,7 +60,8 @@
     <string name="dlna_failed">DLNA could not start (%1$d). Stop the Native receiver first and check the selected LAN.</string>
     <string name="dlna_stopped">DLNA stopped</string>
     <string name="dlna_ready">Renderer description: %1$s</string>
-    <string name="dlna_warning">Experimental: trusted LAN only, without PIN authentication. Any LAN controller can change playback. This preview accepts HTTP Range MP4, MP3 and WAV served by the controller itself; HTTPS, other media hosts, images and subtitles are not enabled yet. Stop the Native receiver first. Leaving this screen stops DLNA.</string>
+    <string name="dlna_warning">Experimental: trusted LAN only, without PIN authentication. Any LAN controller can change playback. Accepts HTTP Range MP4, MP3, WAV and JPEG/PNG still images served by the controller itself. Images are limited to 16 MiB and downsampled for bounded display. HTTPS, other media hosts and subtitles are not enabled yet. Stop the Native receiver first. Leaving this screen stops DLNA.</string>
+    <string name="dlna_image_description">Photo received through DLNA</string>
     <string name="dlna_start">Enable DLNA</string>
     <string name="dlna_summary">Experimental DLNA: no PIN. Use only a trusted LAN. Leaving this screen stops playback.</string>
     <string name="dlna_diagnostics">Diagnostics</string>
