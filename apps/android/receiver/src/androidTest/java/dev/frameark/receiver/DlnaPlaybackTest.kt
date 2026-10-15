@@ -73,6 +73,9 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
                 assertTrue(result, result.startsWith("HTTP/1.1 200"))
             }
             fun ok(name: String, args: String = "") { val result = action(name, args); assertTrue(result, result.startsWith("HTTP/1.1 200")) }
+            assertTrue(action("GetDeviceCapabilities").contains("<PlayMedia>NETWORK</PlayMedia>"))
+            assertTrue(action("GetTransportSettings").contains("<PlayMode>NORMAL</PlayMode>"))
+            assertTrue(action("ListPresets").contains("<CurrentPresetNameList>FactoryDefaults</CurrentPresetNameList>"))
             load("video.mp4")
             ok("Play", "<Speed>1</Speed>")
             await("real decoded red pixels", 10_000) {
@@ -96,6 +99,12 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
             assertTrue(action("GetPositionInfo").contains("<RelTime>00:00:03</RelTime>"))
             ok("SetVolume", "<Channel>Master</Channel><DesiredVolume>27</DesiredVolume>")
             assertTrue(action("GetVolume", "<Channel>Master</Channel>").contains("<CurrentVolume>27</CurrentVolume>"))
+            ok("SelectPreset", "<PresetName>FactoryDefaults</PresetName>")
+            assertTrue(action("GetVolume", "<Channel>Master</Channel>").contains("<CurrentVolume>50</CurrentVolume>"))
+            ok("Seek", "<Unit>TRACK_NR</Unit><Target>1</Target>")
+            assertTrue(action("GetPositionInfo").contains("<RelTime>00:00:00</RelTime>"))
+            assertTrue(action("Next").contains("<errorCode>711</errorCode>"))
+            assertTrue(action("Previous").contains("<errorCode>711</errorCode>"))
             ok("Play", "<Speed>1</Speed>")
             val screenshot = instrumentation.uiAutomation.takeScreenshot()
             File(context.getExternalFilesDir(null), "dlna-playback.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -104,13 +113,13 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
             assertTrue(action("GetTransportInfo").contains("STOPPED"))
             ok("Play", "<Speed>1</Speed>")
             load("tone.wav") // Replacement revokes the old source, with a different OS player.
-            ok("Play", "<Speed>1</Speed>")
+            assertTrue("replacing a playing source resumes the new OS player", action("GetTransportInfo").contains("PLAYING"))
             await("WAV decoder position advances") { action("GetPositionInfo").contains("<RelTime>00:00:01</RelTime>") }
             await("WAV reaches EOS", 12_000) { action("GetTransportInfo").contains("STOPPED") }
             assertTrue("Range reads reached the origin", origin.reads.get() >= 4)
             assertNull("stale consumer never gets another runtime's work", DlnaNative.pollCommand(token + 1))
             instrumentation.sendStatus(0, android.os.Bundle().apply {
-                putString("stream", "\nDLNA original MP4: decoded red pixels, Play/Pause/Seek/Stop/replay; WAV replacement: position + EOS; HTTP Range requests=${origin.reads.get()}; ${DlnaOutputOwner.output?.diagnostic()}\n")
+                putString("stream", "\nDLNA original MP4: decoded red pixels, Play/Pause/Seek/Stop/replay, FactoryDefaults volume and TRACK_NR; WAV replacement auto-resumes: position + EOS; HTTP Range requests=${origin.reads.get()}; ${DlnaOutputOwner.output?.diagnostic()}\n")
             })
         } finally {
             val output = DlnaOutputOwner.output
@@ -157,7 +166,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
     }
 
     private fun soap(endpoint: URI, action: String, args: String): String {
-        val rendering = action.endsWith("Volume")
+        val rendering = action.endsWith("Volume") || action.endsWith("Preset") || action == "ListPresets"
         val service = if (rendering) "RenderingControl" else "AVTransport"
         val path = if (rendering) "renderingcontrol" else "avtransport"
         val body = "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:$action xmlns:u=\"urn:schemas-upnp-org:service:$service:1\"><InstanceID>0</InstanceID>$args</u:$action></s:Body></s:Envelope>".toByteArray()

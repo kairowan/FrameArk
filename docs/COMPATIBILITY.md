@@ -35,9 +35,19 @@ unsigned sequence wrap and bounded coalesced LastChange snapshots for InstanceID
 remain pending after unsubscribe; callbacks require host authorization and
 response-close ordering. `set_capabilities` now returns a validation Result and
 emits ConnectionManager updates. The Android host now schedules literal-peer
-callbacks and reconciles decoder feedback. Complete SCPD declarations and
-named-controller validation remain open; see [ADR 0130](adr/0130-dlna-controller-eventing.md)
+callbacks and reconciles decoder feedback. Complete SCPD declarations now cover
+the single-track v1 profile; named-controller validation remains open. See [ADR 0130](adr/0130-dlna-controller-eventing.md)
 and [Android host ADR](adr/0131-android-dlna-player.md).
+
+The [v1 service contract](adr/0132-dlna-service-contracts.md) includes all required
+actions, 19 total with Pause/Volume, and ordered argument/state-variable schemas.
+FactoryDefaults resets output volume to 50; TRACK_NR 1 seeks to zero. Next/Previous
+return 711 at the single-track boundary, not simulated playlist navigation.
+Replacement preserves playing/paused state and invalidates output on failed
+resume. Complete queries, Input connection direction and retained error events
+are covered. Missing InstanceID/Speed/metadata and extra arguments now fail 402;
+clients must send empty CurrentURIMetaData explicitly. XML line endings normalize.
+This is Experimental service coverage, not UPnP/DLNA certification or a client matrix.
 
 Android DLNA's current profile is foreground-only, private IPv4, explicit consent,
 no PIN and one player mutually exclusive with FANP. Sources must be served by the

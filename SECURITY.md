@@ -18,6 +18,15 @@ The project aims to acknowledge complete reports within 72 hours and provide an 
 
 ## DLNA output boundary
 
+SOAP parsing uses locked roxmltree with no entity resolver, DTD rejection,
+a 16 KiB body/128-node budget and scalar-only arguments. Envelope, service and
+action namespaces must match; required inputs are explicit and duplicates,
+unknown inputs and malformed IDs fail before dispatch. These are bounded
+protocol checks, not sender authentication. Media fetch/callback authorization
+is unchanged. A prepared source whose resume fails is shut down and reports
+ERROR_OCCURRED; it cannot claim successful replacement or intact old output.
+See [service contracts](docs/adr/0132-dlna-service-contracts.md).
+
 DLNA mutation commands require an explicitly installed output backend; no
 decoder is implied by a successful state-model test. Unbound or rejected
 commands do not change acknowledged state. Fatal output failure clears media
