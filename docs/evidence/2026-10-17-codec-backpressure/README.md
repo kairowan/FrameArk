@@ -77,6 +77,15 @@ The class includes both codec input regressions, the monitor-contention regressi
 and original pinned-QUIC video/audio playback. JVM `PlaybackEventTest` adds four
 retry/deadline/ordering tests without platform timing.
 
+A review follow-up adds a fifth instrumentation case for redacted pump failure
+reporting. Pump retry expiry now reaches the visible static-location diagnostic
+after loop cleanup instead of appearing only as a generic service log. The
+four-case suite results above preceded this additional diagnostic-only case.
+After that follow-up, the five-case suite recorded four focused passes and the
+same unresolved loopback queue failure (3 submitted / 0 rendered video, 0 PCM;
+5.410 s total). Receiver JVM tests/lint/build passed again. This last run is not
+reported as a green end-to-end suite.
+
 The startup/runtime platform stall and final PCM draining need further investigation;
 no claim is made that all earlier queue/audio/listener failures share one cause
 or that all Native bugs are resolved. Keep the previous preview's instability

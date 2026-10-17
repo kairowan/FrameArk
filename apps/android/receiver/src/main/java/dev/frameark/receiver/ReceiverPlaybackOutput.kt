@@ -104,6 +104,10 @@ object ReceiverPlaybackOutput {
     }
 
     @Synchronized fun reset() { try { video.reset() } finally { audio.reset() } }
+
+    /** Also publish pump failures (for example retry expiry) after loop cleanup. */
+    @Synchronized fun reportFailure(failure: Throwable) { recordFailure(failure) }
+
     fun diagnostic(): String {
         val size = videoSize
         return "Video submitted: $videoSubmitted; rendered: ${videoRendered.get()}; PCM buffers: ${audioRendered.get()}" +
