@@ -38,6 +38,9 @@ decoder to finish a platform call.
   their independent counters are approximate observations, not a transactional
   session snapshot. Gain mutations and resource teardown are not made asynchronous
   by this change.
+- The service also publishes pump-level failures after loop cleanup, so retry
+  expiry is visible in the same redacted diagnostic as a decoder failure. Only
+  the static source location is retained, never the exception message.
 - Instrumentation preserves the primary failure and attempts every cleanup step;
   subsequent teardown failures are attached instead of hiding the playback fault.
   Temporary thread sampling/debugger instrumentation is not shipped.

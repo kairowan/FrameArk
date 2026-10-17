@@ -17,6 +17,16 @@ import java.util.concurrent.TimeUnit
 /** Real platform encoders -> pinned QUIC -> Rust queue -> codecs -> outputs. */
 @Suppress("DEPRECATION")
 class NativePlaybackTest : InstrumentationTestCase() {
+    fun testPumpFailurePublishesOnlyStaticDiagnosticLocation() {
+        val failure = IllegalStateException("private-media-must-not-be-logged").apply {
+            stackTrace = arrayOf(StackTraceElement("dev.frameark.receiver.MediaPlaybackPump", "drainOnce", "MediaPlaybackPump.kt", 1))
+        }
+        ReceiverPlaybackOutput.reportFailure(failure)
+        val diagnostic = ReceiverPlaybackOutput.diagnostic()
+        assertTrue(diagnostic.contains("Playback failed (MediaPlaybackPump.kt:1)"))
+        assertFalse(diagnostic.contains("private-media-must-not-be-logged"))
+    }
+
     fun testDisplayPollingDoesNotWaitForCodecOwner() {
         val workers = Executors.newFixedThreadPool(2)
         val held = java.util.concurrent.CountDownLatch(1)

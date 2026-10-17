@@ -53,7 +53,8 @@ class FrameArkReceiverService : Service() {
                 drainOutput = ReceiverPlaybackOutput::drain,
                 resetOutput = ReceiverPlaybackOutput::reset,
             ),
-            onError = {
+            onError = { failure ->
+                ReceiverPlaybackOutput.reportFailure(failure)
                 Log.w(TAG, "media playback loop stopped after consumer failure")
                 coordinator.onPlaybackFailure()
             },
