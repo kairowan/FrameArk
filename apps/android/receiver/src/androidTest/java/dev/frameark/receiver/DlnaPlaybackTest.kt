@@ -25,6 +25,160 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Original synthetic media -> HTTP Range -> Rust -> MediaDataSource -> real OS player. */
 class DlnaPlaybackTest : InstrumentationTestCase() {
+    fun testFixtureAcceptsCancellationBeforeRequestAndMidHeaders() {
+        val origin = Origin(byteArrayOf(42), byteArrayOf())
+        try {
+            Socket("127.0.0.1", origin.port).use { it.shutdownOutput() }
+            Socket("127.0.0.1", origin.port).use {
+                it.getOutputStream().write("GET /video.mp4 HTTP/1.1\r\nRange: bytes=0-0\r\n".toByteArray())
+                it.shutdownOutput()
+            }
+            Socket("127.0.0.1", origin.port).use {
+                it.soTimeout = 2_000
+                it.getOutputStream().write("GET /video.mp4 HTTP/1.1\r\nRange: bytes=0-0\r\n\r\n".toByteArray())
+                val response = it.getInputStream().readBytes()
+                assertTrue(response.toString(Charsets.US_ASCII).startsWith("HTTP/1.1 206"))
+                assertEquals(42, response.last().toInt())
+            }
+            await("fixture serves after two cancelled connections") { origin.reads.get() == 1 }
+        } finally { origin.close() }
+    }
+
+    fun testSubtitlesFollowRealPlaybackSeekSelectionAndReplacement() {
+        val context = instrumentation.targetContext
+        val native = FrameArkNative()
+        assertTrue(native.load() is FrameArkNative.LoadResult.Loaded)
+        assertTrue(native.setDeviceIdentity(AndroidDeviceIdentityStore().getOrCreate()))
+        val videoFile = File(context.cacheDir, "original-subtitle-video.mp4")
+        encodeVideo(videoFile)
+        val srt = "1\n00:00:00,000 --> 00:00:02,000\nFirst caption\n\n2\n00:00:02,000 --> 00:00:05,000\n帧舟字幕 · 第二幕\n\n3\n00:00:05,000 --> 00:00:07,000\nLast caption\n"
+        val vtt = "WEBVTT\n\n00:00.000 --> 00:07.000\n<v Fixture>WebVTT alternate</v>\n"
+        val origin = Origin(videoFile.readBytes(), wave(), extra = mapOf(
+            "/captions.srt" to (srt.toByteArray() to "text/srt"),
+            "/captions.vtt" to (vtt.toByteArray() to "text/vtt"),
+            "/bad.srt" to ("not a subtitle".toByteArray() to "text/srt"),
+            "/wrong.srt" to (vtt.toByteArray() to "text/vtt"),
+            "/huge.srt" to (ByteArray(1024 * 1024 + 1) { 32 } to "text/srt"),
+        ))
+        val activity = instrumentation.startActivitySync(Intent(context, DlnaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        fun text(): String {
+            var result = ""
+            instrumentation.runOnMainSync { result = activity.findViewById<android.view.ViewGroup>(android.R.id.content).findViewWithTag<android.widget.TextView>("dlna-subtitle").text.toString() }
+            return result
+        }
+        try {
+            await("surface available") { DlnaOutputOwner.surface?.isValid == true }
+            assertEquals(0, DlnaNative.startProbe())
+            val output = DlnaPlayerOutput(DlnaNative.outputToken(), DlnaOutputOwner.images, DlnaOutputOwner.subtitles) { DlnaOutputOwner.surface }
+            DlnaOutputOwner.output = output
+            val endpoint = URI(requireNotNull(DlnaNative.descriptionUrl()))
+            fun action(name: String, args: String = "") = soap(endpoint, name, args)
+            fun ok(name: String, args: String = "") { val result = action(name, args); assertTrue(result, result.startsWith("HTTP/1.1 200")) }
+            val media = "http://127.0.0.1:${origin.port}/video.mp4"
+            fun load(captionPath: String = "captions.srt", captionHost: String = "127.0.0.1"): String {
+                val metadata = "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item><res protocolInfo=\"http-get:*:video/mp4:*\">$media</res><res protocolInfo=\"http-get:*:text/srt:*\" xml:lang=\"zh\">http://$captionHost:${origin.port}/$captionPath</res><res protocolInfo=\"http-get:*:text/vtt:*\" xml:lang=\"en\">http://127.0.0.1:${origin.port}/captions.vtt</res></item></DIDL-Lite>"
+                val escaped = metadata.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                return action("SetAVTransportURI", "<CurrentURI>$media</CurrentURI><CurrentURIMetaData>$escaped</CurrentURIMetaData>")
+            }
+            assertTrue(load().startsWith("HTTP/1.1 200"))
+            assertEquals("", text())
+            val choices = requireNotNull(output.subtitleChoices())
+            assertEquals(listOf("zh · SRT", "en · WebVTT"), choices.labels.toList())
+            ok("Play", "<Speed>1</Speed>")
+            await("first subtitle reaches visible Android text") { text() == "First caption" }
+            ok("Pause")
+            val paused = text(); Thread.sleep(300); assertEquals(paused, text())
+            ok("Seek", "<Unit>REL_TIME</Unit><Target>00:00:03</Target>")
+            await("paused forward seek updates subtitle") { text() == "帧舟字幕 · 第二幕" }
+            val screenshot = committedWindow(activity)
+            try {
+                File(context.getExternalFilesDir(null), "dlna-subtitles.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                var bounds = intArrayOf(0, 0, 0, 0)
+                instrumentation.runOnMainSync {
+                    val view = activity.findViewById<android.view.ViewGroup>(android.R.id.content).findViewWithTag<android.widget.TextView>("dlna-subtitle")
+                    val xy = IntArray(2); view.getLocationInWindow(xy)
+                    bounds = intArrayOf(xy[0], xy[1], view.width, view.height)
+                }
+                var white = 0
+                for (y in bounds[1] until bounds[1] + bounds[3]) for (x in bounds[0] until bounds[0] + bounds[2]) {
+                    val p = screenshot.getPixel(x, y)
+                    if (Color.red(p) > 220 && Color.green(p) > 220 && Color.blue(p) > 220) white++
+                }
+                assertTrue("actual caption pixels rendered: $white", white > 30)
+            } finally { screenshot.recycle() }
+            // Use the actual subtitle menu, not only the native selection seam.
+            instrumentation.runOnMainSync {
+                val root = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
+                fun click(view: android.view.View): Boolean {
+                    if (view is android.widget.Button && view.text == activity.getString(R.string.dlna_subtitles)) return view.performClick()
+                    if (view is android.view.ViewGroup) for (i in 0 until view.childCount) if (click(view.getChildAt(i))) return true
+                    return false
+                }
+                assertTrue(click(root))
+            }
+            instrumentation.waitForIdleSync()
+            await("subtitle menu becomes accessible and accepts selection") {
+                instrumentation.uiAutomation.rootInActiveWindow
+                    ?.findAccessibilityNodeInfosByText("en · WebVTT")?.firstOrNull()
+                    ?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true
+            }
+            await("menu selects alternate WebVTT track") { text() == "WebVTT alternate" }
+            output.selectSubtitle(choices.sourceId, -1)
+            await("subtitle off clears output") { text().isEmpty() }
+            output.selectSubtitle(choices.sourceId, 0)
+            await("subtitle re-enabled while paused") { text() == "帧舟字幕 · 第二幕" }
+            assertTrue("other peer literal must fail before subtitle I/O", load(captionHost = "127.0.0.2").startsWith("HTTP/1.1 500"))
+            assertTrue("malformed subtitle must leave old output intact", load("bad.srt").startsWith("HTTP/1.1 500"))
+            assertTrue("MIME mismatch must fail", load("wrong.srt").startsWith("HTTP/1.1 500"))
+            assertTrue("oversized subtitle must fail before full download", load("huge.srt").startsWith("HTTP/1.1 500"))
+            assertEquals("帧舟字幕 · 第二幕", text())
+            ok("Stop")
+            await("stop clears captions") { text().isEmpty() }
+            ok("Play", "<Speed>1</Speed>")
+            await("replay seeks subtitle timeline backwards") { text() == "First caption" }
+            ok("Pause")
+            ok("Seek", "<Unit>REL_TIME</Unit><Target>00:00:06</Target>")
+            await("later cue") { text() == "Last caption" }
+            ok("Play", "<Speed>1</Speed>")
+            await("EOS clears caption", 5_000) { action("GetTransportInfo").contains("STOPPED") && text().isEmpty() }
+            ok("SetAVTransportURI", "<CurrentURI>http://127.0.0.1:${origin.port}/tone.wav</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>")
+            assertTrue(requireNotNull(output.subtitleChoices()).labels.isEmpty())
+            assertNull(DlnaNative.subtitleText(choices.sourceId, 3_000))
+            assertFalse(DlnaNative.selectSubtitle(choices.sourceId, 0))
+            output.selectSubtitle(choices.sourceId, 0)
+            assertEquals("", text())
+            instrumentation.sendStatus(0, android.os.Bundle().apply { putString("stream", "\nDLNA subtitles: real H.264 playback, Unicode screen pixels, pause/seek/replay/EOS, menu track selection, off, source-policy/malformed rejection and replacement revocation; ranges=${origin.reads.get()}\n") })
+        } finally {
+            val output = DlnaOutputOwner.output
+            output?.close(); DlnaOutputOwner.output = null; DlnaNative.stop()
+            await("subtitle output closed") { output?.isClosed() != false }
+            origin.close()
+            instrumentation.runOnMainSync { activity.finish() }
+            assertTrue(videoFile.delete())
+        }
+    }
+
+    fun testSubtitleTargetRejectsStaleAndClosedWork() {
+        val context = instrumentation.targetContext
+        val activity = instrumentation.startActivitySync(Intent(context, DlnaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        try {
+            await("surface available") { DlnaOutputOwner.surface?.isValid == true }
+            val target = requireNotNull(DlnaOutputOwner.subtitles)
+            target.present(1, "stale", { false })
+            target.present(2, "current", { true })
+            target.retire(1)
+            instrumentation.waitForIdleSync()
+            instrumentation.runOnMainSync {
+                val view = activity.findViewById<android.view.ViewGroup>(android.R.id.content).findViewWithTag<android.widget.TextView>("dlna-subtitle")
+                assertEquals("current", view.text.toString())
+                target.close()
+            }
+            target.present(2, "closed", { true })
+            instrumentation.waitForIdleSync()
+            instrumentation.runOnMainSync { assertEquals("", activity.findViewById<android.view.ViewGroup>(android.R.id.content).findViewWithTag<android.widget.TextView>("dlna-subtitle").text.toString()) }
+        } finally { instrumentation.runOnMainSync { activity.finish() } }
+    }
+
     fun testImageTargetRejectsStaleAndClosedWork() {
         val context = instrumentation.targetContext
         val activity = instrumentation.startActivitySync(Intent(context, DlnaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -326,6 +480,33 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
         fail("$label; ${DlnaOutputOwner.output?.diagnostic()}")
     }
 
+    /** Capture the actual submitted UI buffer, not a stale compositor frame. */
+    private fun committedWindow(activity: android.app.Activity): Bitmap {
+        val committed = java.util.concurrent.CountDownLatch(1)
+        var width = 0; var height = 0
+        instrumentation.runOnMainSync {
+            val view = activity.window.decorView
+            check(view.isHardwareAccelerated)
+            width = view.width; height = view.height
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                view.viewTreeObserver.registerFrameCommitCallback { committed.countDown() }
+                view.invalidate()
+            } else error("This render evidence fixture requires API 29+")
+        }
+        assertTrue("caption frame committed", committed.await(3, java.util.concurrent.TimeUnit.SECONDS))
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val copied = java.util.concurrent.CountDownLatch(1)
+        val result = AtomicInteger(-1)
+        instrumentation.runOnMainSync {
+            android.view.PixelCopy.request(activity.window, bitmap, {
+                result.set(it); copied.countDown()
+            }, android.os.Handler(android.os.Looper.getMainLooper()))
+        }
+        assertTrue("caption window copied", copied.await(3, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(android.view.PixelCopy.SUCCESS, result.get())
+        return bitmap
+    }
+
     private fun soap(endpoint: URI, action: String, args: String): String {
         val rendering = action.endsWith("Volume") || action.endsWith("Preset") || action == "ListPresets"
         val service = if (rendering) "RenderingControl" else "AVTransport"
@@ -342,7 +523,7 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
         }
     }
 
-    private class Origin(private val mp4: ByteArray, private val wav: ByteArray, private val png: ByteArray = byteArrayOf(), private val jpeg: ByteArray = byteArrayOf()) : AutoCloseable {
+    private class Origin(private val mp4: ByteArray, private val wav: ByteArray, private val png: ByteArray = byteArrayOf(), private val jpeg: ByteArray = byteArrayOf(), private val extra: Map<String, Pair<ByteArray, String>> = emptyMap()) : AutoCloseable {
         private val socket = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
         private val closed = AtomicBoolean()
         val reads = AtomicInteger()
@@ -353,10 +534,18 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
                     socket.accept().use { peer ->
                         peer.soTimeout = 2_000
                         val reader = peer.getInputStream().bufferedReader(Charsets.US_ASCII)
-                        val first = requireNotNull(reader.readLine())
-                        val headers = generateSequence { reader.readLine()?.takeIf(String::isNotEmpty) }.take(32).toList()
+                        // A revoked source can close before sending any request or
+                        // halfway through headers. EOF is cancellation, not a bad Range.
+                        val first = reader.readLine() ?: return@use
+                        val headers = ArrayList<String>()
+                        while (true) {
+                            val line = reader.readLine() ?: return@use
+                            if (line.isEmpty()) break
+                            check(headers.size < 32)
+                            headers.add(line)
+                        }
                         val range = Regex("(?i)range: bytes=(\\d+)-(\\d+)").matchEntire(headers.first { it.startsWith("range:", true) })!!
-                        val (bytes, mime) = when {
+                        val (bytes, mime) = extra[first.split(' ')[1]] ?: when {
                             first.contains("/tone.wav") -> wav to "audio/wav"
                             first.contains("/photo.png") -> png to "image/png"
                             first.contains("/photo.jpg") -> jpeg to "image/jpeg"
@@ -366,7 +555,9 @@ class DlnaPlaybackTest : InstrumentationTestCase() {
                         val start = range.groupValues[1].toInt(); val end = range.groupValues[2].toInt()
                         check(start >= 0 && end >= start && end < bytes.size && end - start < 65_536)
                         val response = "HTTP/1.1 206 Partial Content\r\nContent-Length: ${end-start+1}\r\nContent-Range: bytes $start-$end/${bytes.size}\r\nContent-Type: $mime\r\nETag: \"original-fixture\"\r\nConnection: close\r\n\r\n"
-                        peer.getOutputStream().apply { write(response.toByteArray()); write(bytes, start, end-start+1); flush() }
+                        try {
+                            peer.getOutputStream().apply { write(response.toByteArray()); write(bytes, start, end-start+1); flush() }
+                        } catch (_: java.net.SocketException) { return@use } // Reader revoked while response was in flight.
                         reads.incrementAndGet()
                     }
                 } catch (error: Exception) { if (!closed.get()) throw error }

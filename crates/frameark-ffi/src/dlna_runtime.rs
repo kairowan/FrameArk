@@ -289,11 +289,15 @@ pub extern "system" fn Java_dev_frameark_receiver_DlnaNative_diagnostic(
         let counters = &runtime.diagnostics;
         let report = *counters.playback.lock().ok()?;
         let text = format!(
-            "Rust DLNA: requests={}; callbacks={}; callback failures={}; output={report:?}; source={:?}",
+            "Rust DLNA: requests={}; callbacks={}; callback failures={}; output={report:?}; source={:?}; subtitles={:?}",
             counters.requests.load(Ordering::Relaxed),
             counters.callbacks.load(Ordering::Relaxed),
             counters.callback_failures.load(Ordering::Relaxed),
-            runtime.output.source_report()
+            runtime.output.source_report(),
+            runtime
+                .output
+                .subtitle_report()
+                .map(|r| (r.tracks, r.cues, r.selected))
         );
         env.new_string(text).ok().map(JString::into_raw)
     };

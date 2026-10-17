@@ -15,13 +15,40 @@
 
 当前只接收私有 IPv4 控制端；媒体主机必须是该控制端的连接地址，且支持确切的
 `206 Content-Range`、已知长度（最多 64 GiB）。HTTP 不加密。不能播放由另一个
-NAS/公网服务器托管的 URL，也不跟随重定向。Android HTTPS、字幕和播放列表
-尚未接入。MP3 是允许尝试的 MIME 类型，尚无真实 MP3 解码证据；具体容器内编解码器
+NAS/公网服务器托管的 URL，也不跟随重定向。Android HTTPS 和播放列表
+尚未接入。外挂字幕的输入要求见下文。MP3 是允许尝试的 MIME 类型，尚无真实 MP3 解码证据；具体容器内编解码器
 是否可用由系统决定。失败会清空本次媒体状态，需要停止并重新启用以恢复输出后端。
 SCPD 已补齐单曲 v1 服务的完整参数/状态变量，但控制端矩阵仍待实测。
 支持 FactoryDefaults 恢复音量 50、TRACK_NR=1 回到起点；Next/Previous 在单曲边界报错。
 替换正在播放的资源会自动播放新资源。所有必需参数须显式传入，包括空元数据元素。
 找不到设备或控制失败请如实反馈，不算测试通过。详见[服务契约](../adr/0132-dlna-service-contracts.md)。
+
+### 外挂字幕测试
+
+控制端须在 `CurrentURIMetaData` 中提供有效 DIDL-Lite，包含与 `CurrentURI` 一致的
+主媒体 `res`，及 `http-get:*:text/srt:*`、`application/x-subrip` 或 `text/vtt` 的字幕
+`res`。也支持通过主资源 ID 绑定的 ContentDirectory:4 Caption 组件。没有字幕时仍可
+传空元数据；不猜测同名字幕文件，不处理 Samsung 私有扩展或嵌入式字幕。
+
+```xml
+<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">
+  <item>
+    <res protocolInfo="http-get:*:video/mp4:*">http://192.168.1.20:8080/movie.mp4</res>
+    <res protocolInfo="http-get:*:text/srt:*" xml:lang="zh-CN">http://192.168.1.20:8080/movie.srt</res>
+  </item>
+</DIDL-Lite>
+```
+
+上例地址仅示意，必须替换为实际控制端自己提供的 HTTP Range 服务；XML 作为 SOAP
+字符串传入时需要转义。最多四条字幕，UTF-8（可含 BOM），全部字幕总计最多 1 MiB。
+所有下载共用三秒时限。源 MIME 必须与声明一致（两种 SRT MIME 可互认），不允许其他
+主机、重定向或压缩响应。错误字幕会拒绝本次加载并保留此前媒体，不静默降级。
+
+默认启用第一条字幕；「字幕」按钮可选择语言或关闭。请测试中文/英文、多行、暂停、
+向前/向后 Seek、停止/重播、播放结束、切换媒体和退出页面。字幕依据实际播放位置
+约每 100 ms 更新，不能据此认定真机同步达标。样式标签会转为普通文本，CSS/区域/
+WebVTT 布局设置/时间戳映射、ASS/SSA、图片字幕及卡拉 OK 暂不支持；最多显示十二行。
+接口、安全限额和兼容变化见[ADR 0135](../adr/0135-android-dlna-subtitles.md)。
 
 ### 图片测试
 
@@ -69,3 +96,13 @@ and cancellation, and assert actual UI screenshot pixels. The same suite exercis
 photo/video/photo control boundaries, stale/closed display callbacks, malformed
 image cleanup and normal foreground teardown. It does not inspect private media or
 replace the owner-run physical/controller matrix.
+
+Subtitle cases add original SRT/WebVTT tracks, real H.264 playback and committed
+window glyph checks (API 29+ hardware frame callback plus PixelCopy),
+pause/seek/Stop/replay/EOS, the actual subtitle selection menu, Off,
+rejected alternate-host/malformed/MIME-mismatched/oversized sidecars, replacement
+handle revocation and stale/closed TextView ownership. These are synthetic local
+controller tests, not evidence for a named third-party controller. A fixture
+regression closes connections before the request and mid-headers, then verifies
+a subsequent complete Range request still succeeds; cancellation must not crash
+the test process or be counted as a completed fetch.

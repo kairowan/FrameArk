@@ -91,6 +91,92 @@ fn open(address: SocketAddr) -> RemoteMediaSource {
 }
 
 #[test]
+fn absolute_source_deadline_expires_cached_and_new_reads() {
+    let (address, observed, worker) = origin(1, |_, _| response(0, 0, 100, "\"original\""));
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let source = RemoteMediaSource::open_until(
+        &format!("http://{address}/sidecar"),
+        MediaUriNetworkPolicy::AllowAny,
+        vec![address.ip()],
+        None,
+        Duration::from_secs(2),
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(source.read_at(0, 1).unwrap(), vec![0]);
+    worker.join().unwrap();
+    std::thread::sleep(
+        deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+    );
+    assert!(matches!(
+        source.read_at(0, 1),
+        Err(DlnaError::Io(std::io::ErrorKind::TimedOut))
+    ));
+    assert!(matches!(
+        source.read_at(1, 1),
+        Err(DlnaError::Io(std::io::ErrorKind::TimedOut))
+    ));
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert!(
+        RemoteMediaSource::open_until(
+            &format!("http://{address}/sidecar"),
+            MediaUriNetworkPolicy::AllowAny,
+            vec![address.ip()],
+            None,
+            Duration::from_secs(1),
+            Instant::now()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn absolute_source_deadline_bounds_probe_and_later_pending_response() {
+    for stall_probe in [true, false] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            if !stall_probe {
+                let mut socket = accept(&listener);
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                read_http_request(&mut socket).unwrap();
+                socket
+                    .write_all(&response(0, 0, 100, "\"original\""))
+                    .unwrap();
+            }
+            let mut socket = accept(&listener);
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            read_http_request(&mut socket).unwrap();
+            // No response: a fresh per-read timeout must not extend the budget.
+            released.recv_timeout(Duration::from_secs(3)).unwrap();
+        });
+        let start = Instant::now();
+        let result = RemoteMediaSource::open_until(
+            &format!("http://{address}/sidecar"),
+            MediaUriNetworkPolicy::AllowAny,
+            vec![address.ip()],
+            None,
+            Duration::from_secs(2),
+            start + Duration::from_millis(500),
+        )
+        .and_then(|source| source.read_at(1, 1));
+        let elapsed = start.elapsed();
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(matches!(
+            result,
+            Err(DlnaError::Io(std::io::ErrorKind::TimedOut))
+        ));
+        assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    }
+}
+
+#[test]
 fn random_reads_pin_addresses_retain_host_and_bound_cache() {
     let (address, observed, worker) = origin(3, |_, request| {
         let range = ByteRange::parse(request.header("range").unwrap(), 200_000).unwrap();

@@ -68,4 +68,7 @@
     <string name="dlna_stop">停止 DLNA</string>
     <string name="dlna_no_network">未找到私有 IPv4 网络</string>
     <string name="dlna_select_network">选择可信局域网地址</string>
+    <string name="dlna_subtitles">字幕</string>
+    <string name="dlna_subtitles_off">关闭</string>
+    <string name="dlna_subtitles_none">控制端未为当前媒体提供受支持的外挂字幕。</string>
 </resources>

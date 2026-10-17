@@ -36,7 +36,7 @@ MediaPlayer and shared Rust Session are connected. Real decoder progress/EOS/err
 feedback, five-second acknowledged commands, restart consumer tokens, source
 revocation and timed peer-only callbacks are implemented. Isolated API 34 tests
 verify original MP4 decoded pixels and controls, WAV replacement/progress/EOS and
-page-close service cleanup; no owner's device is operated. Subtitles,
+page-close service cleanup; no owner's device is operated. Styled/embedded subtitles,
 broader origin approval/Android HTTPS, MP3/runtime codec coverage,
 named Android/iOS/desktop controllers and two-hour playback remain open. See
 [ADR 0131](adr/0131-android-dlna-player.md) and
@@ -60,7 +60,8 @@ Session; timeless progress, malformed-media failure and stale display-owner clea
 are explicit; six Android cases pass three consecutive runs, with 284 Rust and
 110 JVM tests passing. See [ADR 0133](adr/0133-android-dlna-images.md) and
 [evidence](evidence/2026-10-15-dlna-images/README.md). This does not close
-the named-controller, physical-device, subtitle or two-hour M3 gates.
+the named-controller, physical-device or two-hour M3 gates. Plain-text sidecars
+are implemented in the subsequent subtitle increment.
 
 **RTSP connection I/O correction:** deterministic regressions reproduce the earlier
 Windows intermittent failure on both RAOP and mirror adapters. They now share
@@ -70,12 +71,32 @@ closes the accepted stream and preserves the listener for the next request. This
 strengthens M4/M5 transport only; pairing, output and Apple-device gates remain open.
 See [ADR 0134](adr/0134-airplay-rtsp-io.md).
 
+**Android DLNA sidecar subtitles:** explicit DIDL-Lite resources now pass through
+Rust peer-pinned bounded Range fetching, UTF-8 SRT/WebVTT parsing and immutable
+timelines. Android shows plain text using the real MediaPlayer position and offers
+track selection/Off; pause, forward/backward seek, replay, Stop/EOS and source
+replacement preserve or clear captions as appropriate. Styling/embedded tracks,
+vendor-specific declarations and named-controller/hardware/soak evidence remain
+open. Nine real Android cases pass three consecutive runs, alongside 305 Rust
+and 110 JVM cases; see [evidence](evidence/2026-10-17-dlna-subtitles/README.md)
+and [ADR 0135](adr/0135-android-dlna-subtitles.md). This is one M3 increment,
+not completion of M3 or M0–M5.
+
+**Native playback regression investigation, 2026-10-17:** additional API 34
+loopback checks are intermittent. Exact-main and subtitle-branch builds both
+reproduced `playback.queue_unavailable`; the subtitle branch also reported audio
+decoder backpressure and a listener-release assertion. No Native decoder/pump/
+queue implementation was changed by the subtitle increment, but the root causes
+and any interactions are not yet resolved. Earlier successful evidence is not a
+current stability guarantee. See the [comparison record](evidence/2026-10-17-dlna-subtitles/README.md).
+M1/M2 stability and teardown remain open; no stable-preview claim is made.
+
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|
 | M0 工程与规范基础 | Rust workspace, Android shell, licenses/governance, CI/security gates including required `framearkd` Linux listener smoke, Windows/macOS Rust workspace format/test/build matrix and bounded `framearkd` startup smoke, ADR series, repository policy checks, Android native-package verification, deterministic SPDX SBOM generation, release APK/source/checksum publication, GitHub OIDC provenance attestations for published artifacts | Non-Linux media/session runtime evidence beyond startup, platform signing policy, and final multi-platform release baseline | Partial |
 | M1 Native 纵向闭环 | mDNS publication/browse, bounded Sender discovery/select/explicit-confirmation UI, QUIC/TLS temporary pairing, capability negotiation, FANP control/media, fixture CLI, `framearkd`, loopback H.264+Opus delivery, repeated loopback teardown/restart, clock-preserving FAPE JNI playback, foreground Android H.264/AAC decode/output, installable reference Sender with ticket/PIN UI, three consecutive two-emulator UI-driven 1080p30 runs with 900 rendered frames each | Physical reference-LAN discovery/authorization/1080p30 hardware playback is not recorded; Opus output and measured sync/performance remain open | Partial |
 | M2 Android Receiver MVP | Foreground service, pairing display, foreground Rust-verified proof allow/deny UI with native expiry queries and pause dismissal, delayed-approval QUIC regression and cancellation-safe Rust queue, optional Android one-shot post-PIN approval gate, experimental trust approve/revoke settings UI, bounded Rust `PendingTrustRequests` approval queue with monotonic expiry, bounded Kotlin `VerifiedPeerApprovalQueue` with proof-key copying, TTL/capacity/replay guards and explicit approve/reject outcomes, caller-owned FANP post-PIN approval callback boundary, optional FANP Ed25519/P-256 sender challenge/proof verification with opt-in Android Keystore signing with Rust-exposed temporary identity, optional proof-required Rust listener with 16-entry `FAPR` event queue and explicit JNI decision before session acceptance, real proof-mode loopback approval evidence, canonical proof-key fingerprint bridge into `frameark-trust`, exact pre-enrolled proof identity auto-admission on the Rust reconnect loop with rotated-key and renamed-device rejection tests, explicit Android JNI/Kotlin raw-key enrollment seam after proof approval, encrypted snapshot rollback in the Android trust controller, multicast-lock lifecycle, Keystore identity gate, alias/fingerprint JNI identity bridge, Rust-owned trust registry JNI bridge, encrypted Android Keystore AES-GCM snapshot adapter with bounded JNI FTR1 export/import, JNI queue/package gate, Kotlin bounded config dispatch, non-destructive ConnectivityManager endpoint refresh, stable JNI pairing material across notification storms, real QUIC media continuity through two one-second UDP blackouts with timeout/cancellation cleanup tests | Physical sender identity integration, desktop signing, live trust revocation and streamlined persistent enrollment UX, physical 1080p60 one-hour stability and short-disconnect evidence | Partial |
-| M3 DLNA/media push | Single-track v1 services with complete SCPD and mandatory actions, bounded SSDP/HTTP/SOAP, service-scoped GENA/LastChange, DIDL-Lite, Range/file resources, explicit-root TLS and URL-policy foundations; opt-in Android peer-origin HTTP player with Rust random-access sources/shared Session, acknowledged OS commands, live progress/EOS/error feedback, bounded callback host, isolated-emulator MP4 pixels/controls, WAV replacement/EOS, bounded JPEG/PNG pixels/orientation and image/video replacement | Subtitles/playlists, broader approved media origins and Android HTTPS, MP3/codec/device coverage, named Android/iOS/desktop controller matrix and two-hour playback/Seek | Partial |
+| M3 DLNA/media push | Single-track v1 services with complete SCPD and mandatory actions, bounded SSDP/HTTP/SOAP, service-scoped GENA/LastChange, DIDL-Lite, Range/file resources, explicit-root TLS and URL-policy foundations; opt-in Android peer-origin HTTP player with Rust random-access sources/shared Session, acknowledged OS commands, live progress/EOS/error feedback, bounded callback host, isolated-emulator MP4 pixels/controls, WAV replacement/EOS, bounded JPEG/PNG pixels/orientation and image/video replacement; Rust-timed UTF-8 SRT/WebVTT sidecars with Android text output and track selection | Styled/embedded subtitles, playlists, broader approved media origins and Android HTTPS, MP3/codec/device coverage, named Android/iOS/desktop controller matrix and two-hour playback/Seek | Partial |
 | M4 RAOP/AirPlay media | Bounded RTSP/RTP, RAOP audio/session contracts, plist/SDP, redaction-safe clear/AES-CTR/other-protection classification, jitter/loss policy, controls/metadata, pre-request caller-owned RAOP/mirror RTSP peer authorization, HLS playlist and segment safety boundaries, caller-owned HTTP/HTTPS HLS playlist/segment connectors with bounded response/MIME/content-length checks and no redirects, explicit-root Rustls HLS connector with SNI/timeouts and local TLS fixture evidence, bounded payload-free AirPlay replay trace, and optional bounded FIFO HLS segment cache with byte/entry eviction | Apple pairing/verification, encrypted/FairPlay media, adaptive/persistent cache policy, decoder/output, long-run sync/reconnect and named Apple matrix | Partial |
 | M5 AirPlay screen mirror | Mirror RTSP lifecycle, UDP/RTP filtering, H.264 and conditional H.265 single-NAL/AP/FU assembly, AAC/PCM audio, orientation, 90 kHz clock, loss/reconfiguration tests, and redaction-safe `MirrorCompatibilityReport` decisions for clear-IP, AWDL, FairPlay/DRM, unknown transport, and pairing states | Apple pairing/encryption, decoder/output, iPhone/iPad/Mac Beta matrix, and real AWDL/DRM interoperability evidence | Partial |
 
