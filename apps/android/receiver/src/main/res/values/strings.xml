@@ -68,4 +68,7 @@
     <string name="dlna_stop">Stop DLNA</string>
     <string name="dlna_no_network">No private IPv4 network is available</string>
     <string name="dlna_select_network">Choose the trusted LAN address</string>
+    <string name="dlna_subtitles">Subtitles</string>
+    <string name="dlna_subtitles_off">Off</string>
+    <string name="dlna_subtitles_none">No supported sidecar subtitles were supplied with this media.</string>
 </resources>

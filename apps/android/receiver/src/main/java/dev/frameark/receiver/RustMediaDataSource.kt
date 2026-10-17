@@ -52,6 +52,9 @@ internal object DlnaNative : DlnaSourceAccess {
     external fun pollCommand(token: Long): LongArray?
     external fun acknowledge(id: Long, success: Boolean): Boolean
     external fun feedback(id: Long, kind: Int, positionMs: Long, durationMs: Long): Boolean
+    external fun subtitleOptions(id: Long): Array<String>?
+    external fun selectSubtitle(id: Long, index: Int): Boolean
+    external fun subtitleText(id: Long, positionMs: Long): String?
     external fun start(bindAddress: String): Int
     external fun stop()
     external fun descriptionUrl(): String?

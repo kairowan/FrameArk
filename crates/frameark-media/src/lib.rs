@@ -11,6 +11,8 @@ use std::fmt::{Display, Formatter};
 
 use frameark_core::{Result, TimeBase, TrackId};
 
+pub mod subtitles;
+
 /// Maximum encoded video payload accepted by the shared contract.
 pub const MAX_VIDEO_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum encoded audio payload accepted by the shared contract.

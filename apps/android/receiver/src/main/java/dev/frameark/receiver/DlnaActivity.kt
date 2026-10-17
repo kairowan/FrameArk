@@ -28,6 +28,7 @@ class DlnaActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var video: TextureView
     private lateinit var images: DlnaImageTarget
+    private lateinit var subtitles: DlnaSubtitleTarget
     private var surface: Surface? = null
     private var nativeReady = false
     private val refresh = object : Runnable {
@@ -75,6 +76,18 @@ class DlnaActivity : Activity() {
         }
         images = DlnaImageTarget(picture)
         DlnaOutputOwner.images = images
+        val caption = TextView(this).apply {
+            tag = "dlna-subtitle"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            setShadowLayer(4f, 0f, 0f, Color.BLACK)
+            gravity = android.view.Gravity.CENTER
+            setPadding(24, 8, 24, 24)
+            maxLines = 12
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
+        subtitles = DlnaSubtitleTarget(caption)
+        DlnaOutputOwner.subtitles = subtitles
         val start = Button(this).apply {
             text = getString(R.string.dlna_start)
             filterTouchesWhenObscured = true
@@ -82,6 +95,22 @@ class DlnaActivity : Activity() {
             setOnClickListener { chooseInterface() }
         }
         val stop = Button(this).apply { text = getString(R.string.dlna_stop); setOnClickListener { stopRenderer() } }
+        val captions = Button(this).apply {
+            text = getString(R.string.dlna_subtitles)
+            setOnClickListener {
+                val output = DlnaOutputOwner.output
+                val choices = output?.subtitleChoices()
+                if (choices == null || choices.labels.isEmpty()) {
+                    AlertDialog.Builder(this@DlnaActivity).setTitle(R.string.dlna_subtitles)
+                        .setMessage(R.string.dlna_subtitles_none).setPositiveButton(android.R.string.ok, null).show()
+                } else {
+                    AlertDialog.Builder(this@DlnaActivity).setTitle(R.string.dlna_subtitles)
+                        .setItems(arrayOf(getString(R.string.dlna_subtitles_off)) + choices.labels) { _, index ->
+                            output.selectSubtitle(choices.sourceId, index - 1)
+                        }.setNegativeButton(android.R.string.cancel, null).show()
+                }
+            }
+        }
         val diagnostics = Button(this).apply {
             text = getString(R.string.dlna_diagnostics)
             setOnClickListener {
@@ -97,13 +126,16 @@ class DlnaActivity : Activity() {
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(TextView(this@DlnaActivity).apply { text = getString(R.string.dlna_summary); textSize = 14f; maxLines = 3; setPadding(24, 8, 24, 8) })
-            addView(LinearLayout(this@DlnaActivity).apply {
-                for (button in listOf(start, stop, diagnostics)) addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            })
+            for (buttons in listOf(listOf(start, stop), listOf(captions, diagnostics))) {
+                addView(LinearLayout(this@DlnaActivity).apply {
+                    for (button in buttons) addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                })
+            }
             addView(status)
             addView(FrameLayout(this@DlnaActivity).apply {
                 addView(video, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
                 addView(picture, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+                addView(caption, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, android.view.Gravity.BOTTOM))
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         })
     }
@@ -142,7 +174,9 @@ class DlnaActivity : Activity() {
         handler.removeCallbacksAndMessages(null)
         stopRenderer()
         images.close()
+        subtitles.close()
         if (DlnaOutputOwner.images === images) DlnaOutputOwner.images = null
+        if (DlnaOutputOwner.subtitles === subtitles) DlnaOutputOwner.subtitles = null
         releaseSurface()
         super.onDestroy()
     }

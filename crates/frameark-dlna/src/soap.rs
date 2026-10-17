@@ -8,7 +8,7 @@ const ENVELOPE: &str = "http://schemas.xmlsoap.org/soap/envelope/";
 // alone does not bound the parser's call stack on small-stack platform workers.
 // SOAP here is Envelope / Body / action / scalar argument: at most four levels.
 // This scanner only supplies a resource limit; roxmltree still validates XML.
-fn check_depth(text: &str) -> Result<(), DlnaError> {
+pub(super) fn check_depth(text: &str, maximum: u8) -> Result<(), DlnaError> {
     let invalid = || DlnaError::Invalid("SOAP XML depth or markup");
     let mut offset = 0;
     let mut depth = 0_u8;
@@ -54,7 +54,7 @@ fn check_depth(text: &str) -> Result<(), DlnaError> {
             depth = depth.checked_sub(1).ok_or_else(invalid)?;
         } else {
             depth = depth.checked_add(1).ok_or_else(invalid)?;
-            if depth > 4 {
+            if depth > maximum {
                 return Err(invalid());
             }
             if rest.as_bytes()[end - 1] == b'/' {
@@ -85,7 +85,7 @@ pub(super) fn parse_soap_action(header: &str, bytes: &[u8]) -> Result<SoapAction
         return Err(invalid());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-    check_depth(text)?;
+    check_depth(text, 4)?;
     let document = roxmltree::Document::parse_with_options(
         text,
         roxmltree::ParsingOptions {

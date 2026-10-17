@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** OS player ownership only: every MediaPlayer call runs on this one Looper. */
-internal class DlnaPlayerOutput(private val token: Long, private val images: DlnaImageTarget? = null, private val surface: () -> Surface?) : AutoCloseable {
+internal class DlnaPlayerOutput(private val token: Long, private val images: DlnaImageTarget? = null, private val subtitles: DlnaSubtitleTarget? = null, private val surface: () -> Surface?) : AutoCloseable {
     init { require(token > 0) }
     private val thread = HandlerThread("FrameArk DLNA output").apply { start() }
     private val handler = Handler(thread.looper)
@@ -26,6 +26,10 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
     private var volume = 0.5f
     private var prepared = false
     private var lastFeedback = 0L
+    @Volatile private var sourceId = 0L
+    private var captionsVisible = false
+    private var lastCaption: String? = null
+    private var lastCaptionTick = 0L
     private val rendered = AtomicLong()
     @Volatile private var status = "Waiting for media"
     @Volatile private var dimensions: VideoDisplaySize? = null
@@ -33,6 +37,20 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
     fun diagnostic(): String = "DLNA: $status; video-start notifications: ${rendered.get()}"
     fun videoDisplaySize(): VideoDisplaySize? = dimensions
     fun isClosed(): Boolean = closed.get()
+    data class SubtitleChoices(val sourceId: Long, val labels: Array<String>)
+    fun subtitleChoices(): SubtitleChoices? {
+        val id = sourceId
+        if (id <= 0 || !running.get()) return null
+        return DlnaNative.subtitleOptions(id)?.let { SubtitleChoices(id, it) }
+    }
+    fun selectSubtitle(id: Long, index: Int) {
+        handler.post {
+            if (running.get() && sourceId == id && DlnaNative.selectSubtitle(id, index)) {
+                lastCaption = null
+                updateCaption()
+            }
+        }
+    }
 
     private val poll = object : Runnable {
         override fun run() {
@@ -48,6 +66,10 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
                 if (prepared && pending == 0L && accepted > 0 && active != null && now - lastFeedback >= 200L) {
                     observe(active)
                     lastFeedback = now
+                }
+                if (pending == 0L && now - lastCaptionTick >= 100L) {
+                    updateCaption()
+                    lastCaptionTick = now
                 }
             } catch (_: Exception) { fail() }
             if (running.get()) handler.postDelayed(this, 20L)
@@ -66,6 +88,7 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
             releasePlayer(keepPending = true)
             val data = RustMediaDataSource(command[2])
             source = data
+            sourceId = command[2]
             if (kind == 8L) {
                 check(images != null)
                 image = DlnaImageDecoder.decode(data, argument) { running.get() }
@@ -96,6 +119,8 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
             next.setOnCompletionListener { instance ->
                 if (!isCurrent(instance)) return@setOnCompletionListener
                 status = "Ended"
+                captionsVisible = false
+                updateCaption()
                 if (pending == 0L && accepted > 0) DlnaNative.feedback(accepted, 1, 0, 0)
             }
             next.setOnErrorListener { instance, _, _ ->
@@ -134,10 +159,12 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
         }
         val active = player?.takeIf { prepared } ?: error("output unavailable")
         when (kind) {
-            2L -> { active.start(); status = "Playing"; finish(id) }
+            2L -> { active.start(); captionsVisible = true; status = "Playing"; finish(id) }
             3L -> { if (active.isPlaying) active.pause(); status = "Paused"; finish(id) }
             4L -> {
                 if (active.isPlaying) active.pause()
+                captionsVisible = false
+                updateCaption()
                 status = "Stopped"
                 active.seekTo(0L, MediaPlayer.SEEK_CLOSEST)
             }
@@ -187,6 +214,18 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
         DlnaNative.feedback(accepted, 0, if (duration >= 0) position.coerceAtMost(duration) else position, duration)
     }
 
+    private fun updateCaption() {
+        val target = subtitles ?: return
+        val active = player
+        val text = if (captionsVisible && prepared && active != null && sourceId > 0) {
+            DlnaNative.subtitleText(sourceId, active.currentPosition.toLong().coerceAtLeast(0)).orEmpty()
+        } else ""
+        if (lastCaption == text) return
+        lastCaption = text
+        val generation = revision.get()
+        target.present(token, text) { running.get() && revision.get() == generation }
+    }
+
     private fun fail() {
         val command = pending
         val previous = accepted
@@ -198,6 +237,10 @@ internal class DlnaPlayerOutput(private val token: Long, private val images: Dln
 
     private fun releasePlayer(keepPending: Boolean = false) {
         revision.incrementAndGet()
+        sourceId = 0
+        captionsVisible = false
+        lastCaption = null
+        subtitles?.retire(token)
         prepared = false
         accepted = 0
         dimensions = null

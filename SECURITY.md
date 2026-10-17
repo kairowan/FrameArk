@@ -84,6 +84,24 @@ closed/stale UI callbacks cannot replace the current picture. Native platform
 decoding cannot be forcibly interrupted mid-call, so users must keep Android
 patched; these bounds are not a decoder sandbox. See [ADR 0133](docs/adr/0133-android-dlna-images.md).
 
+Subtitle declarations are untrusted DIDL-Lite: 4 KiB, 128 nodes, eight lexical
+levels before DOM parsing, no DTD, one item with a matching primary resource and
+at most four distinct sidecars. Rust applies the same transport-peer pinning,
+Range, MIME/length validation and no-redirect policy to every subtitle fetch.
+All sidecar probes/reads share one three-second absolute deadline; each connection
+also has a two-second cap. Stop revokes an active body read; initial connection/
+probe completion remains deadline-bounded. Aggregate encoded bytes are capped at
+1 MiB before allocation. UTF-8 parsing caps each track at 10,000 cues, each cue at
+4 KiB, simultaneous cues at eight and combined display text at 8 KiB. Timestamps
+are bounded to seven days. This is a bounded plain-text profile, not a subtitle
+sandbox or full WebVTT implementation. CSS, regions, layout, timestamp maps,
+embedded tracks and executable markup are unsupported. Android only receives
+labels/plain text and displays it in a TextView (at most 12 visible lines); it
+never interprets HTML, opens URLs or fetches fonts. Selection and timing remain
+Rust-owned. Revoked source handles and stale UI revisions cannot revive an old
+track. Diagnostics expose counts/selected index, never text, labels or URLs.
+See [ADR 0135](docs/adr/0135-android-dlna-subtitles.md).
+
 Callbacks must have a literal address equal to their subscriber's transport peer.
 The host has no callback DNS, redirect, retry or third-party fetch path. The callback
 I/O deadline is total, not renewed by slow bytes; HTTP request reads and control

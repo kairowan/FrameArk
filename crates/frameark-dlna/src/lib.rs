@@ -11,8 +11,10 @@ mod playback;
 mod remote_source;
 mod service_contract;
 mod soap;
+mod subtitle_metadata;
 use service_contract::scpd_xml;
 use soap::parse_soap_action;
+pub use subtitle_metadata::{SubtitleResource, subtitle_resources};
 #[cfg(test)]
 mod source_tests;
 

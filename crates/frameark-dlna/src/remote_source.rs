@@ -45,6 +45,7 @@ struct Endpoint {
     addresses: Vec<SocketAddr>,
     roots: Option<Arc<rustls::RootCertStore>>,
     timeout: Duration,
+    deadline: Option<Instant>,
     closed: Arc<AtomicBool>,
     socket: Arc<Mutex<Option<TcpStream>>>,
     counters: Counters,
@@ -53,7 +54,11 @@ struct Endpoint {
 impl Endpoint {
     fn connect(&self) -> Result<DeadlineStream, DlnaError> {
         self.check_open()?;
-        let deadline = Instant::now() + self.timeout;
+        let deadline = self
+            .deadline
+            .map_or(Instant::now() + self.timeout, |limit| {
+                limit.min(Instant::now() + self.timeout)
+            });
         let mut last_error = std::io::ErrorKind::ConnectionRefused;
         for address in &self.addresses {
             self.check_open()?;
@@ -110,10 +115,12 @@ impl Endpoint {
 
     fn check_open(&self) -> Result<(), DlnaError> {
         if self.closed.load(Ordering::Acquire) {
-            Err(DlnaError::Invalid("source closed"))
-        } else {
-            Ok(())
+            return Err(DlnaError::Invalid("source closed"));
         }
+        if self.deadline.is_some_and(|limit| Instant::now() >= limit) {
+            return Err(DlnaError::Io(std::io::ErrorKind::TimedOut));
+        }
+        Ok(())
     }
 
     fn fetch(
@@ -304,6 +311,17 @@ impl RemoteMediaSource {
         roots: Option<Arc<rustls::RootCertStore>>,
         timeout: Duration,
     ) -> Result<Self, DlnaError> {
+        Self::open_with_deadline(uri, policy, addresses, roots, timeout, None)
+    }
+
+    fn open_with_deadline(
+        uri: &str,
+        policy: MediaUriNetworkPolicy,
+        addresses: Vec<IpAddr>,
+        roots: Option<Arc<rustls::RootCertStore>>,
+        timeout: Duration,
+        deadline: Option<Instant>,
+    ) -> Result<Self, DlnaError> {
         if timeout.is_zero()
             || timeout > Duration::from_secs(5)
             || addresses.is_empty()
@@ -355,6 +373,7 @@ impl RemoteMediaSource {
                 .collect(),
             roots,
             timeout,
+            deadline,
             closed: Arc::new(AtomicBool::new(false)),
             socket: Arc::new(Mutex::new(None)),
             counters: Counters::default(),
@@ -389,6 +408,21 @@ impl RemoteMediaSource {
             etag,
             cache: Mutex::new((0, response.body)),
         })
+    }
+
+    /// Opens a short-lived source whose probe and all subsequent reads share an
+    /// absolute deadline. Useful for bounded sidecars, not long-lived OS playback.
+    /// The per-operation timeout still caps each connection; neither a new read
+    /// nor a cached read renews the supplied total budget.
+    pub fn open_until(
+        uri: &str,
+        policy: MediaUriNetworkPolicy,
+        addresses: Vec<IpAddr>,
+        roots: Option<Arc<rustls::RootCertStore>>,
+        timeout: Duration,
+        deadline: Instant,
+    ) -> Result<Self, DlnaError> {
+        Self::open_with_deadline(uri, policy, addresses, roots, timeout, Some(deadline))
     }
 
     /// Known byte length, not duration or decoder capability evidence.

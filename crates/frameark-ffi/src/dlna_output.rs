@@ -56,6 +56,7 @@ struct Command {
 
 #[derive(Default)]
 struct State {
+    loading: Option<Arc<RemoteMediaSource>>,
     pending: Option<Command>,
     in_flight: Option<Command>,
     reply: Option<(u64, bool)>,
@@ -70,6 +71,9 @@ struct State {
 pub(super) struct OutputBridge(Arc<(Mutex<State>, Condvar)>, u64);
 
 impl OutputBridge {
+    pub(super) fn subtitle_report(&self) -> Option<dlna_source::SubtitleReport> {
+        dlna_source::subtitle_report(self.0.0.lock().ok()?.source)
+    }
     pub(super) fn source_report(&self) -> Option<frameark_dlna::RemoteSourceReport> {
         let source = self.0.0.lock().ok()?.source;
         dlna_source::report(source)
@@ -221,12 +225,16 @@ impl OutputBridge {
             .or(state.in_flight)
             .map(|command| command.source);
         let selected = state.source;
+        let loading = state.loading.take();
         state.pending = None;
         state.in_flight = None;
         state.reply = None;
         state.feedback = None;
         self.0.1.notify_all();
         drop(state);
+        if let Some(source) = loading {
+            source.close();
+        }
         if let Some(id) = candidate {
             dlna_source::revoke(id);
         }
@@ -301,11 +309,95 @@ impl AndroidDlnaBackend {
             .as_ref()
             .is_some_and(|(_, source)| matches!(source.mime_type(), "image/jpeg" | "image/png"))
     }
+
+    fn load_subtitles(
+        &self,
+        metadata: &str,
+        uri: &str,
+        origin: IpAddr,
+        policy: MediaUriNetworkPolicy,
+    ) -> Result<Vec<dlna_source::NamedSubtitle>, Error> {
+        use frameark_media::subtitles::{MAX_SUBTITLE_BYTES, SubtitleFormat, SubtitleTrack};
+        let resources =
+            frameark_dlna::subtitle_resources(metadata, uri).map_err(|_| Error::Rejected)?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut total = 0usize;
+        let mut tracks = Vec::new();
+        for resource in resources {
+            if self.bridge.0.0.lock().map_err(|_| Error::Failed)?.closed {
+                return Err(Error::Failed);
+            }
+            let source = Arc::new(
+                RemoteMediaSource::open_until(
+                    &resource.uri,
+                    policy,
+                    vec![origin],
+                    None,
+                    Duration::from_secs(2),
+                    deadline,
+                )
+                .map_err(|_| Error::Rejected)?,
+            );
+            let format = match (resource.mime_type.as_str(), source.mime_type()) {
+                ("text/vtt", "text/vtt") => SubtitleFormat::WebVtt,
+                ("text/srt" | "application/x-subrip", "text/srt" | "application/x-subrip") => {
+                    SubtitleFormat::SubRip
+                }
+                _ => return Err(Error::Unsupported),
+            };
+            let length = usize::try_from(source.len()).map_err(|_| Error::Rejected)?;
+            if length > MAX_SUBTITLE_BYTES - total {
+                return Err(Error::Rejected);
+            }
+            {
+                let mut state = self.bridge.0.0.lock().map_err(|_| Error::Failed)?;
+                if state.closed {
+                    return Err(Error::Failed);
+                }
+                state.loading = Some(source.clone());
+            }
+            let result = (|| {
+                let mut bytes = Vec::with_capacity(length);
+                while bytes.len() < length {
+                    let chunk = source
+                        .read_at(bytes.len() as u64, length - bytes.len())
+                        .map_err(|_| Error::Rejected)?;
+                    if chunk.is_empty() {
+                        return Err(Error::Rejected);
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                let track = SubtitleTrack::parse(&bytes, format).map_err(|_| Error::Unsupported)?;
+                if Instant::now() >= deadline {
+                    return Err(Error::Rejected);
+                }
+                Ok(track)
+            })();
+            source.close();
+            self.bridge.0.0.lock().map_err(|_| Error::Failed)?.loading = None;
+            total += length;
+            let format_name = if format == SubtitleFormat::WebVtt {
+                "WebVTT"
+            } else {
+                "SRT"
+            };
+            let label = if resource.language.is_empty() {
+                format!("{} · {format_name}", tracks.len() + 1)
+            } else {
+                format!("{} · {format_name}", resource.language)
+            };
+            tracks.push(dlna_source::NamedSubtitle {
+                label,
+                track: result?,
+            });
+        }
+        Ok(tracks)
+    }
 }
 
 impl MediaPlaybackBackend for AndroidDlnaBackend {
     fn apply(&mut self, command: PlaybackCommand<'_>) -> Result<(), Error> {
-        if let PlaybackCommand::SetUri { uri, .. } = command {
+        if let PlaybackCommand::SetUri { uri, metadata } = command {
             let origin = *self.origin.lock().map_err(|_| Error::Failed)?;
             let policy = if self.loopback_probe {
                 MediaUriNetworkPolicy::AllowAny
@@ -317,7 +409,12 @@ impl MediaPlaybackBackend for AndroidDlnaBackend {
                     .map_err(|_| Error::Rejected)?,
             );
             let (kind, argument) = preparation(source.mime_type(), source.len())?;
-            let id = dlna_source::register(source.clone()).map_err(|_| Error::Unavailable)?;
+            let subtitles = self.load_subtitles(metadata, uri, origin, policy)?;
+            if kind == 8 && !subtitles.is_empty() {
+                return Err(Error::Unsupported);
+            }
+            let id =
+                dlna_source::register(source.clone(), subtitles).map_err(|_| Error::Unavailable)?;
             if let Err(error) = self.bridge.command(kind, id, argument) {
                 dlna_source::revoke(id);
                 return Err(error);

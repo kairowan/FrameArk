@@ -73,7 +73,15 @@ sRGB output, FIT_CENTER and JPEG's eight EXIF orientations; PNG EXIF, animation,
 HDR/wide-gamut fidelity and slideshow scheduling are not supported. Still position
 and duration are zero, Pause holds, Stop clears, Play reuses the retained picture.
 See [image contract](adr/0133-android-dlna-images.md).
-HTTPS, third-party origin approval, subtitles, playlists and
+Explicit DIDL-Lite SRT/WebVTT sidecars now use bounded Rust fetch/parsing and
+OS-position timing, with Android plain-text output, track selection and Off.
+Pause holds, Seek/replay reevaluate cues, and Stop/EOS/replacement clear them.
+This is an Experimental UTF-8 plain-text profile, not embedded subtitles, ASS/SSA,
+WebVTT styling/layout or vendor-specific caption discovery. Nonempty metadata
+must now be well-formed, namespace-correct single-item DIDL-Lite; empty metadata
+remains valid. Invalid/unauthorized declared sidecars fail preparation rather
+than silently fetching or omitting them. See [subtitle contract](adr/0135-android-dlna-subtitles.md).
+HTTPS, third-party origin approval, styled/embedded subtitles, playlists and
 two-hour stability are not delivered. Core HTTPS source fixtures do not imply
 Android HTTPS support. See [test guide](testing/ANDROID_DLNA_PLAYBACK.md) and
 [evidence](evidence/2026-10-15-dlna-playback/README.md).
