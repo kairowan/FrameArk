@@ -17,6 +17,88 @@ import java.util.concurrent.TimeUnit
 /** Real platform encoders -> pinned QUIC -> Rust queue -> codecs -> outputs. */
 @Suppress("DEPRECATION")
 class NativePlaybackTest : InstrumentationTestCase() {
+    fun testDisplayPollingDoesNotWaitForCodecOwner() {
+        val workers = Executors.newFixedThreadPool(2)
+        val held = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val owner = workers.submit {
+            synchronized(ReceiverPlaybackOutput) {
+                held.countDown()
+                check(release.await(3, TimeUnit.SECONDS))
+            }
+        }
+        try {
+            assertTrue(held.await(1, TimeUnit.SECONDS))
+            val read = workers.submit<String> {
+                ReceiverPlaybackOutput.videoDisplaySize()
+                ReceiverPlaybackOutput.videoConfigurationCount()
+                ReceiverPlaybackOutput.videoFormatCount()
+                ReceiverPlaybackOutput.diagnostic()
+            }
+            assertTrue("display polling must not wait for MediaCodec/Surface work", read.get(500, TimeUnit.MILLISECONDS).startsWith("Video submitted:"))
+        } finally {
+            release.countDown()
+            owner.get(1, TimeUnit.SECONDS)
+            workers.shutdownNow()
+            assertTrue(workers.awaitTermination(1, TimeUnit.SECONDS))
+        }
+    }
+
+    fun testTransientAudioInputBackpressureKeepsDecoderAlive() {
+        var blocked = true
+        var inputCalls = 0
+        var pcm = 0
+        val renderer = AudioDecoderRenderer(onPcm = { pcm++ }, inputIndex = { decoder, timeout ->
+            assertEquals("codec input polling never blocks the playback loop", 0L, timeout)
+            inputCalls++
+            if (blocked) MediaCodec.INFO_TRY_AGAIN_LATER else decoder.dequeueInputBuffer(timeout)
+        })
+        try {
+            renderer.configure(FrameArkNative.AudioConfig(FrameArkNative.MediaCodecKind.AAC, 48_000, 2))
+            val encoded = encodeAudio()
+            val frame = FrameArkNative.MediaFrame(FrameArkNative.MediaKind.AUDIO, 0, false, encoded)
+            repeat(3) { assertFalse(renderer.render(frame)) }
+            assertEquals(3, inputCalls)
+            assertTrue("temporary input unavailability retains the configured decoder", renderer.isConfigured())
+            blocked = false
+            var submitted = 0
+            val deadline = System.nanoTime() + 3_000_000_000L
+            while ((submitted < 12 || pcm < 8) && System.nanoTime() < deadline) {
+                if (submitted < 12 && renderer.render(frame.copy(pts = submitted * 1024_000_000L / 48_000))) submitted++
+                renderer.drain()
+                Thread.sleep(5)
+            }
+            assertEquals(12, submitted)
+            assertTrue("real AAC decode/PCM output recovers after input backpressure", pcm >= 8)
+        } finally { renderer.reset() }
+        assertFalse(renderer.isConfigured())
+    }
+
+    fun testTransientVideoInputBackpressureKeepsDecoderAlive() {
+        val texture = android.graphics.SurfaceTexture(false)
+        val surface = android.view.Surface(texture)
+        var blocked = true
+        val renderer = VideoDecoderRenderer(inputIndex = { decoder, timeout ->
+            assertEquals(0L, timeout)
+            if (blocked) MediaCodec.INFO_TRY_AGAIN_LATER else decoder.dequeueInputBuffer(timeout)
+        })
+        try {
+            renderer.configure(VideoTrackConfig(320, 240, 30, 1), surface)
+            val encoded = encodeVideo()
+            repeat(3) { assertFalse(renderer.render(encoded, 0, true)) }
+            assertTrue(renderer.isConfigured())
+            blocked = false
+            var accepted = false
+            val deadline = System.nanoTime() + 3_000_000_000L
+            while (!accepted && System.nanoTime() < deadline) {
+                accepted = renderer.render(encoded, 0, true)
+                if (!accepted) Thread.sleep(5)
+            }
+            assertTrue("the same H.264 access unit can enter the real decoder after retry", accepted)
+        } finally { renderer.reset(); surface.release(); texture.release() }
+        assertFalse(renderer.isConfigured())
+    }
+
     fun testLoopbackRendersVideoAndWritesDecodedAudio() {
         val context = instrumentation.targetContext
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -26,6 +108,7 @@ class NativePlaybackTest : InstrumentationTestCase() {
         val settings = PlaybackAudioSettings(context)
         val originalLevel = settings.read()
         val sender = Executors.newSingleThreadExecutor()
+        var primaryFailure: Throwable? = null
         try {
             assertTrue(ReceiverPlaybackOutput.setAudioLevel(PlaybackAudioLevel(50)))
             instrumentation.runOnMainSync {
@@ -52,7 +135,10 @@ class NativePlaybackTest : InstrumentationTestCase() {
                 while (ReceiverPlaybackOutput.renderedAudioBuffers() < target && System.nanoTime() < timeout && !stream.isDone) {
                     Thread.sleep(10)
                 }
-                assertTrue("decoded audio progresses during gain changes", ReceiverPlaybackOutput.renderedAudioBuffers() >= target)
+                if (ReceiverPlaybackOutput.renderedAudioBuffers() < target) {
+                    val result = if (stream.isDone) stream.get(0, TimeUnit.MILLISECONDS).toString() else "pending"
+                    fail("decoded audio progresses during gain changes; sender=$result; ${probe.diagnostic()}; ${ReceiverPlaybackOutput.diagnostic()}")
+                }
                 assertFalse("outputs still live", ReceiverPlaybackOutput.outputsReleased())
             }
             awaitMoreAudio()
@@ -86,16 +172,30 @@ class NativePlaybackTest : InstrumentationTestCase() {
             val output = File(context.getExternalFilesDir(null), "native-playback.png")
             output.outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
             screenshot.recycle()
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
         } finally {
-            context.stopService(Intent(context, FrameArkReceiverService::class.java))
-            val stopDeadline = System.nanoTime() + 5_000_000_000L
-            while (native.isReceiverRunning() && System.nanoTime() < stopDeadline) Thread.sleep(20)
-            assertFalse("receiver listener released", native.isReceiverRunning())
-            sender.shutdownNow()
-            assertTrue("probe worker released", sender.awaitTermination(10, TimeUnit.SECONDS))
-            instrumentation.runOnMainSync { activity.finish() }
-            ReceiverPlaybackOutput.setAudioLevel(originalLevel)
-            settings.save(originalLevel)
+            // An assertion must not skip the remaining cleanup or replace the
+            // original playback fault with only a secondary teardown failure.
+            var cleanupFailure: Throwable? = null
+            fun cleanup(action: () -> Unit) {
+                try { action() } catch (failure: Throwable) {
+                    val first = primaryFailure ?: cleanupFailure
+                    if (first != null) first.addSuppressed(failure) else cleanupFailure = failure
+                }
+            }
+            cleanup { context.stopService(Intent(context, FrameArkReceiverService::class.java)) }
+            cleanup {
+                val stopDeadline = System.nanoTime() + 5_000_000_000L
+                while (native.isReceiverRunning() && System.nanoTime() < stopDeadline) Thread.sleep(20)
+                assertFalse("receiver listener released", native.isReceiverRunning())
+            }
+            cleanup { sender.shutdownNow(); assertTrue("probe worker released", sender.awaitTermination(10, TimeUnit.SECONDS)) }
+            cleanup { instrumentation.runOnMainSync { activity.finish() } }
+            cleanup { ReceiverPlaybackOutput.setAudioLevel(originalLevel) }
+            cleanup { settings.save(originalLevel) }
+            if (primaryFailure == null) cleanupFailure?.let { throw it }
         }
     }
 

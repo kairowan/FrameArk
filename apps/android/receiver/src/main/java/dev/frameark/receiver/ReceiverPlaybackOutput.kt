@@ -8,12 +8,17 @@ object ReceiverPlaybackOutput {
     private var surface: Surface? = null
     private val videoRendered = AtomicLong()
     private val audioRendered = AtomicLong()
-    private var videoSubmitted = 0L
-    private var error = false
-    private var failureLocation = ""
-    private var videoSize: VideoDisplaySize? = null
-    private var videoConfigurations = 0L
-    private var videoFormats = 0L
+    // UI/TextureView polling must not wait for a codec call holding this
+    // object's monitor. Writers remain serialized; readers see published
+    // scalar values and an immutable width/height pair (approximate counters).
+    @Volatile private var videoSubmitted = 0L
+    @Volatile private var videoInputRetries = 0L
+    @Volatile private var audioInputRetries = 0L
+    @Volatile private var error = false
+    @Volatile private var failureLocation = ""
+    @Volatile private var videoSize: VideoDisplaySize? = null
+    @Volatile private var videoConfigurations = 0L
+    @Volatile private var videoFormats = 0L
     private val video = VideoDecoderRenderer(onRendered = { videoRendered.incrementAndGet() }, onFormat = { width, height ->
         videoSize = VideoDisplaySize(width, height)
         videoFormats++
@@ -32,9 +37,9 @@ object ReceiverPlaybackOutput {
     }
 
     @Synchronized fun audioLevel(): PlaybackAudioLevel = audioLevel
-    @Synchronized fun videoDisplaySize(): VideoDisplaySize? = videoSize
-    @Synchronized fun videoConfigurationCount(): Long = videoConfigurations
-    @Synchronized fun videoFormatCount(): Long = videoFormats
+    fun videoDisplaySize(): VideoDisplaySize? = videoSize
+    fun videoConfigurationCount(): Long = videoConfigurations
+    fun videoFormatCount(): Long = videoFormats
 
     @Synchronized fun setAudioLevel(value: PlaybackAudioLevel): Boolean {
         audioLevelInitialized = true
@@ -60,7 +65,7 @@ object ReceiverPlaybackOutput {
         return active
     }
 
-    @Synchronized fun consume(event: FrameArkNative.PlaybackEvent) {
+    @Synchronized fun consume(event: FrameArkNative.PlaybackEvent): Boolean {
         try {
             when (event) {
                 is FrameArkNative.PlaybackEvent.Video -> {
@@ -75,13 +80,20 @@ object ReceiverPlaybackOutput {
                 is FrameArkNative.PlaybackEvent.Audio -> { audio.configure(event.config); error = false }
                 is FrameArkNative.PlaybackEvent.Frame -> when (event.frame.kind) {
                     FrameArkNative.MediaKind.VIDEO -> {
-                        video.render(event.frame.payload, event.frame.pts, event.frame.keyframe)
+                        if (!video.render(event.frame.payload, event.frame.pts, event.frame.keyframe)) {
+                            videoInputRetries++
+                            return false
+                        }
                         videoSubmitted++
                     }
-                    FrameArkNative.MediaKind.AUDIO -> audio.render(event.frame)
+                    FrameArkNative.MediaKind.AUDIO -> if (!audio.render(event.frame)) {
+                        audioInputRetries++
+                        return false
+                    }
                 }
                 FrameArkNative.PlaybackEvent.Reset -> reset()
             }
+            return true
         } catch (failure: Throwable) { recordFailure(failure); runCatching { reset() }; throw failure }
     }
 
@@ -92,16 +104,19 @@ object ReceiverPlaybackOutput {
     }
 
     @Synchronized fun reset() { try { video.reset() } finally { audio.reset() } }
-    @Synchronized fun diagnostic(): String =
-        "Video submitted: $videoSubmitted; rendered: ${videoRendered.get()}; PCM buffers: ${audioRendered.get()}" +
-            "\nVideo: ${videoSize?.width ?: 0}x${videoSize?.height ?: 0}; configs: $videoConfigurations; formats: $videoFormats" +
+    fun diagnostic(): String {
+        val size = videoSize
+        return "Video submitted: $videoSubmitted; rendered: ${videoRendered.get()}; PCM buffers: ${audioRendered.get()}" +
+            "\nCodec input retries: video=$videoInputRetries; audio=$audioInputRetries" +
+            "\nVideo: ${size?.width ?: 0}x${size?.height ?: 0}; configs: $videoConfigurations; formats: $videoFormats" +
             if (error) "\nPlayback failed ($failureLocation). Stop and restart; inspect codec/surface support." else ""
+    }
 
     private fun recordFailure(failure: Throwable) {
-        error = true
         // Static source location only: never retain/log a decoder's raw message.
         failureLocation = failure.stackTrace.firstOrNull { it.className.startsWith("dev.frameark.receiver.") }
             ?.let { "${it.fileName}:${it.lineNumber}" } ?: "platform output"
+        error = true
     }
 
     fun renderedVideoFrames(): Long = videoRendered.get()

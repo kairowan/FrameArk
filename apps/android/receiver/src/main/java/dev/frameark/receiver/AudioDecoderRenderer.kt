@@ -7,7 +7,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /** Platform decoder for the documented FANP stereo Opus / AAC-LC subset. */
-class AudioDecoderRenderer(private val onPcm: () -> Unit = {}) {
+class AudioDecoderRenderer(
+    private val onPcm: () -> Unit = {},
+    private val inputIndex: (MediaCodec, Long) -> Int = { decoder, timeout -> decoder.dequeueInputBuffer(timeout) },
+) {
     private var codec: MediaCodec? = null
     private val output = AudioOutputRenderer(onWritten = onPcm)
 
@@ -50,17 +53,20 @@ class AudioDecoderRenderer(private val onPcm: () -> Unit = {}) {
         } catch (error: Throwable) { decoder.release(); throw error }
     }
 
-    fun render(frame: FrameArkNative.MediaFrame) {
+    /** False means temporary backpressure; the caller retains this exact frame. */
+    fun render(frame: FrameArkNative.MediaFrame): Boolean {
         val decoder = codec ?: error("audio decoder not configured")
         drain()
-        val index = decoder.dequeueInputBuffer(20_000)
-        check(index >= 0) { "audio decoder backpressure" }
+        val index = inputIndex(decoder, 0)
+        if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return false
+        check(index >= 0) { "unexpected audio input result" }
         val input = requireNotNull(decoder.getInputBuffer(index))
         input.clear()
         require(frame.payload.size <= input.remaining()) { "encoded audio exceeds input capacity" }
         input.put(frame.payload)
         decoder.queueInputBuffer(index, 0, frame.payload.size, frame.pts, 0)
         drain()
+        return true
     }
 
     fun drain() {

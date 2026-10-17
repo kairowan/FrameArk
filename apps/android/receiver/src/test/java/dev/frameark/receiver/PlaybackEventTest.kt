@@ -30,7 +30,7 @@ class PlaybackEventTest {
         var drains = 0
         var resets = 0
         val pump = MediaPlaybackPump(native { queue.removeFirstOrNull() }, {}, {},
-            eventConsumer = { seen += it }, drainOutput = { drains++ }, resetOutput = { resets++ })
+            eventConsumer = { seen += it; true }, drainOutput = { drains++ }, resetOutput = { resets++ })
         assertTrue(pump.start())
         assertEquals(6, pump.drainOnce())
         assertEquals(0, pump.drainOnce())
@@ -56,5 +56,93 @@ class PlaybackEventTest {
             bridge.load()
             assertThrows(RuntimeException::class.java) { bridge.pollPlaybackEvent() }
         }
+    }
+
+    @Test fun temporary_backpressure_retains_one_exact_event_and_prevents_overtaking() {
+        val queue = ArrayDeque(listOf(event(3, frame(1)), event(4, frame(2)), event(5)))
+        var polls = 0
+        var drains = 0
+        var blocked = true
+        val attempts = mutableListOf<FrameArkNative.PlaybackEvent>()
+        val accepted = mutableListOf<FrameArkNative.PlaybackEvent>()
+        val pump = MediaPlaybackPump(native { polls++; queue.removeFirstOrNull() }, {}, {},
+            eventConsumer = {
+                attempts += it
+                if (blocked) false else { accepted += it; true }
+            }, drainOutput = { drains++ })
+        assertTrue(pump.start())
+        repeat(2) { assertEquals(0, pump.drainOnce()) }
+        assertEquals(1, polls)
+        assertEquals(2, drains)
+        assertSame(attempts[0], attempts[1])
+        assertTrue(accepted.isEmpty())
+        blocked = false
+        assertEquals(3, pump.drainOnce())
+        assertSame(attempts[0], accepted[0])
+        assertEquals(20_000L, (accepted[0] as FrameArkNative.PlaybackEvent.Frame).frame.pts)
+        assertArrayEquals(byteArrayOf(7), (accepted[0] as FrameArkNative.PlaybackEvent.Frame).frame.payload)
+        assertEquals(FrameArkNative.MediaKind.AUDIO, (accepted[1] as FrameArkNative.PlaybackEvent.Frame).frame.kind)
+        assertEquals(FrameArkNative.PlaybackEvent.Reset, accepted[2])
+        assertEquals(3, drains)
+        pump.stop()
+    }
+
+    @Test fun input_deadline_is_absolute_and_stop_discards_unaccepted_frame() {
+        var now = 0L
+        var attempts = 0
+        var resets = 0
+        val queue = ArrayDeque(listOf(event(3, frame(1)), event(5)))
+        val pump = MediaPlaybackPump(native { queue.removeFirstOrNull() }, {}, {},
+            eventConsumer = { attempts++; it is FrameArkNative.PlaybackEvent.Reset },
+            resetOutput = { resets++ }, nanoTime = { now })
+        assertTrue(pump.start())
+        assertEquals(0, pump.drainOnce())
+        now = MediaPlaybackPump.INPUT_RETRY_BUDGET_NS - 1
+        assertEquals(0, pump.drainOnce())
+        now++
+        assertThrows(IllegalStateException::class.java) { pump.drainOnce() }
+        assertEquals(2, attempts)
+        pump.stop()
+        assertEquals(1, resets)
+        assertEquals(0, pump.drainOnce())
+        assertTrue(pump.start())
+        assertEquals(1, pump.drainOnce()) // Reset, never the expired frame.
+        assertEquals(3, attempts)
+        pump.stop()
+    }
+
+    @Test fun accepted_frame_releases_its_retry_budget_for_the_next_frame() {
+        var now = 0L
+        var acceptFirst = false
+        var first: FrameArkNative.PlaybackEvent? = null
+        val queue = ArrayDeque(listOf(event(3, frame(1)), event(4, frame(2))))
+        val pump = MediaPlaybackPump(native { queue.removeFirstOrNull() }, {}, {},
+            eventConsumer = { event ->
+                if (first == null) first = event
+                event === first && acceptFirst
+            }, nanoTime = { now })
+        pump.start()
+        assertEquals(0, pump.drainOnce())
+        now = MediaPlaybackPump.INPUT_RETRY_BUDGET_NS - 1
+        acceptFirst = true
+        assertEquals(1, pump.drainOnce())
+        now += MediaPlaybackPump.INPUT_RETRY_BUDGET_NS - 1
+        assertEquals(0, pump.drainOnce())
+        now++
+        assertThrows(IllegalStateException::class.java) { pump.drainOnce() }
+        pump.stop()
+    }
+
+    @Test fun consumer_exception_is_not_reclassified_as_retryable_backpressure() {
+        var resets = 0
+        var calls = 0
+        val pump = MediaPlaybackPump(native { event(3, frame(1)) }, {}, {},
+            eventConsumer = { calls++; error("decoder failure") }, resetOutput = { resets++ })
+        pump.start()
+        assertThrows(IllegalStateException::class.java) { pump.drainOnce() }
+        pump.stop()
+        assertEquals(1, calls)
+        assertEquals(1, resets)
+        assertEquals(0, pump.drainOnce())
     }
 }

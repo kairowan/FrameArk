@@ -21,6 +21,14 @@ key attestation/hardware-security guarantees and automatic enrollment are absent
 
 ## Current status
 
+Android Native input backpressure now has bounded nonblocking retry and display
+polling no longer waits on codec work. Deterministic regressions verify both
+faults and real AAC/H.264 input recovery. Full loopback remains intermittent,
+including startup and mid-stream queue-unavailable failures after these fixes; successful
+repetitions do not establish stability. No device/milestone maturity is raised.
+See [ADR 0136](adr/0136-android-codec-backpressure.md) and
+[all results](evidence/2026-10-17-codec-backpressure/README.md).
+
 DLNA's pre-alpha Rust API now requires `with_backend` for output mutations;
 `new` is unbound and fails valid mutation commands with SOAP 501. `state_mut`
 has been removed. Output acceptance, failure cleanup and TCP dispatch have

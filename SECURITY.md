@@ -374,6 +374,13 @@ converts to microseconds, rejects overflow/zero clocks and timestamps over five
 seconds ahead of the first-arrival clock, and never loses reset to a full queue.
 Kotlin validates envelopes before dispatch. H.264/AAC-LC/Opus codec input is
 bounded by platform buffers; periodic output drains are bounded to 16 buffers.
+Temporary input unavailability now retains at most one validated event outside
+the Rust queue (at most 4 MiB payload), with an absolute 500 ms monotonic retry
+budget. Retries do not renew it or let later frames/config/reset overtake it;
+explicit Stop discards it. Other codec errors and exhausted bounds still fail.
+This cannot preempt a stalled native codec call. Display/diagnostic reads use
+published scalar/immutable values without waiting on codec work; mutations remain
+serialized. See [ADR 0136](docs/adr/0136-android-codec-backpressure.md).
 PCM output owns at most 64 buffers / 256 KiB, retains partial non-blocking
 writes, and fails on negative writes or exhausted capacity. These limits do
 not include codec allocations or transient JNI/Java copies. Surface destruction,

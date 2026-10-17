@@ -15,19 +15,24 @@ class MediaPlaybackPump(
     maxFramesPerDrain: Int = DEFAULT_MAX_FRAMES_PER_DRAIN,
     private val videoConfigConsumer: (FrameArkNative.VideoConfig) -> Unit = {},
     private val audioConfigConsumer: (FrameArkNative.AudioConfig) -> Unit = {},
-    private val eventConsumer: ((FrameArkNative.PlaybackEvent) -> Unit)? = null,
+    private val eventConsumer: ((FrameArkNative.PlaybackEvent) -> Boolean)? = null,
     private val drainOutput: () -> Unit = {},
     private val resetOutput: () -> Unit = {},
+    private val nanoTime: () -> Long = System::nanoTime,
 ) {
     companion object {
         const val DEFAULT_MAX_FRAMES_PER_DRAIN = 8
         const val MAX_FRAMES_PER_DRAIN = 32
+        // OS input retry budget, not a second media clock or a network timeout.
+        const val INPUT_RETRY_BUDGET_NS = 500_000_000L
     }
 
     private val drainLimit = maxFramesPerDrain.also {
         require(it in 1..MAX_FRAMES_PER_DRAIN) { "drain limit is outside the bounded range" }
     }
     private var active = false
+    private var pending: FrameArkNative.PlaybackEvent? = null
+    private var pendingSince = 0L
 
     /** Loads the ABI-compatible bridge and enables polling. */
     fun start(): Boolean {
@@ -42,6 +47,8 @@ class MediaPlaybackPump(
     /** Stops polling; queued frames remain owned by Rust until its lifecycle stops. */
     fun stop() {
         active = false
+        pending = null
+        pendingSince = 0L
         resetOutput()
     }
 
@@ -57,8 +64,15 @@ class MediaPlaybackPump(
         eventConsumer?.let { consume ->
             var count = 0
             while (count < drainLimit) {
-                val event = native.pollPlaybackEvent() ?: break
-                consume(event)
+                val event = pending ?: native.pollPlaybackEvent()?.also {
+                    pending = it
+                    pendingSince = nanoTime()
+                } ?: break
+                check(nanoTime() - pendingSince < INPUT_RETRY_BUDGET_NS) { "codec input retry deadline expired" }
+                // Retain just this event and yield. No later config/frame/reset
+                // may overtake it; no busy wait or extra encoded-frame queue.
+                if (!consume(event)) break
+                pending = null
                 count++
             }
             drainOutput()

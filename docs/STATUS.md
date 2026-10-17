@@ -91,6 +91,15 @@ and any interactions are not yet resolved. Earlier successful evidence is not a
 current stability guarantee. See the [comparison record](evidence/2026-10-17-dlna-subtitles/README.md).
 M1/M2 stability and teardown remain open; no stable-preview claim is made.
 
+**Native codec-boundary corrections:** deterministic regressions now distinguish
+temporary MediaCodec input unavailability from actual failure and prevent
+display/diagnostic reads from blocking behind codec work. One retained event,
+zero-timeout input polling and a fixed 500 ms retry budget preserve ordering and
+bounded cleanup. Six subsequent loopback runs passed, but startup and mid-stream
+queue failures also occurred with the fixes; this is partial correction, not closure of the
+Native instability issue. See [ADR 0136](adr/0136-android-codec-backpressure.md)
+and [complete evidence](evidence/2026-10-17-codec-backpressure/README.md).
+
 | Milestone | Evidence already merged | Exit gate still open | Status |
 |---|---|---|---|
 | M0 工程与规范基础 | Rust workspace, Android shell, licenses/governance, CI/security gates including required `framearkd` Linux listener smoke, Windows/macOS Rust workspace format/test/build matrix and bounded `framearkd` startup smoke, ADR series, repository policy checks, Android native-package verification, deterministic SPDX SBOM generation, release APK/source/checksum publication, GitHub OIDC provenance attestations for published artifacts | Non-Linux media/session runtime evidence beyond startup, platform signing policy, and final multi-platform release baseline | Partial |
