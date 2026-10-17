@@ -63,8 +63,16 @@ The screen reports video submissions, frame-rendered callbacks and completed
 PCM buffer writes (not measured audible output). Destroying an active surface
 stops the service; an idle listener may remain while sharing a pairing ticket.
 Keep this page foreground; background playback and rotation
-continuation are not implemented. Codec setup/backpressure failure stops playback
-and reports a static source location without recording media or peer details.
+continuation are not implemented. Temporary codec input unavailability retains
+one access unit for nonblocking retry, with an absolute 500 ms budget. Display
+and diagnostic polling do not wait for codec work. Actual codec errors or expired
+retry/backpressure budgets stop playback
+and report a static source location without recording media or peer details.
+
+These corrections do not close the intermittent startup/runtime queue-stall issue;
+see [ADR 0136](../../../docs/adr/0136-android-codec-backpressure.md) and the
+[complete regression record](../../../docs/evidence/2026-10-17-codec-backpressure/README.md).
+Native playback remains Experimental, not stable-preview approved.
 
 Only Annex-B H.264 with initial SPS/PPS/keyframe, raw AAC-LC, or 48 kHz mapping-0
 Opus mono/stereo are in this experimental path. See

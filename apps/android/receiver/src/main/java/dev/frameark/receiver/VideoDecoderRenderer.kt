@@ -17,6 +17,7 @@ class VideoDecoderRenderer(
     private val codecFactory: (String) -> MediaCodec = MediaCodec::createDecoderByType,
     private val onRendered: () -> Unit = {},
     private val onFormat: (Int, Int) -> Unit = { _, _ -> },
+    private val inputIndex: (MediaCodec, Long) -> Int = { decoder, timeout -> decoder.dequeueInputBuffer(timeout) },
 ) {
     private var codec: MediaCodec? = null
     private var configuredSurface: Surface? = null
@@ -39,12 +40,13 @@ class VideoDecoderRenderer(
         }
     }
 
-    /** Queues one encoded access unit and drains all currently available output. */
-    fun render(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) {
+    /** False retains caller ownership of an access unit while the codec is full. */
+    fun render(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean): Boolean {
         val decoder = codec ?: error("video decoder is not configured")
         drain(decoder)
-        val inputIndex = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
-        require(inputIndex >= 0) { "video decoder input is backpressured" }
+        val inputIndex = inputIndex(decoder, 0)
+        if (inputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) return false
+        require(inputIndex >= 0) { "unexpected video input result" }
         val input = decoder.getInputBuffer(inputIndex) ?: error("video input buffer unavailable")
         input.clear()
         require(data.size <= input.remaining()) { "encoded video exceeds decoder input capacity" }
@@ -57,6 +59,7 @@ class VideoDecoderRenderer(
             if (keyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0,
         )
         drain(decoder)
+        return true
     }
 
     /** Stops and releases decoder state. The caller retains ownership of the Surface. */
@@ -111,6 +114,5 @@ class VideoDecoderRenderer(
 
     private companion object {
         const val MIME_H264 = "video/avc"
-        const val INPUT_TIMEOUT_US = 20_000L
     }
 }
